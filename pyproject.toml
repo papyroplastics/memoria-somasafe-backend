@@ -8,6 +8,7 @@ dependencies = [
     "tensorflow==2.21.*",
     "matplotlib==3.10.*",
     "pyqt6==6.11.*",
+    "ai-edge-litert>=2.1.4",
 ]
 
 [dependency-groups]

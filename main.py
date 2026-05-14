@@ -1,4 +1,5 @@
 import math
+import pathlib
 import tensorflow as tf
 import matplotlib.pyplot as plt
 from impl.model import BasicNN
@@ -6,8 +7,17 @@ from impl.training import train_loop
 
 tf.random.set_seed(1234)
 
+# Output files
+output_dir = pathlib.Path('output')
+
+trainable_saved_model_dir = output_dir / 'train-saved-model'
+optimized_saved_model_dir = output_dir / 'opti-saved-model'
+
+trainable_compiled_model_file =  output_dir / 'train-compiled-model.tflite'
+optimized_compiled_model_file =  output_dir / 'opti-compiled-model.tflite'
+
 # Dataset initialization
-dataset_size=500
+dataset_size = 500
 dataset_split = 0.8
 batch_size = 50
 
@@ -48,26 +58,27 @@ train_loop(
 )
 
 
-# Save and load SavedModel
-saved_model_path = 'saved_model'
-tf.saved_model.save(model, saved_model_path, signatures={
+# Store as SavedModel and load trainable variant
+tf.saved_model.save(model, str(trainable_saved_model_dir), signatures={
     'eval': model.eval.get_concrete_function(),
     'train': model.train.get_concrete_function()
 })
-saved_model = tf.saved_model.load(saved_model_path)
+tf.saved_model.save(model, str(optimized_saved_model_dir), signatures={
+    'eval': model.eval.get_concrete_function(),
+})
+saved_model = tf.saved_model.load(str(trainable_saved_model_dir))
 
-# Transform SavedModel to CompiledModel
-converter = tf.lite.TFLiteConverter.from_saved_model(saved_model_path) # type: ignore
-converter.target_spec.supported_ops = [
-    tf.lite.OpsSet.TFLITE_BUILTINS, # type: ignore
-    tf.lite.OpsSet.SELECT_TF_OPS    # type: ignore
-]
+# Create trainable and quantized CompiledModel 
+converter = tf.lite.TFLiteConverter.from_saved_model(str(trainable_saved_model_dir)) # type: ignore
+converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS] # type: ignore
 converter.experimental_enable_resource_variables = True
 compiled_model_buf = converter.convert()
+trainable_compiled_model_file.write_bytes(compiled_model_buf)
 
-compiled_model_store_path = 'compiled_model.tflite'
-with open(compiled_model_store_path, 'wb') as f:
-    f.write(compiled_model_buf)
+converter = tf.lite.TFLiteConverter.from_saved_model(str(optimized_saved_model_dir)) # type: ignore
+converter.optimizations = [tf.lite.Optimize.DEFAULT] # type: ignore
+compiled_model_buf = converter.convert()
+optimized_compiled_model_file.write_bytes(compiled_model_buf)
 
 # Re-train saved model
 train_loop(
@@ -99,3 +110,4 @@ plt.plot(test_x, pred_saved_y, 'y-', label="Fine-tuned model result")
 
 plt.legend()
 plt.show()
+
