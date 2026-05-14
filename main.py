@@ -61,7 +61,9 @@ train_loop(
 # Store as SavedModel and load trainable variant
 tf.saved_model.save(model, str(trainable_saved_model_dir), signatures={
     'eval': model.eval.get_concrete_function(),
-    'train': model.train.get_concrete_function()
+    'train': model.train.get_concrete_function(),
+    'save': model.save.get_concrete_function(),
+    'restore': model.restore.get_concrete_function(),
 })
 tf.saved_model.save(model, str(optimized_saved_model_dir), signatures={
     'eval': model.eval.get_concrete_function(),
@@ -102,12 +104,21 @@ plt.plot(train_x, train_y, 'b.', label="Training data")
 test_x = tf.reshape(tf.range(0, 1, delta=1/100, dtype=tf.float32) * 2 * math.pi, (-1, 1))
 test_dataset = tf.data.Dataset.from_tensor_slices((test_x)).batch(model.batch_size, drop_remainder=True)
 
-pred_tf_y = tf.concat([model.eval(batch_x)['result'] for batch_x in test_dataset], 0)
+pred_before_restore_y = tf.concat([model.eval(batch_x)['result'] for batch_x in test_dataset], 0)
 pred_saved_y = tf.concat([saved_model.eval(batch_x)['result'] for batch_x in test_dataset], 0)
 
-plt.plot(test_x, pred_tf_y, 'g-', label="Base model result")
-plt.plot(test_x, pred_saved_y, 'y-', label="Fine-tuned model result")
+# Load trained weights from the saved model back into the original model.
+trained_parameters = saved_model.save()['parameters']
+model.restore(trained_parameters)
+
+pred_after_restore_y = tf.concat([model.eval(batch_x)['result'] for batch_x in test_dataset], 0)
+
+transfer_error = tf.reduce_max(tf.abs(pred_after_restore_y - pred_saved_y))
+print(f"restore max abs error={transfer_error:.8f}")
+
+plt.plot(test_x, pred_before_restore_y, 'g-', label="Original model result")
+plt.plot(test_x, pred_after_restore_y, 'y-', label="Restored model result")
+plt.plot(test_x, pred_saved_y, 'm-', label="Fine-tuned saved model result")
 
 plt.legend()
 plt.show()
-

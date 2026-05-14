@@ -52,6 +52,16 @@ class BasicNN(tf.Module):
             tf.TensorSpec(shape=self.out_shape, dtype=tf.float32),
         ])
 
+        self.parameter_sizes = [
+            int(var.shape.num_elements()) for var in self.trainable_variables
+        ]
+        self.total_parameter_size = sum(self.parameter_sizes)
+
+        self.save = tf.function(self.save_eager, input_signature=[])
+        self.restore = tf.function(self.restore_eager, input_signature=[
+            tf.TensorSpec(shape=(self.total_parameter_size,), dtype=tf.float32),
+        ])
+
     def _evaluate_model(self, data):
         activation = self.in_layer(data)
 
@@ -83,3 +93,25 @@ class BasicNN(tf.Module):
         }
 
     train: tf.types.experimental.PolymorphicFunction = unbound # type: ignore
+
+    def save_eager(self):
+        return {
+            "parameters": tf.concat([
+                tf.reshape(var, (-1,)) for var in self.trainable_variables
+            ], axis=0)
+        }
+
+    save: tf.types.experimental.PolymorphicFunction = unbound # type: ignore
+
+    def restore_eager(self, parameters: tf.Tensor):
+        idx = 0
+        for i, var in enumerate(self.trainable_variables):
+            size = self.parameter_sizes[i]
+            var.assign(tf.reshape(parameters[idx:idx + size], var.shape))
+            idx += size
+
+        return {
+            "parameter_count": tf.constant(self.total_parameter_size, dtype=tf.int32)
+        }
+
+    restore: tf.types.experimental.PolymorphicFunction = unbound # type: ignore
