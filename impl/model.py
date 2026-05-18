@@ -1,6 +1,6 @@
 import math
 import tensorflow as tf
-from .utils import mse_loss
+from .training import mse_loss
 
 class UnboundError(NotImplementedError):
     def __init__(self, message: str):
@@ -8,7 +8,7 @@ class UnboundError(NotImplementedError):
         super().__init__(self.message)
 
 def unbound(*_, **__):
-    raise UnboundError("This function is bound dynamically at init time")
+    raise UnboundError('This function is bound dynamically at init time')
 
 class Dense(tf.Module):
     def __init__(self, in_dim, out_dim, activation=tf.tanh):
@@ -72,7 +72,7 @@ class BasicNN(tf.Module):
 
     def eval_eager(self, data: tf.Tensor):
         return {
-            "result": self._evaluate_model(data)
+            'result': self._evaluate_model(data)
         }
 
     eval: tf.types.experimental.PolymorphicFunction = unbound # type: ignore
@@ -89,14 +89,14 @@ class BasicNN(tf.Module):
             var.assign_sub(self.learning_rate * self.velocity[i])
 
         return {
-            "loss": loss
+            'loss': loss
         }
 
     train: tf.types.experimental.PolymorphicFunction = unbound # type: ignore
 
     def save_eager(self):
         return {
-            "parameters": tf.concat([
+            'parameters': tf.concat([
                 tf.reshape(var, (-1,)) for var in self.trainable_variables
             ], axis=0)
         }
@@ -111,7 +111,7 @@ class BasicNN(tf.Module):
             idx += size
 
         return {
-            "parameter_count": tf.constant(self.total_parameter_size, dtype=tf.int32)
+            'parameter_count': tf.constant(self.total_parameter_size, dtype=tf.int32)
         }
 
     restore: tf.types.experimental.PolymorphicFunction = unbound # type: ignore

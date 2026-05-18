@@ -9,6 +9,7 @@ dependencies = [
     "matplotlib==3.10.*",
     "pyqt6==6.11.*",
     "ai-edge-litert>=2.1.4",
+    "numpy>=2.4.*",
 ]
 
 [dependency-groups]
