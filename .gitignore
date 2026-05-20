@@ -1,5 +1,3 @@
 __pycache__
-output/
-saved_model
-compiled_model.tflite
+models/
 uv.lock

@@ -9,7 +9,7 @@ from impl.saving import save_odt, save_opti
 tf.random.set_seed(1234)
 
 # Output files
-OUTPUT_DIR = pathlib.Path('output')
+OUTPUT_DIR = pathlib.Path('models')
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # Dataset initialization
@@ -55,7 +55,7 @@ train_loop(
 
 # Save trainable an quantized models
 saved_model = save_odt(OUTPUT_DIR, 'pre-train', model)
-save_opti(OUTPUT_DIR, 'pre-train', model, eval_dataset.take(100))
+save_opti(OUTPUT_DIR, 'pre-train', model, eval_dataset)
 
 # Re-train saved model
 train_loop(
@@ -93,7 +93,7 @@ print(f"restore max abs error={transfer_error:.8f}")
 
 # Save trained models
 save_odt(OUTPUT_DIR, 'post-train', model)
-save_opti(OUTPUT_DIR, 'post-train', model, eval_dataset.take(100))
+save_opti(OUTPUT_DIR, 'post-train', model, eval_dataset)
 
 # Plot results
 plt.plot(test_x, pred_before_restore_y, 'g-', label='Original model result')

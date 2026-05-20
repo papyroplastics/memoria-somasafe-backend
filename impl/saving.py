@@ -39,7 +39,10 @@ def save_opti(output_dir: pathlib.Path, prefix: str, model: BasicNN,
 
     converter.optimizations = [tf.lite.Optimize.DEFAULT] # type: ignore
     converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS_INT8] # type: ignore
-    converter.target_spec.supported_types = [tf.int8] # type: ignore
+    converter.target_spec.supported_types = [tf.int8]
+    converter.inference_input_type = tf.int8
+    converter.inference_output_type = tf.int8
+
     converter.representative_dataset = representative_dataset_iter
 
     optimized_compiled_model_buf = converter.convert()
