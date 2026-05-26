@@ -1,10 +1,11 @@
 [project]
-name = "tensorflow-example"
+name = "somasafe-backend"
 version = "1.0.0"
-description = "Aprendiendo TensorFlow"
+description = "Backend component of SomaSafe"
 readme = "README.md"
 requires-python = "==3.13.*"
 dependencies = [
+    "fastapi[standard]>=0.136.3",
     "tensorflow==2.21.*",
     "matplotlib==3.10.*",
     "pyqt6==6.11.*",
@@ -15,7 +16,6 @@ dependencies = [
 [dependency-groups]
 dev = [
   "ipython",
-  "pyrefly",
   "types-tensorflow",
 ]
 
@@ -28,3 +28,5 @@ project-includes = [
 [tool.pyrefly.errors]
 implicit-import = false
 
+[tool.fastapi]
+entrypoint = "api:app"
