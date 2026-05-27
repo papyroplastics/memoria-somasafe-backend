@@ -1,24 +1,25 @@
+from enum import Enum
+from pathlib import Path
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
+
+class ModelType(str, Enum):
+    quant = "quantized"
+    train = "trainable"
 
 app = FastAPI()
 
-class Item(BaseModel):
-    name: str
-    price: float
-    is_offer: bool | None = None
+models_dir = Path('models/')
+model_file_train = models_dir / "post-train-odt.tflite"
+model_file_quant = models_dir / "post-train-opti.tflite"
 
+@app.get("/model/{type}", response_class=FileResponse)
+async def main(type: ModelType, version: int | None = None):
+    if type == ModelType.train:
+        if version == None:
+            return FileResponse(path=model_file_train, filename="trainable.tflite")
 
-@app.get("/")
-def read_root():
-    return {"Hello": "World"}
-
-@app.get("/items/{item_id}")
-def read_item(item_id: int, q: str | None = None):
-    return {"item_id": item_id, "q": q}
-
-
-@app.put("/items/{item_id}")
-def update_item(item_id: int, item: Item):
-    return {"item_name": item.name, "item_id": item_id}
-
+    if type == ModelType.quant:
+        if version == None:
+            return FileResponse(path=model_file_quant, filename="quantized.tflite")

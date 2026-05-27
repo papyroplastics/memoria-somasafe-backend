@@ -2,9 +2,9 @@ import math
 import pathlib
 import tensorflow as tf
 import matplotlib.pyplot as plt
-from impl.model import BasicNN
-from impl.training import train_loop
-from impl.saving import save_odt, save_opti
+from worker.model import BasicNN
+from worker.training import train_loop
+from worker.saving import save_odt, save_opti
 
 tf.random.set_seed(1234)
 
