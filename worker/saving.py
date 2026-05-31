@@ -1,8 +1,11 @@
 import pathlib
 import tensorflow as tf
-from .model import BasicNN
+from .model import BasicNN, ConditionalLSTMAutoencoder
 
-def save_odt(outpuy_dir: pathlib.Path, prefix: str, model: BasicNN):
+# Any model exposing eval/train/save/restore tf.function signatures.
+TrainableModel = BasicNN | ConditionalLSTMAutoencoder
+
+def save_odt(outpuy_dir: pathlib.Path, prefix: str, model: TrainableModel):
     saved_model_dir = outpuy_dir / (prefix + '-odt-model')
     compiled_model_file = outpuy_dir / (prefix + '-odt.tflite')
 
@@ -21,7 +24,7 @@ def save_odt(outpuy_dir: pathlib.Path, prefix: str, model: BasicNN):
 
     return tf.saved_model.load(str(saved_model_dir))
 
-def save_opti(output_dir: pathlib.Path, prefix: str, model: BasicNN,
+def save_opti(output_dir: pathlib.Path, prefix: str, model: TrainableModel,
                    representative_dataset: tf.data.Dataset):
 
     saved_model_dir = output_dir / (prefix + '-opti-model')
@@ -32,8 +35,10 @@ def save_opti(output_dir: pathlib.Path, prefix: str, model: BasicNN,
     })
 
     def representative_dataset_iter():
-        for x, y in representative_dataset.batch(1):
-            yield ('eval', { 'data': x, })
+        # Each element must be a feed dict matching the model's `eval` signature
+        # argument names, already batched at the model's fixed batch size.
+        for feed in representative_dataset:
+            yield ('eval', feed)
 
     converter = tf.lite.TFLiteConverter.from_saved_model(str(saved_model_dir)) # type: ignore
 

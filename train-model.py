@@ -55,7 +55,8 @@ train_loop(
 
 # Save trainable an quantized models
 saved_model = save_odt(OUTPUT_DIR, 'pre-train', model)
-save_opti(OUTPUT_DIR, 'pre-train', model, eval_dataset)
+rep_dataset = eval_dataset.map(lambda x, y: {'data': x})
+save_opti(OUTPUT_DIR, 'pre-train', model, rep_dataset)
 
 # Re-train saved model
 train_loop(
@@ -93,7 +94,7 @@ print(f"restore max abs error={transfer_error:.8f}")
 
 # Save trained models
 save_odt(OUTPUT_DIR, 'post-train', model)
-save_opti(OUTPUT_DIR, 'post-train', model, eval_dataset)
+save_opti(OUTPUT_DIR, 'post-train', model, rep_dataset)
 
 # Plot results
 plt.plot(test_x, pred_before_restore_y, 'g-', label='Original model result')

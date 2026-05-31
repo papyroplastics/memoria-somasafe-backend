@@ -1,0 +1,196 @@
+import argparse
+import tempfile
+import urllib.request
+import zipfile
+import pickle as pkl
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+DEFAULT_DATASETS_DIR = Path('datasets')
+RAW_SUBDIR = 'PPG_FieldStudy'
+PROCESSED_SUBDIR = 'ppg-dalia-processed'
+PARAMS_FILE = 'params.csv'
+
+DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'
+
+CHANNELS = ['BVP', 'ACC']
+
+
+def download_dataset(datasets_dir: Path, raw_dir: Path):
+    datasets_dir.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        tmp_dir = Path(tmp)
+        outer_zip = tmp_dir / 'ppg-dalia.zip'
+        print(f"Downloading {DATASET_URL} ...")
+        urllib.request.urlretrieve(DATASET_URL, outer_zip)
+
+        with zipfile.ZipFile(outer_zip) as zf:
+            zf.extractall(tmp_dir)
+
+        inner_zip = tmp_dir / 'data.zip'
+        print(f"Extracting dataset into {datasets_dir}/ ...")
+        with zipfile.ZipFile(inner_zip) as zf:
+            zf.extractall(datasets_dir)
+
+    print(f"Raw dataset ready at {raw_dir}")
+
+
+def load_raw_pickle(raw_dir: Path, subject_id: int) -> dict | None:
+    path = raw_dir / f'S{subject_id}' / f'S{subject_id}.pkl'
+    if not path.exists():
+        return None
+
+    with open(path, 'rb') as f:
+        data = pkl.load(f, encoding='latin1')
+    return data
+
+
+def get_static_vector(quest: dict) -> np.ndarray:
+    gender_raw = quest.get('Gender', 'm').strip().lower()
+    gender_norm = 1.0 if gender_raw == 'f' else 0.0
+
+    age_norm    = (quest.get('AGE',     30) -  20) / 20   # 20  - 40
+    height_norm = (quest.get('HEIGHT', 150) - 100) / 100  # 100 - 200
+    weight_norm = (quest.get('WEIGHT',  70) -  40) / 110  # 40  - 150
+    skin_norm   = (quest.get('SKIN',     3) -   1) / 5    # 1   - 6
+    sport_norm  = (quest.get('SPORT',    3) -   1) / 6    # 1   - 6
+
+    return np.array([
+        gender_norm,
+        age_norm,
+        height_norm,
+        weight_norm,
+        skin_norm,
+        sport_norm,
+    ], dtype=np.float32)
+
+
+
+def process_stage_1(
+    raw_dir: Path, processed_dir: Path, subject_id: int,
+) -> tuple[np.ndarray, np.ndarray] | None:
+    print(f"--- Processing Subject S{subject_id} (stage 1) ---")
+
+    raw_data = load_raw_pickle(raw_dir, subject_id)
+    if raw_data is None:
+        print(f"   File not found for subject {subject_id}")
+        return None
+
+    wrist = raw_data['signal']['wrist']
+    bvp = wrist['BVP'].flatten()
+    target_len = len(bvp)
+
+    acc_g = wrist['ACC'] / 64.0
+    acc_mag = np.sqrt(np.sum(acc_g**2, axis=1))
+    acc_mag = np.convolve(acc_mag, np.ones(5), mode='same')
+    acc = np.interp(np.linspace(0, 1, target_len), np.linspace(0, 1, len(acc_mag)), acc_mag)
+
+    signal_matrix = np.stack([bvp, acc], axis=1)
+    bounds = np.stack([signal_matrix.min(axis=0), signal_matrix.max(axis=0)], axis=1)
+
+    # Activity context represents the movement in the last two minutes
+    window_samples = 2 * 60 * 64
+    rolling = pd.Series(acc).rolling(window_samples)
+
+    act_mean: np.ndarray = rolling.mean().values
+    act_std: np.ndarray = rolling.std().values
+    activity_context_matrix = np.column_stack((act_mean, act_std))
+
+    # First window_samples values will be null after rooling ops so we cull them
+    activity_context_matrix = activity_context_matrix [window_samples-1:]
+    signal_matrix = signal_matrix [window_samples-1:]
+
+
+    static_vector = get_static_vector(raw_data['questionnaire'])
+
+    save_dir = processed_dir / f"S{subject_id}"
+    save_dir.mkdir(parents=True, exist_ok=True)
+    np.save(save_dir / 'context.npy', activity_context_matrix.astype(np.float32))
+    np.save(save_dir / 'static.npy', static_vector.astype(np.float32))
+
+    print(f"   Shape: {signal_matrix.shape}")
+    return signal_matrix, bounds
+
+
+def process_stage_2(
+    processed_dir: Path, subject_id: int,
+    signal_matrix: np.ndarray, global_min: np.ndarray, global_max: np.ndarray,
+):
+    print(f"--- Processing Subject S{subject_id} (stage 2) ---")
+
+    normalized_matrix = (signal_matrix - global_min) / (global_max - global_min)
+
+    save_dir = processed_dir / f"S{subject_id}"
+    np.save(save_dir / 'signal.npy', normalized_matrix.astype(np.float32))
+    print(f"   Saved to {save_dir}")
+
+
+def available_subject_ids(raw_dir: Path) -> list[int]:
+    return sorted(
+        int(p.name[1:]) for p in raw_dir.glob('S*')
+        if p.is_dir() and p.name[1:].isdigit()
+    )
+
+
+def process_all(raw_dir: Path, processed_dir: Path) -> list[int]:
+    stage1: dict[int, np.ndarray] = {}
+    global_min: np.ndarray | None = None
+    global_max: np.ndarray | None = None
+
+    for subject_id in available_subject_ids(raw_dir):
+        try:
+            result = process_stage_1(raw_dir, processed_dir, subject_id)
+        except Exception as e:
+            print(f"Error processing S{subject_id}: {e}")
+            continue
+        if result is None:
+            continue
+
+        signal_matrix, bounds = result
+        stage1[subject_id] = signal_matrix
+        subject_min, subject_max = bounds[:, 0], bounds[:, 1]
+        global_min = subject_min if global_min is None else np.minimum(global_min, subject_min)
+        global_max = subject_max if global_max is None else np.maximum(global_max, subject_max)
+
+    if global_min is None or global_max is None:
+        return []
+
+    pd.DataFrame({
+        'channel': CHANNELS,
+        'min': global_min,
+        'max': global_max,
+    }).to_csv(processed_dir / PARAMS_FILE, index=False)
+
+    for subject_id, signal_matrix in stage1.items():
+        process_stage_2(processed_dir, subject_id, signal_matrix, global_min, global_max)
+
+    return list(stage1)
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        'datasets_dir', nargs='?', type=Path, default=DEFAULT_DATASETS_DIR,
+        help=f"Datasets directory (default: {DEFAULT_DATASETS_DIR})")
+    args = parser.parse_args()
+
+    datasets_dir: Path = args.datasets_dir
+    raw_dir = datasets_dir / RAW_SUBDIR
+    processed_dir = datasets_dir / PROCESSED_SUBDIR
+
+    if raw_dir.is_dir():
+        print(f"Raw dataset already present at {raw_dir}")
+    else:
+        download_dataset(datasets_dir, raw_dir)
+
+    if processed_dir.is_dir():
+        print(f"Processed dataset already present at {processed_dir}")
+        exit()
+
+    processed_dir.mkdir(parents=True, exist_ok=True)
+    written = process_all(raw_dir, processed_dir)
+    print(f"\nProcessed {len(written)} subjects into {processed_dir}")
+
+
