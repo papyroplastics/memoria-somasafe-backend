@@ -11,11 +11,20 @@ import pandas as pd
 DEFAULT_DATASETS_DIR = Path('datasets')
 RAW_SUBDIR = 'PPG_FieldStudy'
 PROCESSED_SUBDIR = 'ppg-dalia-processed'
+SUBJECTS_SUBDIR = 'subjects'
+FEATURE_SUBDIR = 'feature-anomaly'
 PARAMS_FILE = 'params.csv'
 
 DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'
 
 CHANNELS = ['BVP', 'ACC']
+
+SAMPLE_RATE = 64                  # hz
+WINDOW_SIZE = SAMPLE_RATE * 8     # 8 s windows
+SHIFT = SAMPLE_RATE * 3           # 3 s stride
+ANOMALY_PROB = 0.5
+FEATURE_SEED = 1234
+N_FEATURES = 17  # keep in sync with extract_features
 
 
 def download_dataset(datasets_dir: Path, raw_dir: Path):
@@ -168,6 +177,99 @@ def process_all(raw_dir: Path, processed_dir: Path) -> list[int]:
 
     return list(stage1)
 
+
+# --- Synthetic anomalies + feature extraction for the FeatureMLP classifier ---
+
+def inject_anomaly(window: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+    """Corrupt the BVP channel of a clean window to simulate an anomaly. The
+    signal is min-max normalized to ~[0, 1], so the perturbations below are
+    large relative to the clean dynamic range and clearly separable."""
+    w = window.copy()
+    length = w.shape[0]
+    seg_len = int(rng.integers(length // 8, length // 2))
+    start = int(rng.integers(0, length - seg_len))
+    seg = slice(start, start + seg_len)
+    kind = int(rng.integers(0, 5))
+
+    if kind == 0:        # transient spike
+        w[seg, 0] += rng.uniform(0.5, 1.0) * rng.choice([-1.0, 1.0])
+    elif kind == 1:      # flatline / sensor dropout
+        w[seg, 0] = w[start, 0]
+    elif kind == 2:      # amplitude blow-up around the segment mean
+        mean = w[seg, 0].mean()
+        w[seg, 0] = mean + (w[seg, 0] - mean) * rng.uniform(2.0, 4.0)
+    elif kind == 3:      # low-frequency baseline wander over the whole window
+        t = np.linspace(0, rng.uniform(1.0, 3.0) * np.pi, length)
+        w[:, 0] += 0.3 * np.sin(t + rng.uniform(0, np.pi))
+    else:                # localized noise burst
+        w[seg, 0] += rng.normal(0.0, 0.25, size=seg_len)
+
+    return w
+
+
+def extract_features(window: np.ndarray, sample_rate: int) -> np.ndarray:
+    """Cheap, on-device-replicable feature vector for a [L, 2] (BVP, ACC) window."""
+    feats: list[float] = []
+    for channel in (window[:, 0], window[:, 1]):
+        feats += [
+            float(channel.mean()),
+            float(channel.std()),
+            float(channel.min()),
+            float(channel.max()),
+            float(channel.max() - channel.min()),
+            float(np.sqrt(np.mean(channel ** 2))),
+            float(np.mean(np.abs(np.diff(channel)))),
+        ]
+
+    bvp = window[:, 0] - window[:, 0].mean()
+    feats.append(float(np.mean(np.abs(np.diff(np.sign(bvp)))) / 2))  # zero-crossing rate
+
+    spectrum = np.abs(np.fft.rfft(bvp))
+    freqs = np.fft.rfftfreq(len(bvp), d=1.0 / sample_rate)
+    feats.append(float(freqs[np.argmax(spectrum)]))                  # dominant frequency
+    band = (freqs >= 0.7) & (freqs <= 3.5)                           # plausible HR band
+    feats.append(float(spectrum[band].sum() / (spectrum.sum() + 1e-8)))
+
+    return np.asarray(feats, dtype=np.float32)
+
+
+def build_feature_cache(subjects_dir: Path, feature_dir: Path, window_size: int,
+                        shift: int, sample_rate: int, anomaly_prob: float, seed: int):
+    rng = np.random.default_rng(seed)
+    features: list[np.ndarray] = []
+    labels: list[float] = []
+
+    print("Building feature/anomaly dataset from:", end="")
+    for subject_dir in sorted(subjects_dir.glob('S*')):
+        signal = np.load(subject_dir / 'signal.npy')
+        window_count = (len(signal) - window_size) // shift + 1
+        for i in range(window_count):
+            window = signal[i * shift: i * shift + window_size]
+            if rng.random() < anomaly_prob:
+                window = inject_anomaly(window, rng)
+                labels.append(1.0)
+            else:
+                labels.append(0.0)
+            features.append(extract_features(window, sample_rate))
+        print(f" {subject_dir.name}", end="", flush=True)
+    print()
+
+    x = np.stack(features)
+    y = np.asarray(labels, dtype=np.float32).reshape(-1, 1)
+
+    # Standardize features and persist the stats so on-device extraction can
+    # reproduce the exact same normalization.
+    mean = x.mean(axis=0)
+    std = x.std(axis=0) + 1e-8
+    x = ((x - mean) / std).astype(np.float32)
+
+    feature_dir.mkdir(parents=True, exist_ok=True)
+    np.save(feature_dir / 'features.npy', x)
+    np.save(feature_dir / 'labels.npy', y)
+    np.save(feature_dir / 'feature_stats.npy', np.stack([mean, std]).astype(np.float32))
+    print(f"Saved {len(y)} windows ({int(y.sum())} anomalous) to {feature_dir}")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -178,18 +280,27 @@ if __name__ == '__main__':
     datasets_dir: Path = args.datasets_dir
     raw_dir = datasets_dir / RAW_SUBDIR
     processed_dir = datasets_dir / PROCESSED_SUBDIR
+    subjects_dir = processed_dir / SUBJECTS_SUBDIR
+    feature_dir = processed_dir / FEATURE_SUBDIR
 
     if raw_dir.is_dir():
         print(f"Raw dataset already present at {raw_dir}")
     else:
         download_dataset(datasets_dir, raw_dir)
 
-    if processed_dir.is_dir():
-        print(f"Processed dataset already present at {processed_dir}")
-        exit()
+    if subjects_dir.is_dir():
+        print(f"Processed subjects already present at {subjects_dir}")
+    else:
+        subjects_dir.mkdir(parents=True, exist_ok=True)
+        written = process_all(raw_dir, subjects_dir)
+        print(f"\nProcessed {len(written)} subjects into {subjects_dir}")
 
-    processed_dir.mkdir(parents=True, exist_ok=True)
-    written = process_all(raw_dir, processed_dir)
-    print(f"\nProcessed {len(written)} subjects into {processed_dir}")
+    if (feature_dir / 'features.npy').exists():
+        print(f"Feature/anomaly dataset already present at {feature_dir}")
+    else:
+        build_feature_cache(
+            subjects_dir, feature_dir, window_size=WINDOW_SIZE, shift=SHIFT,
+            sample_rate=SAMPLE_RATE, anomaly_prob=ANOMALY_PROB, seed=FEATURE_SEED,
+        )
 
 

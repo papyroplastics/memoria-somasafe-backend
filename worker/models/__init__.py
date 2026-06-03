@@ -1,3 +1,4 @@
 from .common import TrainableModel
 from .mlp import MLP
-from .lstm_ae import ConditionalLSTMAutoencoder
+from .cond_lstm_autoencoder import ConditionalLSTMAutoencoder
+from .feature_mlp import FeatureMLP
