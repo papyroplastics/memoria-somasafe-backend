@@ -1,14 +1,12 @@
-import numpy as np
+from worker.models import TrainableModel
 import tensorflow as tf
-from typing import Callable
 
 @tf.function
 def mse_loss(x: tf.Tensor, y: tf.Tensor):
     return tf.reduce_mean((y-x)**2)
 
-def train_loop(
-        model: Callable[[tf.Tensor], dict],
-        train_f: Callable[[tf.Tensor, tf.Tensor], dict],
+def basic_train_loop(
+        model: TrainableModel,
         train_dataset: tf.data.Dataset,
         eval_dataset: tf.data.Dataset,
         epochs: int):
@@ -17,114 +15,97 @@ def train_loop(
         train_loss = 0.0
 
         for batch_x, batch_y  in train_dataset:
-            train_loss = train_f(batch_x, batch_y)['loss']
+            train_loss = model.train(batch_x, batch_y)['loss']
 
         if epoch % 10 == 0:
-            eval_loss = tf.reduce_mean([mse_loss(model(vb_x)['result'], vb_y) for vb_x, vb_y in eval_dataset], 0)
+            eval_loss = tf.reduce_mean([mse_loss(model.eval(vb_x)['result'], vb_y) for vb_x, vb_y in eval_dataset], 0)
 
             print(f"epoch={epoch:03d} train loss={train_loss:.6f} eval_loss={eval_loss:.6f}")
 
 
-# --- Reconstruction-autoencoder training (DaLiA) ---------------------------------
-
-def reconstruction_eval(model, dataset: tf.data.Dataset) -> float:
-    """Mean reconstruction MSE of ``model`` over ``dataset`` (signal as target)."""
-    losses = []
-    for signal, context, static in dataset:
-        recon = model.eval(signal, context, static)['reconstruction']
-        losses.append(mse_loss(recon, signal))
-    if not losses:
-        return float('nan')
-    return float(tf.reduce_mean(losses))
+def autoencoder_eval(model: TrainableModel, eval_dataset: tf.data.Dataset) -> tf.Tensor:
+    return tf.reduce_mean([
+        mse_loss(model.eval(signal, context, static)['reconstruction'], signal)
+        for (signal, context, static) in eval_dataset
+    ], 0)
 
 
-def reconstruction_train_loop(
-        model,
-        train_dataset: tf.data.Dataset,
+def dataset_slice(ds: tf.data.Dataset, slice_idx: int, num_slices: int):
+    return ds.skip(slice_idx * (len(ds)//num_slices)).take(len(ds)//num_slices) 
+
+def autoencoder_train_loop(
+        model: TrainableModel,
+        subject_train_datasets: list[tf.data.Dataset],
         eval_dataset: tf.data.Dataset,
-        epochs: int,
-        log_every: int = 10) -> float:
-    """Centralized training of the conditional autoencoder on one dataset."""
-    train_loss = float('nan')
-    for epoch in range(epochs):
-        for signal, context, static in train_dataset:
-            train_loss = float(model.train(signal, context, static)['loss'])
+        num_slices: int,
+        num_passes: int):
 
-        if epoch % log_every == 0:
-            eval_loss = reconstruction_eval(model, eval_dataset)
-            print(f"epoch={epoch:03d} train loss={train_loss:.6f} eval_loss={eval_loss:.6f}")
-    return train_loss
+    for pass_idx in range(num_passes):
+        for slice_idx in range(num_slices):
+            combined = tf.data.Dataset.sample_from_datasets([
+                dataset_slice(ds, slice_idx, num_slices) for ds in subject_train_datasets
+            ])
+
+            print(f"pass={pass_idx + 1}/{num_passes} slice={slice_idx + 1}/{num_slices} ", end="")
+
+            train_loss = 0.0
+            for signal, context, static in combined:
+                train_loss = model.train(signal, context, static)['loss']
+            print(f"train_loss={train_loss:.6f} ", end="")
+
+            eval_loss = autoencoder_eval(model, eval_dataset)
+            print(f"eval_loss={eval_loss:.6f}")
 
 
-# --- Federated (FedAvg) simulation ------------------------------------------------
+def fed_avg(vectors: list[tf.Tensor], sizes: list[int]) -> tf.Tensor:
+    total = sum(sizes)
+    avg = tf.zeros(vectors[0].shape)
 
-def _count_batches(dataset: tf.data.Dataset) -> int:
-    return sum(1 for _ in dataset)
-
-
-def fed_avg(vectors: list[np.ndarray], sizes: list[int]) -> np.ndarray:
-    """Sample-size-weighted average of flattened weight vectors."""
-    total = float(sum(sizes))
-    avg = np.zeros_like(vectors[0])
     for vector, size in zip(vectors, sizes):
         avg += vector * (size / total)
+
     return avg
 
-
 def federated_train_eval_loop(
-        model,
-        client_train_datasets: list[tf.data.Dataset],
-        client_eval_datasets: list[tf.data.Dataset],
+        model: TrainableModel,
+        subject_train_datasets: list[tf.data.Dataset],
+        subject_eval_datasets: list[tf.data.Dataset],
         local_epochs: int,
-        global_epochs: int) -> tuple[np.ndarray, list[float], list[list[list[float]]]]:
-    """Simulate FedAvg over a single model instance.
+        global_epochs: int):
 
-    Each round: every client restores the current global weights, trains
-    locally, and reports its weights; the server averages them (weighted by
-    sample count) and evaluates. Weight transfer goes through the model's
-    ``save``/``restore`` signatures - the exact mechanism used on-device.
-    """
-    num_clients = len(client_train_datasets)
-    print(f"Starting federated training over {num_clients} clients...")
+    num_subjects = len(subject_train_datasets)
+    print(f"Starting federated training over {num_subjects} subjects...")
 
-    client_sizes = [_count_batches(ds) for ds in client_train_datasets]
-    global_weights = model.save()['parameters'].numpy()
-
-    global_history: list[float] = []
-    client_histories: list[list[list[float]]] = [[] for _ in range(num_clients)]
+    subject_sizes = [len(ds) for ds in subject_train_datasets]
+    global_weights = model.save()['parameters']
 
     for r in range(1, global_epochs + 1):
         print(f"\n--- Round {r}/{global_epochs} ---")
 
-        local_vectors: list[np.ndarray] = []
-        local_sizes: list[int] = []
+        trained_param_list: list[tf.Tensor] = []
 
-        for cid, train_ds in enumerate(client_train_datasets):
+        for cid, train_ds in enumerate(subject_train_datasets):
             model.restore(tf.constant(global_weights))
+            print(f"    subject {cid + 1}: local losses:", end='')
 
-            losses: list[float] = []
             for _ in range(local_epochs):
-                epoch_loss, n_batches = 0.0, 0
+                epoch_loss = 0.0
+
                 for signal, context, static in train_ds:
-                    epoch_loss += float(model.train(signal, context, static)['loss'])
-                    n_batches += 1
-                losses.append(epoch_loss / max(n_batches, 1))
+                    epoch_loss += model.train(signal, context, static)['loss'] / len(train_ds)
 
-            local_vectors.append(model.save()['parameters'].numpy())
-            local_sizes.append(client_sizes[cid])
-            client_histories[cid].append(losses)
-            print(f"    client {cid + 1}: local loss {losses[-1]:.6f}")
+                print(f" {epoch_loss:.6f}", end='')
 
-        global_weights = fed_avg(local_vectors, local_sizes)
+            print()
+            trained_param_list.append(model.save()['parameters'])
+
+        global_weights = fed_avg(trained_param_list, subject_sizes)
         model.restore(tf.constant(global_weights))
 
-        eval_loss = float(tf.reduce_mean([
-            reconstruction_eval(model, ds) for ds in client_eval_datasets
-        ]))
-        global_history.append(eval_loss)
-        print(f"    global eval loss: {eval_loss:.6f}")
+        eval_loss = tf.reduce_mean([
+            autoencoder_eval(model, ds) for ds in subject_eval_datasets
+        ])
+        print(f"\n    global eval loss: {eval_loss:.6f}\n")
 
-    print("\nTraining complete.")
     model.restore(tf.constant(global_weights))
-    return global_weights, global_history, client_histories
 

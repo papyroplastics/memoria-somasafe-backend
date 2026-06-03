@@ -2,15 +2,16 @@ import math
 import pathlib
 import tensorflow as tf
 import matplotlib.pyplot as plt
-from worker.model import BasicNN
-from worker.training import train_loop
+from worker.models import MLP
+from worker.training import basic_train_loop
 from worker.saving import save_odt, save_opti
 
 tf.random.set_seed(1234)
 
 # Output files
-OUTPUT_DIR = pathlib.Path('models')
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+outer_result_dir = pathlib.Path('results')
+inner_result_dir = outer_result_dir / 'sine'
+inner_result_dir.mkdir(parents=True, exist_ok=True)
 
 # Dataset initialization
 dataset_size = 500
@@ -32,7 +33,7 @@ epochs_long = 100
 learning_rate = 0.01
 momentum = 0.9
 
-model = BasicNN(
+model = MLP(
     name='basic_nn',
     batch_size=batch_size,
 
@@ -45,7 +46,7 @@ model = BasicNN(
     momentum=momentum,
 )
 
-train_loop(
+basic_train_loop(
     model=model.eval,
     train_f=model.train,
     train_dataset=train_dataset,
@@ -54,12 +55,12 @@ train_loop(
 )
 
 # Save trainable an quantized models
-saved_model = save_odt(OUTPUT_DIR, 'pre-train', model)
+saved_model = save_odt(inner_result_dir, 'pre-train', model)
 rep_dataset = eval_dataset.map(lambda x, y: {'data': x})
-save_opti(OUTPUT_DIR, 'pre-train', model, rep_dataset)
+save_opti(inner_result_dir, 'pre-train', model, rep_dataset)
 
 # Re-train saved model
-train_loop(
+basic_train_loop(
     model=saved_model.eval,
     train_f=saved_model.train,
     train_dataset=train_dataset,
@@ -93,8 +94,8 @@ transfer_error = tf.reduce_max(tf.abs(pred_after_restore_y - pred_saved_y))
 print(f"restore max abs error={transfer_error:.8f}")
 
 # Save trained models
-save_odt(OUTPUT_DIR, 'post-train', model)
-save_opti(OUTPUT_DIR, 'post-train', model, rep_dataset)
+save_odt(inner_result_dir, 'post-train', model)
+save_opti(inner_result_dir, 'post-train', model, rep_dataset)
 
 # Plot results
 plt.plot(test_x, pred_before_restore_y, 'g-', label='Original model result')

@@ -68,7 +68,6 @@ def get_static_vector(quest: dict) -> np.ndarray:
     ], dtype=np.float32)
 
 
-
 def process_stage_1(
     raw_dir: Path, processed_dir: Path, subject_id: int,
 ) -> tuple[np.ndarray, np.ndarray] | None:
@@ -89,7 +88,6 @@ def process_stage_1(
     acc = np.interp(np.linspace(0, 1, target_len), np.linspace(0, 1, len(acc_mag)), acc_mag)
 
     signal_matrix = np.stack([bvp, acc], axis=1)
-    bounds = np.stack([signal_matrix.min(axis=0), signal_matrix.max(axis=0)], axis=1)
 
     # Activity context represents the movement in the last two minutes
     window_samples = 2 * 60 * 64
@@ -103,13 +101,14 @@ def process_stage_1(
     activity_context_matrix = activity_context_matrix [window_samples-1:]
     signal_matrix = signal_matrix [window_samples-1:]
 
-
     static_vector = get_static_vector(raw_data['questionnaire'])
 
     save_dir = processed_dir / f"S{subject_id}"
     save_dir.mkdir(parents=True, exist_ok=True)
     np.save(save_dir / 'context.npy', activity_context_matrix.astype(np.float32))
     np.save(save_dir / 'static.npy', static_vector.astype(np.float32))
+
+    bounds = np.stack([signal_matrix.min(axis=0), signal_matrix.max(axis=0)], axis=1)
 
     print(f"   Shape: {signal_matrix.shape}")
     return signal_matrix, bounds

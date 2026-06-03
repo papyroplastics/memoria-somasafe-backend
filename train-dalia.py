@@ -1,121 +1,88 @@
-"""Train the conditional LSTM autoencoder on PPG-DaLiA via simulated FedAvg.
-
-Pipeline:
-  1. (optional) preprocess raw PPG_FieldStudy pickles into per-subject npy caches
-  2. build per-client train/eval datasets (one client per subject)
-  3. federated-average a ConditionalLSTMAutoencoder across clients
-  4. export trainable (`-odt`) and int8 (`-opti`) `.tflite` artifacts
-  5. (optional) plot an input window against its reconstruction
-
-Run `get-dalia.py` first so the processed dataset exists under
-`datasets/ppg-dalia-processed/`.
-Per project policy this script is run manually; it is not part of any test suite.
-"""
-
 import pathlib
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
-from worker.dataset import build_subject_dataset, WINDOW_SIZE
-from worker.model import ConditionalLSTMAutoencoder
-from worker.training import federated_train_eval_loop, reconstruction_eval
+from worker.dataset import build_subject_dataset
+from worker.models import ConditionalLSTMAutoencoder
+from worker.training import autoencoder_train_loop
 from worker.saving import save_odt, save_opti
 
 tf.random.set_seed(1234)
 
-# --- Configuration ---------------------------------------------------------------
-# Produced by get-dalia.py; run that first to download + preprocess the dataset.
-DATA_DIR = pathlib.Path('datasets') / 'ppg-dalia-processed'
-OUTPUT_DIR = pathlib.Path('models')
+data_dir = pathlib.Path('datasets') / 'ppg-dalia-processed'
+outer_result_dir = pathlib.Path('results')
+inner_result_dir = outer_result_dir / 'lstm'
+inner_result_dir.mkdir(parents=True, exist_ok=True)
 
-TRAIN_SPLIT = 0.8
+if not data_dir.is_dir():
+    raise SystemExit(f"Processed dataset not found at {data_dir}. ")
 
-BATCH_SIZE = 32
-LOCAL_EPOCHS = 3
-GLOBAL_EPOCHS = 20
+sample_rate = 64 # hz
+window_len = 8  # seconds
+window_size = sample_rate * window_len # samples
+shift_len = 3  # seconds
+shift = sample_rate * shift_len # samples
 
-OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+train_split = 0.975
+batch_size = 12
+num_slices = 10
+num_passes = 1
 
+subject_train_datasets, subject_eval_datasets = [], []
+for dir in data_dir.glob('S*'):
+    ds = build_subject_dataset(dir, window_size, shift)
+    ds = ds.shuffle(len(ds)).batch(batch_size, drop_remainder=True)
 
-def available_subjects() -> list[int]:
-    return sorted(
-        int(p.name[1:]) for p in DATA_DIR.glob('S*') if p.name[1:].isdigit()
-    )
+    train_count = int(len(ds) * train_split)
+    subject_train_datasets.append(ds.take(train_count))
+    subject_eval_datasets.append(ds.skip(train_count))
 
+    print(f"Processed {dir.name}")
 
-def main():
-    if not DATA_DIR.is_dir():
-        raise SystemExit(
-            f"Processed dataset not found at {DATA_DIR}. "
-            f"Run `uv run python get-dalia.py` first.")
+eval_dataset = tf.data.Dataset.sample_from_datasets(subject_eval_datasets)
+del subject_eval_datasets
 
-    subjects = available_subjects()
-    if not subjects:
-        raise SystemExit(
-            f"No processed subjects under {DATA_DIR}. "
-            f"Run `uv run python get-dalia.py` first.")
-    print(f"Using subjects: {subjects}")
+model = ConditionalLSTMAutoencoder(
+    name='dalia_lstm_ae',
+    batch_size=batch_size,
+    seq_len=window_size,
+    n_signals=2,
+    n_static=6,
+    n_context=2,
+    hidden_dim=64,
+    latent_dim=32,
+    cond_embed_dim=16,
+    learning_rate=1e-3,
+)
 
-    client_train, client_eval = [], []
-    for sid in subjects:
-        try:
-            ds = build_subject_dataset(DATA_DIR, sid)
-            n_train = int(len(ds) * TRAIN_SPLIT)
-            client_train.append(
-                ds.take(n_train).shuffle(n_train).batch(BATCH_SIZE, drop_remainder=True))
-            client_eval.append(
-                ds.skip(n_train).batch(BATCH_SIZE, drop_remainder=True))
-        except (FileNotFoundError, ValueError) as e:
-            print(f"   Skipping S{sid}: {e}")
+autoencoder_train_loop(
+    model=model,
+    subject_train_datasets=subject_train_datasets,
+    eval_dataset=eval_dataset,
+    num_slices=num_slices,
+    num_passes=num_passes,
+)
 
-    model = ConditionalLSTMAutoencoder(
-        name='dalia_lstm_ae',
-        batch_size=BATCH_SIZE,
-        seq_len=WINDOW_SIZE,
-        n_signals=2,
-        n_static=6,
-        n_context=2,
-        hidden_dim=64,
-        latent_dim=32,
-        cond_embed_dim=16,
-        learning_rate=1e-3,
-    )
-    print(f"Model parameters: {model.total_parameter_size}")
+print(f"Compiling and saving model")
+saved_model, sm_path = save_odt(inner_result_dir, 'pre-train', model)
+print(f"Saved model to {sm_path}")
 
-    federated_train_eval_loop(
-        model=model,
-        client_train_datasets=client_train,
-        client_eval_datasets=client_eval,
-        local_epochs=LOCAL_EPOCHS,
-        global_epochs=GLOBAL_EPOCHS,
-    )
+print("Quantizing model")
+try:
+    rep_dataset = eval_dataset.map(lambda s, c, st: {'signal': s, 'context': c, 'static': st})
+    save_opti(inner_result_dir, 'pre-train', model, rep_dataset)
+except Exception as e:  # noqa: BLE001 - conversion errors are informational here
+    print(f"   Quantized export skipped (LSTM int8 unsupported?): {e}")
 
-    # Export the trainable model for on-device LiteRT fine-tuning.
-    saved_model = save_odt(OUTPUT_DIR, 'pre-train', model)
-    print(f"Final global eval loss: "
-          f"{tf.reduce_mean([reconstruction_eval(model, ds) for ds in client_eval]):.6f}")
+# Plot an input window vs. its reconstruction for a quick sanity check.
+for signal, context, static in eval_dataset.take(1):
+    recon = saved_model.eval(signal, context, static)['reconstruction']
+    fig, axs = plt.subplots(1, 2)
+    axs[0].plot(signal[0].numpy())
+    axs[0].set_title('Input window [BVP, ACC]')
+    axs[1].plot(recon[0].numpy())
+    axs[1].set_title('Reconstruction')
+    fig.savefig(inner_result_dir / 'reconstruction.png')
+    print(f"saved reconstruction plot to {inner_result_dir / 'reconstruction.png'}")
+    break
 
-    # Export the int8-quantized model. LSTM int8 conversion has limited op
-    # support, so don't let a failure here block the trainable artifact.
-    try:
-        rep_dataset = client_eval[0].map(
-            lambda s, c, st: {'signal': s, 'context': c, 'static': st})
-        save_opti(OUTPUT_DIR, 'pre-train', model, rep_dataset)
-    except Exception as e:  # noqa: BLE001 - conversion errors are informational here
-        print(f"   Quantized export skipped (LSTM int8 unsupported?): {e}")
-
-    # Plot an input window vs. its reconstruction for a quick sanity check.
-    for signal, context, static in client_eval[0].take(1):
-        recon = saved_model.eval(signal, context, static)['reconstruction']
-        fig, axs = plt.subplots(1, 2)
-        axs[0].plot(signal[0].numpy())
-        axs[0].set_title('Input window [BVP, ACC]')
-        axs[1].plot(recon[0].numpy())
-        axs[1].set_title('Reconstruction')
-        fig.savefig(OUTPUT_DIR / 'reconstruction.png')
-        print(f"Saved reconstruction plot to {OUTPUT_DIR / 'reconstruction.png'}")
-        break
-
-
-if __name__ == '__main__':
-    main()
