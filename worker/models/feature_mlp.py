@@ -34,7 +34,7 @@ class FeatureMLP(TrainableModel):
         self.out_layer = Dense(hidden_dim, 1, activation=None)
 
         self.eval = tf.function(self.eval_eager, input_signature=[
-            tf.TensorSpec(shape=self.in_shape, dtype=tf.float32)
+            tf.TensorSpec(shape=self.in_shape, dtype=tf.float32, name="feature_0")
         ])
 
         self._init_save_restore()
@@ -42,8 +42,8 @@ class FeatureMLP(TrainableModel):
         self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
 
         self.train = tf.function(self.train_eager, input_signature=[
-            tf.TensorSpec(shape=self.in_shape, dtype=tf.float32),
-            tf.TensorSpec(shape=self.label_shape, dtype=tf.float32),
+            tf.TensorSpec(shape=self.in_shape, dtype=tf.float32, name="feature_0"),
+            tf.TensorSpec(shape=self.label_shape, dtype=tf.float32, name="label_0"),
         ])
 
     def _logits(self, data):
@@ -54,7 +54,7 @@ class FeatureMLP(TrainableModel):
 
     def eval_eager(self, data: tf.Tensor):
         logits = self._logits(data)
-        return {'logit': logits, 'score': tf.sigmoid(logits)}
+        return {'logit_0': logits, 'score_0': tf.sigmoid(logits)}
 
     def train_eager(self, data: tf.Tensor, labels: tf.Tensor):
         with tf.GradientTape() as tape:
@@ -63,7 +63,7 @@ class FeatureMLP(TrainableModel):
                 tf.nn.sigmoid_cross_entropy_with_logits(labels=labels, logits=logits))
         grads = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply(self.trainable_variables, grads)
-        return {'loss': loss}
+        return {'loss_0': loss}
 
 
 def _accuracy(model, dataset: tf.data.Dataset) -> float:
@@ -103,7 +103,8 @@ def run(result_dir: Path):
     batch_size = 64
     train_split = 0.8
 
-    x, y = np.load(feature_file), np.load(label_file)
+    x = np.load(feature_file)
+    y = np.load(label_file)
 
     dataset = (tf.data.Dataset.from_tensor_slices((x, y))
                .shuffle(len(x), seed=1234).batch(batch_size, drop_remainder=True))
@@ -116,12 +117,17 @@ def run(result_dir: Path):
         hidden_dim=32, hidden_layers=1, learning_rate=1e-3,
     )
 
-    history = classifier_train_loop(model, train_dataset, eval_dataset, epochs=50)
-
     saved_model, sm_path = save_odt(result_dir, 'pre-train', model)
-    print(f"Saved model to {sm_path}")
+    print(f"Saved untrained model to {sm_path}")
     rep_dataset = eval_dataset.map(lambda d, l: {'data': d})
     save_opti(result_dir, 'pre-train', model, rep_dataset)
+
+    history = classifier_train_loop(model, train_dataset, eval_dataset, epochs=50)
+
+    saved_model, sm_path = save_odt(result_dir, 'post-train', model)
+    print(f"Saved trained model to {sm_path}")
+    rep_dataset = eval_dataset.map(lambda d, l: {'data': d})
+    save_opti(result_dir, 'post-train', model, rep_dataset)
 
     epochs, losses, accs = zip(*history)
     fig, ax = plt.subplots()

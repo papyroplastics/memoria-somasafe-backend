@@ -1,9 +1,12 @@
+import tensorflow as tf
+import numpy as np
+import matplotlib.pyplot as plt
 from pathlib import Path
 
-import tensorflow as tf
 from .common import Dense, LSTMCell, TrainableModel
 from ..optimizers import Adam
 from ..training import mse_loss, fed_avg
+from ..saving import save_odt, save_opti
 
 
 class ConditionalLSTMAutoencoder(TrainableModel):
@@ -171,14 +174,35 @@ def federated_train_eval_loop(
     model.restore(tf.constant(global_weights))
 
 
+def build_subject_dataset(
+    subject_dir: Path,
+    window_size: int,
+    shift: int
+) -> tf.data.Dataset:
+
+    signal = np.load(subject_dir / 'signal.npy')
+    context = np.load(subject_dir / 'context.npy')
+    static = np.load(subject_dir / 'static.npy')
+
+    window_count = (len(signal) - window_size) // shift + 1
+
+    signal_ds = (tf.data.Dataset.from_tensor_slices(signal)
+        .window(size=window_size, shift=shift, drop_remainder=True)
+        .flat_map(lambda w: w.batch(window_size, drop_remainder=True))
+        .apply(tf.data.experimental.assert_cardinality(window_count))
+    )
+    context_ds = tf.data.Dataset.from_tensor_slices(context[::shift][:window_count])
+
+    static_ds = tf.data.Dataset.from_tensor_slices(static)
+    static_ds = static_ds.batch(len(static_ds)).repeat()
+
+    return tf.data.Dataset.zip((signal_ds, context_ds, static_ds)) # type: ignore
+
+
 def run(result_dir: Path):
     """Reconstruction-based anomaly model on PPG-DaLiA. Exports a trainable
     SavedModel + TFLite; int8 export may fail (LSTM is poorly supported on
     TFLM) and is skipped if so."""
-    import matplotlib.pyplot as plt
-    from ..dataset import build_subject_dataset
-    from ..saving import save_odt, save_opti
-
     tf.random.set_seed(1234)
 
     data_dir = Path('datasets') / 'ppg-dalia-processed' / 'subjects'

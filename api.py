@@ -1,25 +1,28 @@
-from enum import Enum
 from pathlib import Path
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
-
-class ModelType(str, Enum):
-    quant = "quantized"
-    train = "trainable"
 
 app = FastAPI()
 
 models_dir = Path('models/')
-model_file_train = models_dir / "post-train-odt.tflite"
-model_file_quant = models_dir / "post-train-opti.tflite"
 
-@app.get("/model/{type}", response_class=FileResponse)
-async def main(type: ModelType, version: int | None = None):
-    if type == ModelType.train:
-        if version == None:
-            return FileResponse(path=model_file_train, filename="trainable.tflite")
+MODELS = [
+    {
+        "key": "feature-mlp",
+        "name": "Feature-based MLP",
+        "last_updated": "2026-06-01T00:00:00Z",
+        "purpose": "train-only",
+        "_file": "post-train-odt.tflite",
+    },
+]
 
-    if type == ModelType.quant:
-        if version == None:
-            return FileResponse(path=model_file_quant, filename="quantized.tflite")
+@app.get("/models")
+async def list_models():
+    return [{k: v for k, v in m.items() if not k.startswith('_')} for m in MODELS]
+
+@app.get("/model/{key}", response_class=FileResponse)
+async def get_model(key: str):
+    entry = next((m for m in MODELS if m["key"] == key), None)
+    if entry is None:
+        raise HTTPException(status_code=404, detail=f"Model '{key}' not found")
+    return FileResponse(path=models_dir / entry["_file"], filename=f"{key}.tflite")

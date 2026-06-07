@@ -47,7 +47,7 @@ def download_dataset(datasets_dir: Path, raw_dir: Path):
     print(f"Raw dataset ready at {raw_dir}")
 
 
-def load_raw_pickle(raw_dir: Path, subject_id: int) -> dict | None:
+def load_raw_data_pickle(raw_dir: Path, subject_id: int) -> dict | None:
     path = raw_dir / f'S{subject_id}' / f'S{subject_id}.pkl'
     if not path.exists():
         return None
@@ -57,7 +57,7 @@ def load_raw_pickle(raw_dir: Path, subject_id: int) -> dict | None:
     return data
 
 
-def get_static_vector(quest: dict) -> np.ndarray:
+def user_description_vector(quest: dict) -> np.ndarray:
     gender_raw = quest.get('Gender', 'm').strip().lower()
     gender_norm = 1.0 if gender_raw == 'f' else 0.0
 
@@ -77,12 +77,12 @@ def get_static_vector(quest: dict) -> np.ndarray:
     ], dtype=np.float32)
 
 
-def process_stage_1(
+def extract_stage_1(
     raw_dir: Path, processed_dir: Path, subject_id: int,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     print(f"--- Processing Subject S{subject_id} (stage 1) ---")
 
-    raw_data = load_raw_pickle(raw_dir, subject_id)
+    raw_data = load_raw_data_pickle(raw_dir, subject_id)
     if raw_data is None:
         print(f"   File not found for subject {subject_id}")
         return None
@@ -110,7 +110,7 @@ def process_stage_1(
     activity_context_matrix = activity_context_matrix [window_samples-1:]
     signal_matrix = signal_matrix [window_samples-1:]
 
-    static_vector = get_static_vector(raw_data['questionnaire'])
+    static_vector = user_description_vector(raw_data['questionnaire'])
 
     save_dir = processed_dir / f"S{subject_id}"
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -123,7 +123,7 @@ def process_stage_1(
     return signal_matrix, bounds
 
 
-def process_stage_2(
+def extract_stage_2(
     processed_dir: Path, subject_id: int,
     signal_matrix: np.ndarray, global_min: np.ndarray, global_max: np.ndarray,
 ):
@@ -136,21 +136,19 @@ def process_stage_2(
     print(f"   Saved to {save_dir}")
 
 
-def available_subject_ids(raw_dir: Path) -> list[int]:
-    return sorted(
-        int(p.name[1:]) for p in raw_dir.glob('S*')
-        if p.is_dir() and p.name[1:].isdigit()
-    )
-
-
-def process_all(raw_dir: Path, processed_dir: Path) -> list[int]:
+def extract_signals(raw_dir: Path, processed_dir: Path) -> list[int]:
     stage1: dict[int, np.ndarray] = {}
     global_min: np.ndarray | None = None
     global_max: np.ndarray | None = None
 
-    for subject_id in available_subject_ids(raw_dir):
+    subject_ids = sorted(
+        int(p.name[1:]) for p in raw_dir.glob('S*')
+        if p.is_dir() and p.name[1:].isdigit()
+    )
+
+    for subject_id in subject_ids:
         try:
-            result = process_stage_1(raw_dir, processed_dir, subject_id)
+            result = extract_stage_1(raw_dir, processed_dir, subject_id)
         except Exception as e:
             print(f"Error processing S{subject_id}: {e}")
             continue
@@ -173,7 +171,7 @@ def process_all(raw_dir: Path, processed_dir: Path) -> list[int]:
     }).to_csv(processed_dir / PARAMS_FILE, index=False)
 
     for subject_id, signal_matrix in stage1.items():
-        process_stage_2(processed_dir, subject_id, signal_matrix, global_min, global_max)
+        extract_stage_2(processed_dir, subject_id, signal_matrix, global_min, global_max)
 
     return list(stage1)
 
@@ -292,7 +290,7 @@ if __name__ == '__main__':
         print(f"Processed subjects already present at {subjects_dir}")
     else:
         subjects_dir.mkdir(parents=True, exist_ok=True)
-        written = process_all(raw_dir, subjects_dir)
+        written = extract_signals(raw_dir, subjects_dir)
         print(f"\nProcessed {len(written)} subjects into {subjects_dir}")
 
     if (feature_dir / 'features.npy').exists():
@@ -302,5 +300,4 @@ if __name__ == '__main__':
             subjects_dir, feature_dir, window_size=WINDOW_SIZE, shift=SHIFT,
             sample_rate=SAMPLE_RATE, anomaly_prob=ANOMALY_PROB, seed=FEATURE_SEED,
         )
-
 
