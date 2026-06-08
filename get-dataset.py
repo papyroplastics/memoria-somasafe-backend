@@ -10,21 +10,26 @@ import pandas as pd
 
 DEFAULT_DATASETS_DIR = Path('datasets')
 RAW_SUBDIR = 'PPG_FieldStudy'
-PROCESSED_SUBDIR = 'ppg-dalia-processed'
-SUBJECTS_SUBDIR = 'subjects'
+SUBJECTS_SUBDIR = 'subject-signals'
+NORMALIZED_SUBDIR = 'normalized-signals'
+ANOMALOUS_SUBDIR = 'anomalous-signals'
 FEATURE_SUBDIR = 'feature-anomaly'
 PARAMS_FILE = 'params.csv'
 
 DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'
 
-CHANNELS = ['BVP', 'ACC']
-
-SAMPLE_RATE = 64                  # hz
-WINDOW_SIZE = SAMPLE_RATE * 8     # 8 s windows
-SHIFT = SAMPLE_RATE * 3           # 3 s stride
+BVP_RATE = 64
+ACC_RATE = 32
+WINDOW_SECONDS = 8
+SHIFT_SECONDS = 3
+BVP_WINDOW = BVP_RATE * WINDOW_SECONDS    # 512
+ACC_WINDOW = ACC_RATE * WINDOW_SECONDS    # 256
+BVP_SHIFT = BVP_RATE * SHIFT_SECONDS     # 192
+ACC_SHIFT = ACC_RATE * SHIFT_SECONDS     # 96
+CONTEXT_WINDOW_S = 120                   # 2 minutes
 ANOMALY_PROB = 0.5
 FEATURE_SEED = 1234
-N_FEATURES = 17  # keep in sync with extract_features
+N_FEATURES = 17
 
 
 def download_dataset(datasets_dir: Path, raw_dir: Path):
@@ -46,227 +51,321 @@ def download_dataset(datasets_dir: Path, raw_dir: Path):
 
     print(f"Raw dataset ready at {raw_dir}")
 
-
-def load_raw_data_pickle(raw_dir: Path, subject_id: int) -> dict | None:
-    path = raw_dir / f'S{subject_id}' / f'S{subject_id}.pkl'
-    if not path.exists():
-        return None
-
-    with open(path, 'rb') as f:
-        data = pkl.load(f, encoding='latin1')
-    return data
-
-
 def user_description_vector(quest: dict) -> np.ndarray:
     gender_raw = quest.get('Gender', 'm').strip().lower()
     gender_norm = 1.0 if gender_raw == 'f' else 0.0
-
-    age_norm    = (quest.get('AGE',     30) -  20) / 20   # 20  - 40
-    height_norm = (quest.get('HEIGHT', 150) - 100) / 100  # 100 - 200
-    weight_norm = (quest.get('WEIGHT',  70) -  40) / 110  # 40  - 150
-    skin_norm   = (quest.get('SKIN',     3) -   1) / 5    # 1   - 6
-    sport_norm  = (quest.get('SPORT',    3) -   1) / 6    # 1   - 6
-
+    age_norm    = (quest.get('AGE',     30) -  20) / 20
+    height_norm = (quest.get('HEIGHT', 150) - 100) / 100
+    weight_norm = (quest.get('WEIGHT',  70) -  40) / 110
+    skin_norm   = (quest.get('SKIN',     3) -   1) / 5
+    sport_norm  = (quest.get('SPORT',    3) -   1) / 6
     return np.array([
-        gender_norm,
-        age_norm,
-        height_norm,
-        weight_norm,
-        skin_norm,
-        sport_norm,
+        gender_norm, age_norm, height_norm, weight_norm, skin_norm, sport_norm,
     ], dtype=np.float32)
 
 
-def extract_stage_1(
-    raw_dir: Path, processed_dir: Path, subject_id: int,
-) -> tuple[np.ndarray, np.ndarray] | None:
-    print(f"--- Processing Subject S{subject_id} (stage 1) ---")
+# ---------------------------------------------------------------------------
+# Stage 1 — Extract raw signals
+# ---------------------------------------------------------------------------
 
-    raw_data = load_raw_data_pickle(raw_dir, subject_id)
-    if raw_data is None:
-        print(f"   File not found for subject {subject_id}")
-        return None
+def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
+    """Extract raw BVP (64 Hz) and ACC magnitude (32 Hz) per subject.
 
-    wrist = raw_data['signal']['wrist']
-    bvp = wrist['BVP'].flatten()
-    target_len = len(bvp)
-
-    acc_g = wrist['ACC'] / 64.0
-    acc_mag = np.sqrt(np.sum(acc_g**2, axis=1))
-    acc_mag = np.convolve(acc_mag, np.ones(5), mode='same')
-    acc = np.interp(np.linspace(0, 1, target_len), np.linspace(0, 1, len(acc_mag)), acc_mag)
-
-    signal_matrix = np.stack([bvp, acc], axis=1)
-
-    # Activity context represents the movement in the last two minutes
-    window_samples = 2 * 60 * 64
-    rolling = pd.Series(acc).rolling(window_samples)
-
-    act_mean: np.ndarray = rolling.mean().values
-    act_std: np.ndarray = rolling.std().values
-    activity_context_matrix = np.column_stack((act_mean, act_std))
-
-    # First window_samples values will be null after rooling ops so we cull them
-    activity_context_matrix = activity_context_matrix [window_samples-1:]
-    signal_matrix = signal_matrix [window_samples-1:]
-
-    static_vector = user_description_vector(raw_data['questionnaire'])
-
-    save_dir = processed_dir / f"S{subject_id}"
-    save_dir.mkdir(parents=True, exist_ok=True)
-    np.save(save_dir / 'context.npy', activity_context_matrix.astype(np.float32))
-    np.save(save_dir / 'static.npy', static_vector.astype(np.float32))
-
-    bounds = np.stack([signal_matrix.min(axis=0), signal_matrix.max(axis=0)], axis=1)
-
-    print(f"   Shape: {signal_matrix.shape}")
-    return signal_matrix, bounds
-
-
-def extract_stage_2(
-    processed_dir: Path, subject_id: int,
-    signal_matrix: np.ndarray, global_min: np.ndarray, global_max: np.ndarray,
-):
-    print(f"--- Processing Subject S{subject_id} (stage 2) ---")
-
-    normalized_matrix = (signal_matrix - global_min) / (global_max - global_min)
-
-    save_dir = processed_dir / f"S{subject_id}"
-    np.save(save_dir / 'signal.npy', normalized_matrix.astype(np.float32))
-    print(f"   Saved to {save_dir}")
-
-
-def extract_signals(raw_dir: Path, processed_dir: Path) -> list[int]:
-    stage1: dict[int, np.ndarray] = {}
-    global_min: np.ndarray | None = None
-    global_max: np.ndarray | None = None
+    BVP and ACC are stored in separate files because they have different lengths.
+    Global min/max bounds are saved to params.csv for use in normalization.
+    """
+    subjects_dir.mkdir(parents=True, exist_ok=True)
 
     subject_ids = sorted(
         int(p.name[1:]) for p in raw_dir.glob('S*')
         if p.is_dir() and p.name[1:].isdigit()
     )
 
+    bvp_min = bvp_max = acc_min = acc_max = None
+    processed = []
+
     for subject_id in subject_ids:
-        try:
-            result = extract_stage_1(raw_dir, processed_dir, subject_id)
-        except Exception as e:
-            print(f"Error processing S{subject_id}: {e}")
-            continue
-        if result is None:
-            continue
+        path = raw_dir / f'S{subject_id}' / f'S{subject_id}.pkl'
+        raw = pkl.loads(path.read_bytes(), encoding='latin1')
 
-        signal_matrix, bounds = result
-        stage1[subject_id] = signal_matrix
-        subject_min, subject_max = bounds[:, 0], bounds[:, 1]
-        global_min = subject_min if global_min is None else np.minimum(global_min, subject_min)
-        global_max = subject_max if global_max is None else np.maximum(global_max, subject_max)
+        wrist = raw['signal']['wrist']
+        bvp = wrist['BVP'].flatten().astype(np.float32)
 
-    if global_min is None or global_max is None:
+        acc_g = wrist['ACC'] / 64.0
+        acc = np.sqrt(np.sum(acc_g ** 2, axis=1)).astype(np.float32)
+
+        static = user_description_vector(raw['questionnaire'])
+
+        save_dir = subjects_dir / f'S{subject_id}'
+        save_dir.mkdir(parents=True, exist_ok=True)
+        np.save(save_dir / 'bvp.npy', bvp)
+        np.save(save_dir / 'acc_mag.npy', acc)
+        np.save(save_dir / 'static.npy', static)
+
+        bvp_min = bvp.min() if bvp_min is None else min(bvp_min, float(bvp.min()))
+        bvp_max = bvp.max() if bvp_max is None else max(bvp_max, float(bvp.max()))
+        acc_min = acc.min() if acc_min is None else min(acc_min, float(acc.min()))
+        acc_max = acc.max() if acc_max is None else max(acc_max, float(acc.max()))
+
+        processed.append(subject_id)
+        print(f"  S{subject_id}: BVP {len(bvp)} samples @ {BVP_RATE} Hz, ACC {len(acc)} samples @ {ACC_RATE} Hz")
+
+    if not processed:
         return []
 
     pd.DataFrame({
-        'channel': CHANNELS,
-        'min': global_min,
-        'max': global_max,
-    }).to_csv(processed_dir / PARAMS_FILE, index=False)
+        'channel': ['BVP', 'ACC_MAG'],
+        'min': [bvp_min, acc_min],
+        'max': [bvp_max, acc_max],
+    }).to_csv(subjects_dir / PARAMS_FILE, index=False)
 
-    for subject_id, signal_matrix in stage1.items():
-        extract_stage_2(processed_dir, subject_id, signal_matrix, global_min, global_max)
-
-    return list(stage1)
+    print(f"  Global bounds saved to {subjects_dir / PARAMS_FILE}")
+    return processed
 
 
-# --- Synthetic anomalies + feature extraction for the FeatureMLP classifier ---
+# ---------------------------------------------------------------------------
+# Stage 2 — Normalize and compute activity context
+# ---------------------------------------------------------------------------
 
-def inject_anomaly(window: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Corrupt the BVP channel of a clean window to simulate an anomaly. The
-    signal is min-max normalized to ~[0, 1], so the perturbations below are
-    large relative to the clean dynamic range and clearly separable."""
-    w = window.copy()
-    length = w.shape[0]
-    seg_len = int(rng.integers(length // 8, length // 2))
-    start = int(rng.integers(0, length - seg_len))
-    seg = slice(start, start + seg_len)
-    kind = int(rng.integers(0, 5))
+def normalize_signals(subjects_dir: Path, normalized_dir: Path):
+    """Normalize BVP and ACC, interpolate ACC to BVP rate, compute activity context."""
+    normalized_dir.mkdir(parents=True, exist_ok=True)
 
-    if kind == 0:        # transient spike
-        w[seg, 0] += rng.uniform(0.5, 1.0) * rng.choice([-1.0, 1.0])
-    elif kind == 1:      # flatline / sensor dropout
-        w[seg, 0] = w[start, 0]
-    elif kind == 2:      # amplitude blow-up around the segment mean
-        mean = w[seg, 0].mean()
-        w[seg, 0] = mean + (w[seg, 0] - mean) * rng.uniform(2.0, 4.0)
-    elif kind == 3:      # low-frequency baseline wander over the whole window
-        t = np.linspace(0, rng.uniform(1.0, 3.0) * np.pi, length)
-        w[:, 0] += 0.3 * np.sin(t + rng.uniform(0, np.pi))
-    else:                # localized noise burst
-        w[seg, 0] += rng.normal(0.0, 0.25, size=seg_len)
+    params = pd.read_csv(subjects_dir / PARAMS_FILE).set_index('channel')
+    bvp_min, bvp_max = float(params.loc['BVP', 'min']), float(params.loc['BVP', 'max'])
+    acc_min, acc_max = float(params.loc['ACC_MAG', 'min']), float(params.loc['ACC_MAG', 'max'])
+    bvp_range = bvp_max - bvp_min
+    acc_range = acc_max - acc_min
 
-    return w
+    # Rolling window in samples on interpolated (64 Hz) ACC
+    context_window = CONTEXT_WINDOW_S * BVP_RATE
+
+    # First pass: compute raw context arrays to derive global normalization stats
+    subject_cache: dict[str, dict] = {}
+    all_ctx_mean: list[np.ndarray] = []
+    all_ctx_std: list[np.ndarray] = []
+
+    for subject_dir in sorted(subjects_dir.glob('S*')):
+        sid = subject_dir.name
+        bvp = np.load(subject_dir / 'bvp.npy')
+        acc = np.load(subject_dir / 'acc_mag.npy')
+        static = np.load(subject_dir / 'static.npy')
+
+        norm_bvp = ((bvp - bvp_min) / bvp_range).astype(np.float32)
+        norm_acc = ((acc - acc_min) / acc_range).astype(np.float32)
+
+        acc_interp = np.interp(
+            np.linspace(0, 1, len(norm_bvp)),
+            np.linspace(0, 1, len(norm_acc)),
+            norm_acc,
+        ).astype(np.float32)
+
+        rolling = pd.Series(acc_interp).rolling(context_window)
+        ctx_mean = rolling.mean().values[context_window - 1:].astype(np.float32)
+        ctx_std  = rolling.std().values[context_window - 1:].astype(np.float32)
+
+        # Trim signals to match context length
+        trimmed_bvp = norm_bvp[context_window - 1:]
+        trimmed_acc = acc_interp[context_window - 1:]
+
+        subject_cache[sid] = {
+            'bvp': trimmed_bvp,
+            'acc': trimmed_acc,
+            'ctx_mean': ctx_mean,
+            'ctx_std': ctx_std,
+            'static': static,
+        }
+        all_ctx_mean.append(ctx_mean)
+        all_ctx_std.append(ctx_std)
+
+    # Compute global context normalization bounds
+    ctx_mean_all = np.concatenate(all_ctx_mean)
+    ctx_std_all  = np.concatenate(all_ctx_std)
+    cm_min, cm_max = float(ctx_mean_all.min()), float(ctx_mean_all.max())
+    cs_min, cs_max = float(ctx_std_all.min()),  float(ctx_std_all.max())
+    cm_range = cm_max - cm_min
+    cs_range = cs_max - cs_min
+
+    # Second pass: normalize context and save everything
+    for subject_id, data in subject_cache.items():
+        norm_cm = ((data['ctx_mean'] - cm_min) / cm_range).astype(np.float32)
+        norm_cs = ((data['ctx_std']  - cs_min) / cs_range).astype(np.float32)
+        context = np.column_stack([norm_cm, norm_cs]).astype(np.float32)
+
+        save_dir = normalized_dir / subject_id
+        save_dir.mkdir(parents=True, exist_ok=True)
+        np.save(save_dir / 'bvp.npy',     data['bvp'])
+        np.save(save_dir / 'acc.npy',     data['acc'])
+        np.save(save_dir / 'context.npy', context)
+        np.save(save_dir / 'static.npy',  data['static'])
+        print(f"  {subject_id}: {len(data['bvp'])} samples")
 
 
-def extract_features(window: np.ndarray, sample_rate: int) -> np.ndarray:
-    """Cheap, on-device-replicable feature vector for a [L, 2] (BVP, ACC) window."""
+# ---------------------------------------------------------------------------
+# Stage 3 — Synthetic anomalies on raw BVP
+# ---------------------------------------------------------------------------
+
+def inject_anomalies(
+    bvp: np.ndarray,
+    rng: np.random.Generator,
+    anomaly_prob: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Inject anomalies into a raw BVP signal at random intervals.
+
+    Perturbations are scaled relative to the signal's own range / std so that
+    they are equally disruptive regardless of the sensor's absolute output range.
+    Returns (anomalous_bvp, labels) where labels is a per-sample bitmap.
+    """
+    result = bvp.copy()
+    labels = np.zeros(len(bvp), dtype=np.float32)
+
+    sig_range = float(bvp.max() - bvp.min())
+    sig_std   = float(bvp.std())
+    n = len(bvp)
+
+    min_len = BVP_RATE * 8    # at least one 8-second window
+    max_len = BVP_RATE * 60   # up to 60 seconds
+    target  = int(n * anomaly_prob)
+
+    attempts = 0
+    while int(labels.sum()) < target and attempts < 10_000:
+        attempts += 1
+        length = int(rng.integers(min_len, min(max_len, n // 2) + 1))
+        start  = int(rng.integers(0, max(1, n - length)))
+        seg    = slice(start, start + length)
+
+        if labels[seg].any():
+            continue
+
+        kind = int(rng.integers(0, 5))
+        if kind == 0:   # transient spike
+            scale = sig_range * float(rng.uniform(0.3, 0.8))
+            result[seg] += scale * float(rng.choice([-1.0, 1.0]))
+        elif kind == 1: # flatline / sensor dropout
+            result[seg] = result[start]
+        elif kind == 2: # amplitude blow-up around local mean
+            mean = float(result[seg].mean())
+            result[seg] = mean + (result[seg] - mean) * float(rng.uniform(2.0, 4.0))
+        elif kind == 3: # low-frequency baseline wander
+            t = np.linspace(0, float(rng.uniform(1.0, 3.0)) * np.pi, length)
+            result[seg] += sig_range * 0.3 * np.sin(t + float(rng.uniform(0, np.pi)))
+        else:           # noise burst
+            result[seg] += rng.normal(0.0, sig_std * 0.5, size=length)
+
+        labels[seg] = 1.0
+
+    return result.astype(np.float32), labels
+
+
+def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
+    """Add synthetic anomalies to raw BVP from subject-signals.
+
+    Only BVP is modified; ACC is not stored here (load from subject-signals directly).
+    labels.npy is a per-sample bitmap: 1 = anomalous, 0 = clean.
+    """
+    anomalous_dir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(FEATURE_SEED)
+
+    for subject_dir in sorted(subjects_dir.glob('S*')):
+        subject_id = subject_dir.name
+        bvp = np.load(subject_dir / 'bvp.npy')
+
+        anomalous_bvp, labels = inject_anomalies(bvp, rng, ANOMALY_PROB)
+
+        save_dir = anomalous_dir / subject_id
+        save_dir.mkdir(parents=True, exist_ok=True)
+        np.save(save_dir / 'bvp.npy',    anomalous_bvp)
+        np.save(save_dir / 'labels.npy', labels)
+
+        print(f"  {subject_id}: {len(bvp)} samples, {labels.mean():.1%} anomalous")
+
+
+# ---------------------------------------------------------------------------
+# Stage 4 — Feature dataset
+# ---------------------------------------------------------------------------
+
+def extract_features(bvp_window: np.ndarray, acc_window: np.ndarray) -> np.ndarray:
+    """17-feature vector from an 8-second BVP window (512 samples) and ACC window (256 samples)."""
     feats: list[float] = []
-    for channel in (window[:, 0], window[:, 1]):
+
+    for ch in (bvp_window, acc_window):
         feats += [
-            float(channel.mean()),
-            float(channel.std()),
-            float(channel.min()),
-            float(channel.max()),
-            float(channel.max() - channel.min()),
-            float(np.sqrt(np.mean(channel ** 2))),
-            float(np.mean(np.abs(np.diff(channel)))),
+            float(ch.mean()),
+            float(ch.std()),
+            float(ch.min()),
+            float(ch.max()),
+            float(ch.max() - ch.min()),
+            float(np.sqrt(np.mean(ch ** 2))),
+            float(np.mean(np.abs(np.diff(ch)))),
         ]
 
-    bvp = window[:, 0] - window[:, 0].mean()
-    feats.append(float(np.mean(np.abs(np.diff(np.sign(bvp)))) / 2))  # zero-crossing rate
+    bvp = bvp_window - bvp_window.mean()
+    feats.append(float(np.mean(np.abs(np.diff(np.sign(bvp)))) / 2))
 
     spectrum = np.abs(np.fft.rfft(bvp))
-    freqs = np.fft.rfftfreq(len(bvp), d=1.0 / sample_rate)
-    feats.append(float(freqs[np.argmax(spectrum)]))                  # dominant frequency
-    band = (freqs >= 0.7) & (freqs <= 3.5)                           # plausible HR band
+    freqs    = np.fft.rfftfreq(len(bvp), d=1.0 / BVP_RATE)
+    feats.append(float(freqs[np.argmax(spectrum)]))
+    band = (freqs >= 0.7) & (freqs <= 3.5)
     feats.append(float(spectrum[band].sum() / (spectrum.sum() + 1e-8)))
 
     return np.asarray(feats, dtype=np.float32)
 
 
-def build_feature_cache(subjects_dir: Path, feature_dir: Path, window_size: int,
-                        shift: int, sample_rate: int, anomaly_prob: float, seed: int):
-    rng = np.random.default_rng(seed)
-    features: list[np.ndarray] = []
-    labels: list[float] = []
+def build_feature_dataset(anomalous_dir: Path, subjects_dir: Path, feature_dir: Path):
+    """Window anomalous BVP and raw ACC into 8-second windows and extract features.
 
-    print("Building feature/anomaly dataset from:", end="")
-    for subject_dir in sorted(subjects_dir.glob('S*')):
-        signal = np.load(subject_dir / 'signal.npy')
-        window_count = (len(signal) - window_size) // shift + 1
-        for i in range(window_count):
-            window = signal[i * shift: i * shift + window_size]
-            if rng.random() < anomaly_prob:
-                window = inject_anomaly(window, rng)
-                labels.append(1.0)
-            else:
-                labels.append(0.0)
-            features.append(extract_features(window, sample_rate))
-        print(f" {subject_dir.name}", end="", flush=True)
+    BVP comes from anomalous-signals (raw with anomalies, un-normalized).
+    ACC comes from subject-signals (raw magnitude, 32 Hz).
+    Windows are labeled 1 if any BVP sample in the window is anomalous.
+    Feature vectors are standardized (z-score) and stats saved for on-device use.
+    """
+    feature_dir.mkdir(parents=True, exist_ok=True)
+
+    features: list[np.ndarray] = []
+    labels:   list[float]      = []
+
+    print("Building feature dataset from:", end="")
+    for subject_dir in sorted(anomalous_dir.glob('S*')):
+        subject_id = subject_dir.name
+        bvp = np.load(subject_dir / 'bvp.npy')
+        lbl = np.load(subject_dir / 'labels.npy')
+        acc = np.load(subjects_dir / subject_id / 'acc_mag.npy')
+
+        n_windows = min(
+            (len(bvp) - BVP_WINDOW) // BVP_SHIFT + 1,
+            (len(acc) - ACC_WINDOW) // ACC_SHIFT + 1,
+        )
+
+        for i in range(max(0, n_windows)):
+            bvp_start = i * BVP_SHIFT
+            acc_start = i * ACC_SHIFT
+
+            bvp_win = bvp[bvp_start : bvp_start + BVP_WINDOW]
+            acc_win = acc[acc_start : acc_start + ACC_WINDOW]
+            lbl_win = lbl[bvp_start : bvp_start + BVP_WINDOW]
+
+            features.append(extract_features(bvp_win, acc_win))
+            labels.append(1.0 if lbl_win.any() else 0.0)
+
+        print(f" {subject_id}", end="", flush=True)
     print()
 
     x = np.stack(features)
     y = np.asarray(labels, dtype=np.float32).reshape(-1, 1)
 
-    # Standardize features and persist the stats so on-device extraction can
-    # reproduce the exact same normalization.
     mean = x.mean(axis=0)
-    std = x.std(axis=0) + 1e-8
-    x = ((x - mean) / std).astype(np.float32)
+    std  = x.std(axis=0) + 1e-8
+    x    = ((x - mean) / std).astype(np.float32)
 
-    feature_dir.mkdir(parents=True, exist_ok=True)
-    np.save(feature_dir / 'features.npy', x)
-    np.save(feature_dir / 'labels.npy', y)
+    np.save(feature_dir / 'features.npy',     x)
+    np.save(feature_dir / 'labels.npy',       y)
     np.save(feature_dir / 'feature_stats.npy', np.stack([mean, std]).astype(np.float32))
     print(f"Saved {len(y)} windows ({int(y.sum())} anomalous) to {feature_dir}")
 
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
@@ -276,28 +375,38 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     datasets_dir: Path = args.datasets_dir
-    raw_dir = datasets_dir / RAW_SUBDIR
-    processed_dir = datasets_dir / PROCESSED_SUBDIR
-    subjects_dir = processed_dir / SUBJECTS_SUBDIR
-    feature_dir = processed_dir / FEATURE_SUBDIR
+    raw_dir       = datasets_dir / RAW_SUBDIR
+    subjects_dir  = datasets_dir / SUBJECTS_SUBDIR
+    normalized_dir = datasets_dir / NORMALIZED_SUBDIR
+    anomalous_dir = datasets_dir / ANOMALOUS_SUBDIR
+    feature_dir   = datasets_dir / FEATURE_SUBDIR
 
     if raw_dir.is_dir():
         print(f"Raw dataset already present at {raw_dir}")
     else:
         download_dataset(datasets_dir, raw_dir)
 
-    if subjects_dir.is_dir():
-        print(f"Processed subjects already present at {subjects_dir}")
+    if (subjects_dir / PARAMS_FILE).exists():
+        print(f"subject-signals already present at {subjects_dir}")
     else:
-        subjects_dir.mkdir(parents=True, exist_ok=True)
-        written = extract_signals(raw_dir, subjects_dir)
-        print(f"\nProcessed {len(written)} subjects into {subjects_dir}")
+        print(f"\nStage 1: Extracting raw signals into {subjects_dir}/ ...")
+        written = extract_subject_signals(raw_dir, subjects_dir)
+        print(f"Processed {len(written)} subjects")
+
+    if normalized_dir.is_dir() and any(normalized_dir.glob('S*')):
+        print(f"normalized-signals already present at {normalized_dir}")
+    else:
+        print(f"\nStage 2: Normalizing signals into {normalized_dir}/ ...")
+        normalize_signals(subjects_dir, normalized_dir)
+
+    if anomalous_dir.is_dir() and any(anomalous_dir.glob('S*')):
+        print(f"anomalous-signals already present at {anomalous_dir}")
+    else:
+        print(f"\nStage 3: Creating anomalous signals in {anomalous_dir}/ ...")
+        create_anomalous_signals(subjects_dir, anomalous_dir)
 
     if (feature_dir / 'features.npy').exists():
-        print(f"Feature/anomaly dataset already present at {feature_dir}")
+        print(f"feature-anomaly already present at {feature_dir}")
     else:
-        build_feature_cache(
-            subjects_dir, feature_dir, window_size=WINDOW_SIZE, shift=SHIFT,
-            sample_rate=SAMPLE_RATE, anomaly_prob=ANOMALY_PROB, seed=FEATURE_SEED,
-        )
-
+        print(f"\nStage 4: Building feature dataset in {feature_dir}/ ...")
+        build_feature_dataset(anomalous_dir, subjects_dir, feature_dir)
