@@ -24,9 +24,9 @@ WINDOW_SECONDS = 8
 SHIFT_SECONDS = 3
 BVP_WINDOW = BVP_RATE * WINDOW_SECONDS    # 512
 ACC_WINDOW = ACC_RATE * WINDOW_SECONDS    # 256
-BVP_SHIFT = BVP_RATE * SHIFT_SECONDS     # 192
-ACC_SHIFT = ACC_RATE * SHIFT_SECONDS     # 96
-CONTEXT_WINDOW_S = 120                   # 2 minutes
+BVP_SHIFT  = BVP_RATE * SHIFT_SECONDS     # 192
+ACC_SHIFT  = ACC_RATE * SHIFT_SECONDS     # 96
+CONTEXT_WINDOW_S = 120                    # 2 minutes
 ANOMALY_PROB = 0.5
 FEATURE_SEED = 1234
 N_FEATURES = 17
@@ -35,7 +35,7 @@ N_FEATURES = 17
 def download_dataset(datasets_dir: Path, raw_dir: Path):
     datasets_dir.mkdir(parents=True, exist_ok=True)
 
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(dir=datasets_dir) as tmp:
         tmp_dir = Path(tmp)
         outer_zip = tmp_dir / 'ppg-dalia.zip'
         print(f"Downloading {DATASET_URL} ...")
@@ -285,7 +285,10 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
 # ---------------------------------------------------------------------------
 
 def extract_features(bvp_window: np.ndarray, acc_window: np.ndarray) -> np.ndarray:
-    """17-feature vector from an 8-second BVP window (512 samples) and ACC window (256 samples)."""
+    """17-feature vector from an 8-second BVP window (512 samples) and ACC window (256 samples).
+
+    Must stay in sync with firmware/main/ml/features.c.
+    """
     feats: list[float] = []
 
     for ch in (bvp_window, acc_window):
@@ -299,14 +302,20 @@ def extract_features(bvp_window: np.ndarray, acc_window: np.ndarray) -> np.ndarr
             float(np.mean(np.abs(np.diff(ch)))),
         ]
 
-    bvp = bvp_window - bvp_window.mean()
-    feats.append(float(np.mean(np.abs(np.diff(np.sign(bvp)))) / 2))
+    # Zero-crossing rate of mean-centred BVP (matches firmware sign-change loop)
+    bvp   = bvp_window - bvp_window.mean()
+    signs = np.sign(bvp)
+    feats.append(float(np.sum(np.abs(np.diff(signs)) > 0)) / (len(bvp) - 1))
 
-    spectrum = np.abs(np.fft.rfft(bvp))
-    freqs    = np.fft.rfftfreq(len(bvp), d=1.0 / BVP_RATE)
-    feats.append(float(freqs[np.argmax(spectrum)]))
+    # Spectral features: Hann window + power (magnitude²) ratios
+    hann     = np.hanning(len(bvp))
+    windowed = bvp * hann
+    rfft     = np.fft.rfft(windowed)
+    power    = rfft.real ** 2 + rfft.imag ** 2
+    freqs    = np.fft.rfftfreq(len(bvp_window), d=1.0 / BVP_RATE)
+    feats.append(float(freqs[np.argmax(power)]))
     band = (freqs >= 0.7) & (freqs <= 3.5)
-    feats.append(float(spectrum[band].sum() / (spectrum.sum() + 1e-8)))
+    feats.append(float(power[band].sum() / (power.sum() + 1e-8)))
 
     return np.asarray(feats, dtype=np.float32)
 

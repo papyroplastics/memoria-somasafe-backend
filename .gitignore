@@ -1,7 +1,6 @@
 datasets/
 results/
 out/
-uv.lock
 
 .venv/
 venv/
