@@ -6,7 +6,7 @@ from pathlib import Path
 from .common import Dense, LSTMCell, TrainableModel
 from ..optimizers import Adam
 from ..training import mse_loss, fed_avg
-from ..saving import save_odt, save_opti
+from ..saving import save_tainable_model, save_optimized_model
 
 
 class ConditionalLSTMAutoencoder(TrainableModel):
@@ -107,7 +107,7 @@ def dataset_slice(ds: tf.data.Dataset, num_slices: int, slice_idx: int):
     return ds.skip(slice_idx * (len(ds) // num_slices)).take(len(ds) // num_slices)
 
 
-def autoencoder_train_loop(
+def train_loop(
         model,
         subject_train_datasets: list[tf.data.Dataset],
         eval_dataset: tf.data.Dataset,
@@ -199,13 +199,13 @@ def build_subject_dataset(
     return tf.data.Dataset.zip((signal_ds, context_ds, static_ds)) # type: ignore
 
 
-def run(result_dir: Path):
+def run(data_root: Path, result_dir: Path, seed: int):
     """Reconstruction-based anomaly model on PPG-DaLiA. Exports a trainable
     SavedModel + TFLite; int8 export may fail (LSTM is poorly supported on
     TFLM) and is skipped if so."""
-    tf.random.set_seed(1234)
+    tf.random.set_seed(seed)
 
-    data_dir = Path('datasets') / 'ppg-dalia-processed' / 'subjects'
+    data_dir = data_root / 'ppg-dalia-processed' / 'subjects'
     if not data_dir.is_dir():
         raise SystemExit(f"Processed dataset not found at {data_dir}. Run get-dataset.py first.")
 
@@ -235,18 +235,13 @@ def run(result_dir: Path):
         hidden_dim=64, latent_dim=32, cond_embed_dim=16, learning_rate=1e-3,
     )
 
-    autoencoder_train_loop(model, subject_train_datasets, eval_dataset, num_slices, num_passes)
+    train_loop(model, subject_train_datasets, eval_dataset, num_slices, num_passes)
 
     print("Compiling and saving model")
-    saved_model, sm_path = save_odt(result_dir, 'pre-train', model)
+    saved_model, sm_path = save_tainable_model(result_dir, 'pre-train', model)
+    rep_dataset = eval_dataset.map(lambda s, c, st: {'signal': s, 'context': c, 'static': st})
+    save_optimized_model(result_dir, 'pre-train', model, rep_dataset)
     print(f"Saved model to {sm_path}")
-
-    print("Quantizing model")
-    try:
-        rep_dataset = eval_dataset.map(lambda s, c, st: {'signal': s, 'context': c, 'static': st})
-        save_opti(result_dir, 'pre-train', model, rep_dataset)
-    except Exception as e:  # noqa: BLE001 - conversion errors are informational here
-        print(f"   Quantized export skipped (LSTM int8 unsupported?): {e}")
 
     for signal, context, static in eval_dataset.take(1):
         recon = saved_model.eval(signal, context, static)['reconstruction']

@@ -1,10 +1,11 @@
 from pathlib import Path
-
 import numpy as np
 import tensorflow as tf
+import matplotlib.pyplot as plt
 
 from .common import Dense, TrainableModel
 from ..optimizers import Adam
+from ..saving import save_tainable_model, save_optimized_model
 
 
 class FeatureMLP(TrainableModel):
@@ -34,7 +35,7 @@ class FeatureMLP(TrainableModel):
         self.out_layer = Dense(hidden_dim, 1, activation=None)
 
         self.eval = tf.function(self.eval_eager, input_signature=[
-            tf.TensorSpec(shape=self.in_shape, dtype=tf.float32, name="feature_0")
+            tf.TensorSpec(shape=self.in_shape, dtype=tf.float32)
         ])
 
         self._init_save_restore()
@@ -42,29 +43,49 @@ class FeatureMLP(TrainableModel):
         self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
 
         self.train = tf.function(self.train_eager, input_signature=[
-            tf.TensorSpec(shape=self.in_shape, dtype=tf.float32, name="feature_0"),
-            tf.TensorSpec(shape=self.label_shape, dtype=tf.float32, name="label_0"),
+            tf.TensorSpec(shape=self.in_shape, dtype=tf.float32),
+            tf.TensorSpec(shape=self.label_shape, dtype=tf.float32),
         ])
 
-    def _logits(self, data):
-        activation = self.in_layer(data)
+    def _logits(self, features):
+        activation = self.in_layer(features)
         for layer in self.hidden_layers:
             activation = layer(activation)
         return self.out_layer(activation)
 
-    def eval_eager(self, data: tf.Tensor):
-        logits = self._logits(data)
-        return {'logit_0': logits, 'score_0': tf.sigmoid(logits)}
+    def eval_eager(self, features: tf.Tensor):
+        logits = self._logits(features)
+        return {'logit': logits, 'score': tf.sigmoid(logits)}
 
-    def train_eager(self, data: tf.Tensor, labels: tf.Tensor):
+    def train_eager(self, features: tf.Tensor, labels: tf.Tensor):
         with tf.GradientTape() as tape:
-            logits = self._logits(data)
+            logits = self._logits(features)
             loss = tf.reduce_mean(
                 tf.nn.sigmoid_cross_entropy_with_logits(labels=labels, logits=logits))
         grads = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply(self.trainable_variables, grads)
-        return {'loss_0': loss}
+        return {'loss': loss}
 
+
+def load_feature_dataset(data_root: Path, batch_size: int, seed: int, train_split: float = 0.8):
+    feature_dir = data_root / 'feature-anomaly'
+    feature_file = feature_dir / 'features.npy'
+    label_file = feature_dir / 'labels.npy'
+    if not feature_file.exists() or not label_file.exists():
+        raise FileNotFoundError(f"Feature dataset not found at {feature_dir}. Run get-dataset.py first.")
+
+    x = np.load(feature_file)
+    y = np.load(label_file)
+
+    dataset = (tf.data.Dataset.from_tensor_slices((x, y))
+               .shuffle(len(x), seed=seed).batch(batch_size, drop_remainder=True))
+
+    train_count = int(len(dataset) * train_split)
+
+    return dataset.take(train_count), dataset.skip(train_count)
+
+def get_rep_dataset_feed(dataset: tf.data.Dataset) -> tf.data.Dataset:
+    return dataset.take(10).map(lambda d, l: {'features': d})
 
 def _accuracy(model, dataset: tf.data.Dataset) -> float:
     correct, total = 0.0, 0.0
@@ -75,7 +96,7 @@ def _accuracy(model, dataset: tf.data.Dataset) -> float:
     return correct / total if total else 0.0
 
 
-def classifier_train_loop(model, train_dataset, eval_dataset, epochs):
+def train_loop(model, train_dataset, eval_dataset, epochs):
     history = []
     for epoch in range(epochs):
         loss = 0.0
@@ -87,47 +108,35 @@ def classifier_train_loop(model, train_dataset, eval_dataset, epochs):
             print(f"epoch={epoch:03d} loss={loss:.4f} eval_acc={acc:.3f}")
     return history
 
+def run(data_root: Path, result_dir: Path, seed: int):
+    tf.random.set_seed(seed)
 
-def run(result_dir: Path):
-    import matplotlib.pyplot as plt
-    from ..saving import save_odt, save_opti
+    batch_size = 1
+    epochs = 15
 
-    tf.random.set_seed(1234)
+    train_dataset, eval_dataset = load_feature_dataset(data_root, batch_size, seed)
+    rep_dataset = get_rep_dataset_feed(eval_dataset)
 
-    feature_dir = Path('datasets') / 'ppg-dalia-processed' / 'feature-anomaly'
-    feature_file = feature_dir / 'features.npy'
-    label_file = feature_dir / 'labels.npy'
-    if not feature_file.exists() or not label_file.exists():
-        raise SystemExit(f"Feature dataset not found at {feature_dir}. Run get-dataset.py first.")
-
-    batch_size = 64
-    train_split = 0.8
-
-    x = np.load(feature_file)
-    y = np.load(label_file)
-
-    dataset = (tf.data.Dataset.from_tensor_slices((x, y))
-               .shuffle(len(x), seed=1234).batch(batch_size, drop_remainder=True))
-    train_count = int(len(dataset) * train_split)
-    train_dataset = dataset.take(train_count)
-    eval_dataset = dataset.skip(train_count)
+    n_features = next(iter(eval_dataset))[0].shape[-1]
 
     model = FeatureMLP(
-        name='feature_anomaly', batch_size=batch_size, n_features=x.shape[1],
-        hidden_dim=32, hidden_layers=1, learning_rate=1e-3,
+        name='feature_anomaly',
+        batch_size=batch_size,
+        n_features=n_features,
+        hidden_dim=32,
+        hidden_layers=3,
+        learning_rate=1e-3,
     )
 
-    saved_model, sm_path = save_odt(result_dir, 'pre-train', model)
+    saved_model, sm_path = save_tainable_model(result_dir, 'pre-train', model)
+    save_optimized_model(result_dir, 'pre-train', model, rep_dataset)
     print(f"Saved untrained model to {sm_path}")
-    rep_dataset = eval_dataset.map(lambda d, l: {'data': d})
-    save_opti(result_dir, 'pre-train', model, rep_dataset)
 
-    history = classifier_train_loop(model, train_dataset, eval_dataset, epochs=50)
+    history = train_loop(model, train_dataset, eval_dataset, epochs)
 
-    saved_model, sm_path = save_odt(result_dir, 'post-train', model)
+    saved_model, sm_path = save_tainable_model(result_dir, 'post-train', model)
+    save_optimized_model(result_dir, 'post-train', model, rep_dataset)
     print(f"Saved trained model to {sm_path}")
-    rep_dataset = eval_dataset.map(lambda d, l: {'data': d})
-    save_opti(result_dir, 'post-train', model, rep_dataset)
 
     epochs, losses, accs = zip(*history)
     fig, ax = plt.subplots()

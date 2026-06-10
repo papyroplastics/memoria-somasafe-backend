@@ -3,6 +3,8 @@ from pathlib import Path
 
 from worker.models import mlp, cond_lstm_autoencoder, feature_mlp
 
+SEED = 1234
+
 # Each model module owns its data prep + training loop and exposes run(result_dir).
 RUNNERS = {
     'sine': mlp.run,
@@ -10,18 +12,14 @@ RUNNERS = {
     'feature-mlp': feature_mlp.run,
 }
 
+parser = argparse.ArgumentParser(
+    description='Train a SomaSafe model and export SavedModel + TFLite artifacts '
+                'into results/<model>.')
+parser.add_argument('model', choices=sorted(RUNNERS), help='Model to train')
+args = parser.parse_args()
 
-def main():
-    parser = argparse.ArgumentParser(
-        description='Train a SomaSafe model and export SavedModel + TFLite artifacts '
-                    'into results/<model>.')
-    parser.add_argument('model', choices=sorted(RUNNERS), help='Model to train')
-    args = parser.parse_args()
+data_dir = Path('datasets')
+result_dir = Path('results') / args.model
+result_dir.mkdir(parents=True, exist_ok=True)
+RUNNERS[args.model](data_dir, result_dir, SEED)
 
-    result_dir = Path('results') / args.model
-    result_dir.mkdir(parents=True, exist_ok=True)
-    RUNNERS[args.model](result_dir)
-
-
-if __name__ == '__main__':
-    main()

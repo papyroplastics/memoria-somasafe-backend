@@ -9,9 +9,10 @@ dependencies = [
     "tensorflow==2.21.*",
     "matplotlib==3.10.*",
     "pyqt6==6.11.*",
-    "ai-edge-litert>=2.1.4",
+    "ai-edge-litert>=2.1.5",
     "numpy>=2.4.*",
     "pandas>=2.2",
+    "pytest>=9.0.3",
 ]
 
 [dependency-groups]

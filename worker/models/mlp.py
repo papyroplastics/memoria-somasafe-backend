@@ -66,13 +66,13 @@ def basic_train_loop(model, train_dataset: tf.data.Dataset,
             print(f"epoch={epoch:03d} train_loss={train_loss:.6f} eval_loss={eval_loss:.6f}")
 
 
-def run(result_dir: Path):
+def run(data_root: Path, result_dir: Path, seed: int):
     """``sin(x)`` reference demo: trains, exports, fine-tunes the loaded model,
     and verifies flatten-based weight transfer (the FedAvg primitive)."""
     import matplotlib.pyplot as plt
-    from ..saving import save_odt, save_opti
+    from ..saving import save_tainable_model, save_optimized_model
 
-    tf.random.set_seed(1234)
+    tf.random.set_seed(seed)
 
     dataset_size, dataset_split, batch_size = 500, 0.8, 50
 
@@ -92,9 +92,9 @@ def run(result_dir: Path):
 
     basic_train_loop(model, train_dataset, eval_dataset, epochs=10)
 
-    saved_model, _ = save_odt(result_dir, 'pre-train', model)
+    saved_model, _ = save_tainable_model(result_dir, 'pre-train', model)
     rep_dataset = eval_dataset.map(lambda x, y: {'data': x})
-    save_opti(result_dir, 'pre-train', model, rep_dataset)
+    save_optimized_model(result_dir, 'pre-train', model, rep_dataset)
 
     # Fine-tune the reloaded SavedModel, then transfer its weights back via
     # the flatten save/restore path to confirm they round-trip exactly.
@@ -108,8 +108,8 @@ def run(result_dir: Path):
     pred_restored = tf.concat([model.eval(bx)['result'] for bx in test_dataset], 0)
     print(f"restore max abs error={tf.reduce_max(tf.abs(pred_restored - pred_saved)):.8f}")
 
-    save_odt(result_dir, 'post-train', model)
-    save_opti(result_dir, 'post-train', model, rep_dataset)
+    save_tainable_model(result_dir, 'post-train', model)
+    save_optimized_model(result_dir, 'post-train', model, rep_dataset)
 
     used_x = test_x[:len(pred_saved)]
     plt.figure()
