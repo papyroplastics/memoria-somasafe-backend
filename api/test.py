@@ -6,8 +6,14 @@ from .main import app
 
 client = TestClient(app)
 
+
 def test_quantize_feature_mlp():
-    response = client.get("/model/trainable/feature-mlp")
+    list_response = client.get("/model/list")
+    assert list_response.status_code == 200
+    model_info = next(m for m in list_response.json() if m["key"] == "feature-mlp")
+    model_id = model_info["model_id"]
+
+    response = client.get(f"/model/trainable/feature-mlp/{model_id}")
     assert response.status_code == 200
 
     compiled = CompiledModel.from_buffer(response.content)
@@ -18,7 +24,7 @@ def test_quantize_feature_mlp():
     parameters = out_buf.read(num_elements, np.float32)
 
     response = client.post(
-        "/model/quantize/feature-mlp",
+        f"/model/quantize/feature-mlp/{model_id}",
         json={'parameters': parameters.tolist()},
     )
     assert response.status_code == 200

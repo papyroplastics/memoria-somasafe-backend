@@ -1,3 +1,5 @@
+import datetime
+from enum import Enum
 from pathlib import Path
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse, Response
@@ -13,7 +15,14 @@ data_dir = Path('datasets/')
 model_dir = Path('results/')
 model_file = "post-train-odt.tflite"
 
-batch_size=1
+batch_size = 1
+
+
+class ModelPurpose(str, Enum):
+    train_only = "train-only"
+    embed_infer = "embed-infer"
+    app_infer = "app-infer"
+
 
 feature_mlp_ds = load_feature_dataset(data_dir, batch_size, 1234)[1]
 feature_mlp_n_feat = int(next(iter(feature_mlp_ds))[0].shape[-1])
@@ -22,8 +31,11 @@ models = {
     "feature-mlp": {
         "meta": {
             "name": "Feature-based MLP",
-            "last_updated": "2026-06-01T00:00:00Z",
-            "purpose": "train-only",
+            "last_updated": datetime.datetime(2026, 6, 1),
+            "purpose": ModelPurpose.train_only,
+            "firmware_id": None,
+            "app_version": "1.0.0",
+            "model_id": 1,
         },
         "model": FeatureMLP(
             name='feature_anomaly',
@@ -51,19 +63,24 @@ async def list_models():
     return MODEL_LIST
 
 
-@router.get("/trainable/{key}", response_class=FileResponse)
-async def get_model(key: str):
-    if key not in models:
+@router.get("/trainable/{key}/{id}", response_class=FileResponse)
+async def get_model(key: str, id: int):
+    entry = models.get(key)
+    if entry is None:
         raise HTTPException(status_code=404, detail=f"Model '{key}' not found")
+    if id != entry["meta"]["model_id"]:
+        raise HTTPException(status_code=404, detail=f"Model '{key}' version {id} not found")
     return FileResponse(path=model_dir / key / model_file, filename=f"{key}.tflite")
 
 
-@router.post("/quantize/{key}")
-async def quantize_model(key: str, weights: ModelWeights):
-    if key not in models:
+@router.post("/quantize/{key}/{id}")
+async def quantize_model(key: str, id: int, weights: ModelWeights):
+    entry = models.get(key)
+    if entry is None:
         raise HTTPException(status_code=404, detail=f"Model '{key}' not found")
+    if id != entry["meta"]["model_id"]:
+        raise HTTPException(status_code=404, detail=f"Model '{key}' version {id} not found")
 
-    entry = models[key]
     entry["model"].restore(tf.constant(weights.parameters, dtype=tf.float32))
     buf = get_optimized_model(entry["model"], entry["rep_dataset"])
 
