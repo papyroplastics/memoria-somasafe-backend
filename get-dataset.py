@@ -21,7 +21,7 @@ DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'
 BVP_RATE = 64
 ACC_RATE = 32
 WINDOW_SECONDS = 8
-SHIFT_SECONDS = 3
+SHIFT_SECONDS = 8
 BVP_WINDOW = BVP_RATE * WINDOW_SECONDS    # 512
 ACC_WINDOW = ACC_RATE * WINDOW_SECONDS    # 256
 BVP_SHIFT  = BVP_RATE * SHIFT_SECONDS     # 192
@@ -326,12 +326,12 @@ def build_feature_dataset(anomalous_dir: Path, subjects_dir: Path, feature_dir: 
     BVP comes from anomalous-signals (raw with anomalies, un-normalized).
     ACC comes from subject-signals (raw magnitude, 32 Hz).
     Windows are labeled 1 if any BVP sample in the window is anomalous.
-    Feature vectors are standardized (z-score) and stats saved for on-device use.
+    Features are stored per subject under S*/; standardization (z-score) stats
+    are still computed globally and saved at the top level for on-device use.
     """
     feature_dir.mkdir(parents=True, exist_ok=True)
 
-    features: list[np.ndarray] = []
-    labels:   list[float]      = []
+    per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
     print("Building feature dataset from:", end="")
     for subject_dir in sorted(anomalous_dir.glob('S*')):
@@ -345,6 +345,8 @@ def build_feature_dataset(anomalous_dir: Path, subjects_dir: Path, feature_dir: 
             (len(acc) - ACC_WINDOW) // ACC_SHIFT + 1,
         )
 
+        features: list[np.ndarray] = []
+        labels:   list[float]      = []
         for i in range(max(0, n_windows)):
             bvp_start = i * BVP_SHIFT
             acc_start = i * ACC_SHIFT
@@ -356,20 +358,28 @@ def build_feature_dataset(anomalous_dir: Path, subjects_dir: Path, feature_dir: 
             features.append(extract_features(bvp_win, acc_win))
             labels.append(1.0 if lbl_win.any() else 0.0)
 
+        per_subject[subject_id] = (
+            np.stack(features),
+            np.asarray(labels, dtype=np.float32).reshape(-1, 1),
+        )
         print(f" {subject_id}", end="", flush=True)
     print()
 
-    x = np.stack(features)
-    y = np.asarray(labels, dtype=np.float32).reshape(-1, 1)
+    all_x = np.concatenate([x for x, _ in per_subject.values()])
+    mean = all_x.mean(axis=0)
+    std  = all_x.std(axis=0) + 1e-8
 
-    mean = x.mean(axis=0)
-    std  = x.std(axis=0) + 1e-8
-    x    = ((x - mean) / std).astype(np.float32)
+    total = anomalous = 0
+    for subject_id, (x, y) in per_subject.items():
+        save_dir = feature_dir / subject_id
+        save_dir.mkdir(parents=True, exist_ok=True)
+        np.save(save_dir / 'features.npy', ((x - mean) / std).astype(np.float32))
+        np.save(save_dir / 'labels.npy',   y)
+        total += len(y)
+        anomalous += int(y.sum())
 
-    np.save(feature_dir / 'features.npy',     x)
-    np.save(feature_dir / 'labels.npy',       y)
     np.save(feature_dir / 'feature_stats.npy', np.stack([mean, std]).astype(np.float32))
-    print(f"Saved {len(y)} windows ({int(y.sum())} anomalous) to {feature_dir}")
+    print(f"Saved {total} windows ({anomalous} anomalous) to {feature_dir}")
 
 
 # ---------------------------------------------------------------------------
@@ -414,7 +424,7 @@ if __name__ == '__main__':
         print(f"\nStage 3: Creating anomalous signals in {anomalous_dir}/ ...")
         create_anomalous_signals(subjects_dir, anomalous_dir)
 
-    if (feature_dir / 'features.npy').exists():
+    if (feature_dir / 'feature_stats.npy').exists():
         print(f"feature-anomaly already present at {feature_dir}")
     else:
         print(f"\nStage 4: Building feature dataset in {feature_dir}/ ...")

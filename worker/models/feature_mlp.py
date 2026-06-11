@@ -54,8 +54,7 @@ class FeatureMLP(TrainableModel):
         return self.out_layer(activation)
 
     def eval_eager(self, features: tf.Tensor):
-        logits = self._logits(features)
-        return {'logit': logits, 'score': tf.sigmoid(logits)}
+        return {'score': tf.sigmoid(self._logits(features))}
 
     def train_eager(self, features: tf.Tensor, labels: tf.Tensor):
         with tf.GradientTape() as tape:
@@ -69,13 +68,12 @@ class FeatureMLP(TrainableModel):
 
 def load_feature_dataset(data_root: Path, batch_size: int, seed: int, train_split: float = 0.8):
     feature_dir = data_root / 'feature-anomaly'
-    feature_file = feature_dir / 'features.npy'
-    label_file = feature_dir / 'labels.npy'
-    if not feature_file.exists() or not label_file.exists():
+    subject_dirs = sorted(feature_dir.glob('S*'))
+    if not subject_dirs:
         raise FileNotFoundError(f"Feature dataset not found at {feature_dir}. Run get-dataset.py first.")
 
-    x = np.load(feature_file)
-    y = np.load(label_file)
+    x = np.concatenate([np.load(d / 'features.npy') for d in subject_dirs])
+    y = np.concatenate([np.load(d / 'labels.npy')   for d in subject_dirs])
 
     dataset = (tf.data.Dataset.from_tensor_slices((x, y))
                .shuffle(len(x), seed=seed).batch(batch_size, drop_remainder=True))
@@ -112,7 +110,7 @@ def run(data_root: Path, result_dir: Path, seed: int):
     tf.random.set_seed(seed)
 
     batch_size = 1
-    epochs = 15
+    epochs = 5
 
     train_dataset, eval_dataset = load_feature_dataset(data_root, batch_size, seed)
     rep_dataset = get_rep_dataset_feed(eval_dataset)
