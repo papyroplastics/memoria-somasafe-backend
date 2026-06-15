@@ -1,5 +1,6 @@
 import math
 import tensorflow as tf
+from typing import Callable
 
 class UnboundError(NotImplementedError):
     def __init__(self, message: str):
@@ -12,17 +13,17 @@ def unbound(*_, **__):
 
 
 class Dense(tf.Module):
-    def __init__(self, in_dim, out_dim, activation=tf.tanh):
+    def __init__(self, in_dim: int, out_dim: int, activation: Callable | None =None):
         limit = math.sqrt(6.0 / (in_dim + out_dim))
-        self.w = tf.Variable(tf.random.uniform(
+        self.weight = tf.Variable(tf.random.uniform(
             shape=[in_dim, out_dim], minval=-limit, maxval=limit
         ))
-        self.b = tf.Variable(tf.zeros(shape=[out_dim]))
-        self.f = activation
+        self.bias = tf.Variable(tf.zeros(shape=[out_dim]))
+        self.activation = activation if activation else (lambda x: x)
 
     def __call__(self, data):
-        out = data @ self.w + self.b
-        return out if self.f is None else self.f(out)
+        out = data @ self.weight + self.bias
+        return self.activation(out)
 
 
 class LSTMCell(tf.Module):

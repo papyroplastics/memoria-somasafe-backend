@@ -32,7 +32,7 @@ class FeatureMLP(TrainableModel):
         self.hidden_layers = [
             Dense(hidden_dim, hidden_dim, activation=tf.nn.relu) for _ in range(hidden_layers)
         ]
-        self.out_layer = Dense(hidden_dim, 1, activation=None)
+        self.out_layer = Dense(hidden_dim, 1)
 
         self.eval = tf.function(self.eval_eager, input_signature=[
             tf.TensorSpec(shape=self.in_shape, dtype=tf.float32)
@@ -54,7 +54,8 @@ class FeatureMLP(TrainableModel):
         return self.out_layer(activation)
 
     def eval_eager(self, features: tf.Tensor):
-        return {'score': tf.sigmoid(self._logits(features))}
+        #return {'score': tf.sigmoid(self._logits(features))}
+        return {'logits': self._logits(features)}
 
     def train_eager(self, features: tf.Tensor, labels: tf.Tensor):
         with tf.GradientTape() as tape:
@@ -88,7 +89,7 @@ def get_rep_dataset_feed(dataset: tf.data.Dataset) -> tf.data.Dataset:
 def _accuracy(model, dataset: tf.data.Dataset) -> float:
     correct, total = 0.0, 0.0
     for x, y in dataset:
-        pred = tf.cast(model.eval(x)['score'] > 0.5, tf.float32)
+        pred = tf.cast((model.eval(x)['logits'] > 0.5), tf.float32)
         correct += float(tf.reduce_sum(tf.cast(tf.equal(pred, y), tf.float32)))
         total += float(y.shape[0])
     return correct / total if total else 0.0
