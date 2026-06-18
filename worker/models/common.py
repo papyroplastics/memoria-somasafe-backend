@@ -87,6 +87,51 @@ class LSTMCell(tf.Module):
         return h_new, c_new
 
 
+class GRUCell(tf.Module):
+    def __init__(self, in_dim: int, hidden_dim: int):
+        self.hidden_dim = hidden_dim
+
+        limit_w = math.sqrt(6.0 / (in_dim + 3 * hidden_dim))
+        self.W = tf.Variable(tf.random.uniform(
+            shape=[in_dim, 3 * hidden_dim], minval=-limit_w, maxval=limit_w))
+
+        limit_zr = math.sqrt(6.0 / (hidden_dim + 2 * hidden_dim))
+        self.U_zr = tf.Variable(tf.random.uniform(
+            shape=[hidden_dim, 2 * hidden_dim], minval=-limit_zr, maxval=limit_zr))
+
+        limit_n = math.sqrt(6.0 / (2 * hidden_dim))
+        self.U_n = tf.Variable(tf.random.uniform(
+            shape=[hidden_dim, hidden_dim], minval=-limit_n, maxval=limit_n))
+
+        self.b = tf.Variable(tf.zeros(shape=[3 * hidden_dim]))
+
+    def zero_state(self, batch_size: int):
+        return tf.zeros([batch_size, self.hidden_dim])
+
+    def step(self, h, x_t):
+        xz, xr, xn = tf.split(x_t @ self.W + self.b, 3, axis=-1)
+        hz, hr = tf.split(h @ self.U_zr, 2, axis=-1)
+        z = tf.sigmoid(xz + hz)
+        r = tf.sigmoid(xr + hr)
+        n = tf.tanh(xn + (r * h) @ self.U_n)
+        return (1.0 - z) * n + z * h
+
+
+class Conv1D(tf.Module):
+    def __init__(self, in_ch: int, out_ch: int, kernel_size: int, stride: int = 1,
+                 activation: Callable | None = None):
+        limit = math.sqrt(6.0 / (kernel_size * (in_ch + out_ch)))
+        self.kernel = tf.Variable(tf.random.uniform(
+            shape=[kernel_size, in_ch, out_ch], minval=-limit, maxval=limit))
+        self.bias = tf.Variable(tf.zeros(shape=[out_ch]))
+        self.stride = stride
+        self.activation = activation if activation else (lambda x: x)
+
+    def __call__(self, x):
+        out = tf.nn.conv1d(x, self.kernel, stride=self.stride, padding='SAME') + self.bias
+        return self.activation(out)
+
+
 class TrainableModel(tf.Module):
     """Base class for all LiteRT-trainable / FedAvg-compatible models.
 

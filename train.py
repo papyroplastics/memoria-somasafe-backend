@@ -4,7 +4,8 @@ import tensorflow as tf
 
 import matplotlib.pyplot as plt
 
-from worker.models import lstm_autoencoder, cond_lstm_autoencoder, feature_mlp
+from worker.models import (lstm_autoencoder, cond_lstm_autoencoder,
+                           gru_autoencoder, cnn_autoencoder, feature_mlp)
 from worker.models.common import Trainer
 from worker.training import normal_loop, federated_loop, History
 from worker.saving import save_tainable_model, save_optimized_model
@@ -16,6 +17,8 @@ TRAINERS = {
     'feature-mlp': feature_mlp.get_trainer,
     'lstm-ae': lstm_autoencoder.get_trainer,
     'cond-lstm-ae': cond_lstm_autoencoder.get_trainer,
+    'gru-ae': gru_autoencoder.get_trainer,
+    'cnn-ae': cnn_autoencoder.get_trainer,
 }
 
 
@@ -34,11 +37,11 @@ def run_loop(trainer: Trainer, data_dir: Path, loop: str,
 
 
 def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset):
-    saved_model, sm_path = save_tainable_model(result_dir, 'post-train', trainer.model)
+    saved_model, sm_path = save_tainable_model(result_dir, trainer.model)
     print(f"Saved trainable model to {sm_path}")
     try:
         rep_dataset = trainer.representative_dataset(eval_dataset)
-        save_optimized_model(result_dir, 'post-train', trainer.model, rep_dataset)
+        save_optimized_model(result_dir, trainer.model, rep_dataset)
     except Exception as e:
         print(f"Skipped int8 export (conversion failed): {e}")
 

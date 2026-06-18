@@ -19,9 +19,9 @@ def optimize_saved_model(rep_dataset: tf.data.Dataset, saved_dir: Path) -> bytes
     return converter.convert()
 
 
-def save_tainable_model(output_dir: Path, prefix: str, model: TrainableModel) -> tuple[TrainableModel, Path]:
-    saved_model_dir = output_dir / (prefix + '-odt-model')
-    compiled_model_file = output_dir / (prefix + '-odt.tflite')
+def save_tainable_model(output_dir: Path, model: TrainableModel) -> tuple[TrainableModel, Path]:
+    saved_model_dir = output_dir / 'trainable-model'
+    compiled_model_file = output_dir / 'trainable.tflite'
 
     tf.saved_model.save(model, str(saved_model_dir), signatures={
         'eval': model.eval.get_concrete_function(),
@@ -39,9 +39,9 @@ def save_tainable_model(output_dir: Path, prefix: str, model: TrainableModel) ->
     return tf.saved_model.load(str(saved_model_dir)), saved_model_dir
 
 
-def save_optimized_model(output_dir: Path, prefix: str, model: TrainableModel, rep_dataset: tf.data.Dataset):
-    saved_model_dir = output_dir / (prefix + '-opti-model')
-    compiled_model_file = output_dir / (prefix + '-opti.tflite')
+def save_optimized_model(output_dir: Path, model: TrainableModel, rep_dataset: tf.data.Dataset):
+    saved_model_dir = output_dir / 'quantized-model'
+    compiled_model_file = output_dir / 'quantized.tflite'
 
     tf.saved_model.save(model, str(saved_model_dir), signatures={
         'eval': model.eval.get_concrete_function(),

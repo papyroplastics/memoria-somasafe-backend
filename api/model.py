@@ -14,7 +14,7 @@ router = APIRouter(prefix="/model")
 seed = 1234
 data_dir = Path('datasets/')
 model_dir = Path('results/')
-model_file = "post-train-odt.tflite"
+model_file = "trainable.tflite"
 
 class ModelPurpose(str, Enum):
     train_only = "train-only"
