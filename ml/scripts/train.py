@@ -1,14 +1,18 @@
 import argparse
 from pathlib import Path
 import tensorflow as tf
-
 import matplotlib.pyplot as plt
 
-from worker.models import (lstm_autoencoder, cond_lstm_autoencoder,
-                           gru_autoencoder, cnn_autoencoder, feature_mlp)
-from worker.models.common import Trainer
-from worker.training import normal_loop, federated_loop, History
-from worker.saving import save_tainable_model, save_optimized_model
+from ..models.common import Trainer
+from ..training import normal_loop, federated_loop, History
+from ..saving import save_tainable_model, save_optimized_model
+from ..models import (
+    lstm_autoencoder,
+    cond_lstm_autoencoder,
+    gru_autoencoder,
+    cnn_autoencoder,
+    feature_mlp
+)
 
 SEED = 1234
 

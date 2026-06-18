@@ -6,14 +6,23 @@ readme = "README.md"
 requires-python = "==3.13.*"
 dependencies = [
     "fastapi[standard]>=0.136.3",
-    "tensorflow==2.21.*",
-    "matplotlib==3.10.*",
-    "pyqt6==6.11.*",
+    "tensorflow>=2.21.0",
+    "matplotlib>=3.10.9",
+    "pyqt6>=6.11.0",
     "ai-edge-litert>=2.1.5",
-    "numpy>=2.4.*",
+    "numpy>=2.4.6",
     "pandas>=2.2",
     "pytest>=9.0.3",
+    "celery[redis]>=5.4",
+    "redis>=5.2",
+    "sqlmodel>=0.0.22",
+    "psycopg[binary]>=3.2",
 ]
+
+[project.optional-dependencies]
+# CUDA-enabled TensorFlow (pulls the nvidia pip wheels). Opt in with:
+#   uv sync --extra cuda
+cuda = ["tensorflow[and-cuda]"]
 
 [dependency-groups]
 dev = [

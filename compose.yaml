@@ -1,0 +1,23 @@
+# podman compose -f compose.yaml up
+# Only the external services run in containers; the API gateway and the Celery
+# worker run on the host via uv (see the Makefile). These are bound to localhost
+# since only the host-run API needs to reach them — the phone talks to the API.
+services:
+  postgres:
+    image: docker.io/library/postgres:16
+    environment:
+      POSTGRES_USER: somasafe
+      POSTGRES_PASSWORD: somasafe
+      POSTGRES_DB: somasafe
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  redis:
+    image: docker.io/library/redis:7-alpine
+    ports:
+      - "127.0.0.1:6379:6379"
+
+volumes:
+  pgdata:

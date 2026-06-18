@@ -10,3 +10,6 @@ __pycache__/
 wheels/
 build/
 dist/
+
+.pytest_cache/
+celerybeat-schedule
