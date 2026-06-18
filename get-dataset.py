@@ -14,7 +14,7 @@ SUBJECTS_SUBDIR = 'subject-signals'
 NORMALIZED_SUBDIR = 'normalized-signals'
 ANOMALOUS_SUBDIR = 'anomalous-signals'
 FEATURE_SUBDIR = 'feature-anomaly'
-PARAMS_FILE = 'params.csv'
+NORM_PARAMS_FILE = 'norm-params.npy'
 
 DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'
 
@@ -22,10 +22,10 @@ BVP_RATE = 64
 ACC_RATE = 32
 WINDOW_SECONDS = 8
 SHIFT_SECONDS = 8
-BVP_WINDOW = BVP_RATE * WINDOW_SECONDS    # 512
-ACC_WINDOW = ACC_RATE * WINDOW_SECONDS    # 256
-BVP_SHIFT  = BVP_RATE * SHIFT_SECONDS     # 192
-ACC_SHIFT  = ACC_RATE * SHIFT_SECONDS     # 96
+BVP_WINDOW = BVP_RATE * WINDOW_SECONDS
+ACC_WINDOW = ACC_RATE * WINDOW_SECONDS
+BVP_SHIFT  = BVP_RATE * SHIFT_SECONDS
+ACC_SHIFT  = ACC_RATE * SHIFT_SECONDS
 CONTEXT_WINDOW_S = 120                    # 2 minutes
 ANOMALY_PROB = 0.5
 FEATURE_SEED = 1234
@@ -72,7 +72,7 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
     """Extract raw BVP (64 Hz) and ACC magnitude (32 Hz) per subject.
 
     BVP and ACC are stored in separate files because they have different lengths.
-    Global min/max bounds are saved to params.csv for use in normalization.
+    Global min/max bounds are saved to norm-params.npy for use in normalization.
     """
     subjects_dir.mkdir(parents=True, exist_ok=True)
 
@@ -113,13 +113,10 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
     if not processed:
         return []
 
-    pd.DataFrame({
-        'channel': ['BVP', 'ACC_MAG'],
-        'min': [bvp_min, acc_min],
-        'max': [bvp_max, acc_max],
-    }).to_csv(subjects_dir / PARAMS_FILE, index=False)
+    np.save(subjects_dir / NORM_PARAMS_FILE,
+            np.array([[bvp_min, bvp_max], [acc_min, acc_max]], dtype=np.float32))
 
-    print(f"  Global bounds saved to {subjects_dir / PARAMS_FILE}")
+    print(f"  Global bounds saved to {subjects_dir / NORM_PARAMS_FILE}")
     return processed
 
 
@@ -131,9 +128,9 @@ def normalize_signals(subjects_dir: Path, normalized_dir: Path):
     """Normalize BVP and ACC, interpolate ACC to BVP rate, compute activity context."""
     normalized_dir.mkdir(parents=True, exist_ok=True)
 
-    params = pd.read_csv(subjects_dir / PARAMS_FILE).set_index('channel')
-    bvp_min, bvp_max = float(params.loc['BVP', 'min']), float(params.loc['BVP', 'max'])
-    acc_min, acc_max = float(params.loc['ACC_MAG', 'min']), float(params.loc['ACC_MAG', 'max'])
+    params = np.load(subjects_dir / NORM_PARAMS_FILE)
+    bvp_min, bvp_max = float(params[0][0]), float(params[0][1])
+    acc_min, acc_max = float(params[1][0]), float(params[1][1])
     bvp_range = bvp_max - bvp_min
     acc_range = acc_max - acc_min
 
@@ -405,7 +402,7 @@ if __name__ == '__main__':
     else:
         download_dataset(datasets_dir, raw_dir)
 
-    if (subjects_dir / PARAMS_FILE).exists():
+    if subjects_dir.is_dir():
         print(f"subject-signals already present at {subjects_dir}")
     else:
         print(f"\nStage 1: Extracting raw signals into {subjects_dir}/ ...")
@@ -424,7 +421,7 @@ if __name__ == '__main__':
         print(f"\nStage 3: Creating anomalous signals in {anomalous_dir}/ ...")
         create_anomalous_signals(subjects_dir, anomalous_dir)
 
-    if (feature_dir / 'feature_stats.npy').exists():
+    if feature_dir.is_dir():
         print(f"feature-anomaly already present at {feature_dir}")
     else:
         print(f"\nStage 4: Building feature dataset in {feature_dir}/ ...")

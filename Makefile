@@ -4,3 +4,6 @@ api-run:
 
 api-test:
 	uv run pytest api/test.py
+
+model-train:
+	uv run train.py feature-mlp

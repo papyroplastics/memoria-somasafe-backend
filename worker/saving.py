@@ -1,7 +1,7 @@
 import tempfile
 from pathlib import Path
 import tensorflow as tf
-from .models import TrainableModel
+from .models.common import TrainableModel
 
 def optimize_saved_model(rep_dataset: tf.data.Dataset, saved_dir: Path) -> bytes:
     def rep_iter():

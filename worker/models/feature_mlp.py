@@ -1,11 +1,9 @@
 from pathlib import Path
 import numpy as np
 import tensorflow as tf
-import matplotlib.pyplot as plt
 
-from .common import Dense, TrainableModel
+from .common import Dense, TrainableModel, Trainer
 from ..optimizers import Adam
-from ..saving import save_tainable_model, save_optimized_model
 
 
 class FeatureMLP(TrainableModel):
@@ -54,7 +52,6 @@ class FeatureMLP(TrainableModel):
         return self.out_layer(activation)
 
     def eval_eager(self, features: tf.Tensor):
-        #return {'score': tf.sigmoid(self._logits(features))}
         return {'logits': self._logits(features)}
 
     def train_eager(self, features: tf.Tensor, labels: tf.Tensor):
@@ -67,84 +64,71 @@ class FeatureMLP(TrainableModel):
         return {'loss': loss}
 
 
-def load_feature_dataset(data_root: Path, batch_size: int, seed: int, train_split: float = 0.8):
+class FeatureMLPTrainer(Trainer):
+    """Trains the FeatureMLP on the per-subject feature dataset. ``label_dir``
+    overrides where labels are read from (used by the distillation script to
+    feed teacher pseudo-labels instead of the synthetic ground truth);
+    features always come from the feature dataset."""
+
+    primary_metric = 'accuracy'
+
+    def __init__(self, model: FeatureMLP, batch_size: int = 1,
+                 train_split: float = 0.8, label_dir: str | None = None):
+        self.model = model
+        self.batch_size = batch_size
+        self.train_split = train_split
+        self.label_dir = label_dir
+
+    def subject_datasets(self, data_root, seed):
+        feature_dir = data_root / 'feature-anomaly'
+        subject_dirs = sorted(feature_dir.glob('S*'))
+        if not subject_dirs:
+            raise FileNotFoundError(
+                f"Feature dataset not found at {feature_dir}. Run get-dataset.py first.")
+
+        subj_train, subj_eval = [], []
+        for d in subject_dirs:
+            x = np.load(d / 'features.npy')
+            if self.label_dir is not None:
+                y = np.load(data_root / self.label_dir / d.name / 'labels.npy')
+            else:
+                y = np.load(d / 'labels.npy')
+
+            ds = (tf.data.Dataset.from_tensor_slices((x, y))
+                  .shuffle(len(x), seed=seed)
+                  .batch(self.batch_size, drop_remainder=True))
+            n_train = int(len(ds) * self.train_split)
+            subj_train.append(ds.take(n_train))
+            subj_eval.append(ds.skip(n_train))
+        return subj_train, subj_eval
+
+    def representative_dataset(self, dataset):
+        return dataset.take(10).map(lambda x, y: {'features': x})
+
+    def evaluate(self, dataset):
+        correct, total = 0.0, 0.0
+        for x, y in dataset:
+            pred = tf.cast(self.model.eval(x)['logits'] > 0.0, tf.float32)
+            correct += float(tf.reduce_sum(tf.cast(tf.equal(pred, y), tf.float32)))
+            total += float(y.shape[0])
+        return {'accuracy': correct / total if total else 0.0}
+
+
+def get_trainer(data_root: Path, seed: int, label_dir: str | None = None) -> FeatureMLPTrainer:
     feature_dir = data_root / 'feature-anomaly'
     subject_dirs = sorted(feature_dir.glob('S*'))
     if not subject_dirs:
-        raise FileNotFoundError(f"Feature dataset not found at {feature_dir}. Run get-dataset.py first.")
+        raise FileNotFoundError(
+            f"Feature dataset not found at {feature_dir}. Run get-dataset.py first.")
 
-    x = np.concatenate([np.load(d / 'features.npy') for d in subject_dirs])
-    y = np.concatenate([np.load(d / 'labels.npy')   for d in subject_dirs])
-
-    dataset = (tf.data.Dataset.from_tensor_slices((x, y))
-               .shuffle(len(x), seed=seed).batch(batch_size, drop_remainder=True))
-
-    train_count = int(len(dataset) * train_split)
-
-    return dataset.take(train_count), dataset.skip(train_count)
-
-def get_rep_dataset_feed(dataset: tf.data.Dataset) -> tf.data.Dataset:
-    return dataset.take(10).map(lambda d, l: {'features': d})
-
-def _accuracy(model, dataset: tf.data.Dataset) -> float:
-    correct, total = 0.0, 0.0
-    for x, y in dataset:
-        pred = tf.cast((model.eval(x)['logits'] > 0.5), tf.float32)
-        correct += float(tf.reduce_sum(tf.cast(tf.equal(pred, y), tf.float32)))
-        total += float(y.shape[0])
-    return correct / total if total else 0.0
-
-
-def train_loop(model, train_dataset, eval_dataset, epochs):
-    history = []
-    for epoch in range(epochs):
-        loss = 0.0
-        for x, y in train_dataset:
-            loss = model.train(x, y)['loss']
-        if epoch % max(1, epochs // 10) == 0 or epoch == epochs - 1:
-            acc = _accuracy(model, eval_dataset)
-            history.append((epoch, float(loss), acc))
-            print(f"epoch={epoch:03d} loss={loss:.4f} eval_acc={acc:.3f}")
-    return history
-
-def run(data_root: Path, result_dir: Path, seed: int):
-    tf.random.set_seed(seed)
-
-    batch_size = 1
-    epochs = 5
-
-    train_dataset, eval_dataset = load_feature_dataset(data_root, batch_size, seed)
-    rep_dataset = get_rep_dataset_feed(eval_dataset)
-
-    n_features = next(iter(eval_dataset))[0].shape[-1]
+    n_features = int(np.load(subject_dirs[0] / 'features.npy').shape[-1])
 
     model = FeatureMLP(
         name='feature_anomaly',
-        batch_size=batch_size,
+        batch_size=1,
         n_features=n_features,
         hidden_dim=32,
         hidden_layers=3,
         learning_rate=1e-3,
     )
-
-    saved_model, sm_path = save_tainable_model(result_dir, 'pre-train', model)
-    save_optimized_model(result_dir, 'pre-train', model, rep_dataset)
-    print(f"Saved untrained model to {sm_path}")
-
-    history = train_loop(model, train_dataset, eval_dataset, epochs)
-
-    saved_model, sm_path = save_tainable_model(result_dir, 'post-train', model)
-    save_optimized_model(result_dir, 'post-train', model, rep_dataset)
-    print(f"Saved trained model to {sm_path}")
-
-    epochs, losses, accs = zip(*history)
-    fig, ax = plt.subplots()
-    ax.plot(epochs, losses, 'b-', label='train loss')
-    ax.set_xlabel('epoch')
-    ax.set_ylabel('loss', color='b')
-    ax2 = ax.twinx()
-    ax2.plot(epochs, accs, 'g-', label='eval accuracy')
-    ax2.set_ylabel('eval accuracy', color='g')
-    ax.set_title('FeatureMLP anomaly classifier')
-    fig.savefig(result_dir / 'training.png')
-    print(f"saved training plot to {result_dir / 'training.png'}")
+    return FeatureMLPTrainer(model, batch_size=1, label_dir=label_dir)

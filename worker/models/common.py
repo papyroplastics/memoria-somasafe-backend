@@ -1,6 +1,36 @@
 import math
-import tensorflow as tf
+from abc import ABC, abstractmethod
+from pathlib import Path
 from typing import Callable
+
+import numpy as np
+import tensorflow as tf
+
+from ..optimizers import Adam
+
+
+@tf.function
+def mse_loss(x: tf.Tensor, y: tf.Tensor) -> tf.Tensor:
+    return tf.reduce_mean((y - x) ** 2)
+
+
+def reconstruction_error(reconstruction: tf.Tensor, signal: tf.Tensor) -> tf.Tensor:
+    """Per-window mean squared error — the anomaly score for autoencoders."""
+    return tf.reduce_mean(tf.square(reconstruction - signal), axis=[1, 2])
+
+
+def window_signal(signal: np.ndarray, window_size: int, shift: int):
+    """Window a ``(T, n_signals)`` array into ``(window_size, n_signals)`` frames.
+
+    Returns the windowed dataset and its (asserted) cardinality.
+    """
+    count = (len(signal) - window_size) // shift + 1
+    ds = (tf.data.Dataset.from_tensor_slices(signal)
+          .window(size=window_size, shift=shift, drop_remainder=True)
+          .flat_map(lambda w: w.batch(window_size, drop_remainder=True))
+          .apply(tf.data.experimental.assert_cardinality(count)))
+    return ds, count
+
 
 class UnboundError(NotImplementedError):
     def __init__(self, message: str):
@@ -99,3 +129,158 @@ class TrainableModel(tf.Module):
         return {
             'parameter_count': tf.constant(self.total_parameter_size, dtype=tf.int32)
         }
+
+
+class TrainableAutoencoder(TrainableModel):
+    """Non-conditional reconstruction autoencoder base.
+
+    Subclasses build their encoder/decoder layers and implement ``_forward``;
+    the train/eval bodies, signature binding and Adam optimizer are shared. The
+    per-window reconstruction error is the anomaly score. Conditional variants
+    (extra demographics/context inputs) stay outside this hierarchy so they can
+    be compared against a plain reconstruction model.
+    """
+
+    def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int):
+        super().__init__(name=name)
+        self.batch_size = batch_size
+        self.seq_len = seq_len
+        self.n_signals = n_signals
+        self.signal_shape = (batch_size, seq_len, n_signals)
+
+    def _bind(self, learning_rate: float, beta1: float, beta2: float, epsilon: float):
+        """Bind train/eval/save/restore. Call once all layers exist."""
+        self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
+        self.eval = tf.function(self.eval_eager, input_signature=[
+            tf.TensorSpec(shape=self.signal_shape, dtype=tf.float32)])
+        self.train = tf.function(self.train_eager, input_signature=[
+            tf.TensorSpec(shape=self.signal_shape, dtype=tf.float32)])
+        self._init_save_restore()
+
+    def _forward(self, signal: tf.Tensor) -> tf.Tensor:
+        raise NotImplementedError
+
+    def eval_eager(self, signal: tf.Tensor):
+        reconstruction = self._forward(signal)
+        return {'reconstruction': reconstruction,
+                'error': reconstruction_error(reconstruction, signal)}
+
+    def train_eager(self, signal: tf.Tensor):
+        with tf.GradientTape() as tape:
+            loss = mse_loss(self._forward(signal), signal)
+        grads = tape.gradient(loss, self.trainable_variables)
+        self.optimizer.apply(self.trainable_variables, grads)
+        return {'loss': loss}
+
+
+class Trainer(ABC):
+    """Adapts a ``TrainableModel`` to the uniform surface the training loops in
+    ``training.py`` drive. A trainer owns data preparation, the per-epoch step,
+    the metrics relevant to its model type, and the representative dataset for
+    int8 export. Loops only ever talk to this interface, so any
+    ``(model, trainer)`` pair works with any loop.
+    """
+
+    model: TrainableModel
+    primary_metric: str
+
+    @abstractmethod
+    def subject_datasets(
+        self, data_root: Path, seed: int
+    ) -> tuple[list[tf.data.Dataset], list[tf.data.Dataset]]:
+        """Per-subject ``(train, eval)`` splits — the primitive the federated
+        loop consumes directly and the normal loop ``combine``s."""
+
+    @abstractmethod
+    def representative_dataset(self, dataset: tf.data.Dataset) -> tf.data.Dataset:
+        """Feed-dict stream for the int8 TFLite converter."""
+
+    @abstractmethod
+    def evaluate(self, dataset: tf.data.Dataset) -> dict[str, float]:
+        """Metrics relevant to this model type (accuracy, recon error, ...)."""
+
+    def train_epoch(self, dataset: tf.data.Dataset) -> float:
+        """One pass over ``dataset``; returns mean training loss. Datasets yield
+        tuples matching ``model.train``'s arguments, so this stays arity-agnostic."""
+        total, batches = 0.0, 0
+        for batch in dataset:
+            total += float(self.model.train(*batch)['loss'])
+            batches += 1
+        return total / batches if batches else 0.0
+
+    def combine(self, datasets: list[tf.data.Dataset]) -> tf.data.Dataset:
+        """Merge per-subject datasets for the non-federated loops. Default is
+        uniform sampling; override for weighted/interleaved mixing."""
+        return tf.data.Dataset.sample_from_datasets(datasets)
+
+    def report(self, result_dir: Path, eval_dataset: tf.data.Dataset) -> None:
+        """Optional model-specific artifact (e.g. an AE reconstruction plot)."""
+        pass
+
+
+class AutoencoderTrainer(Trainer):
+    """Shared trainer for non-conditional autoencoders (LSTM/GRU/CNN/...).
+
+    Windows the normalized ``[BVP, ACC]`` signals at load time and scores with
+    reconstruction error. Conditional variants subclass this and override only
+    ``_windowed`` / ``representative_dataset``.
+    """
+
+    primary_metric = 'recon_error'
+
+    def __init__(self, model: TrainableModel, window_size: int, shift: int,
+                 batch_size: int, train_split: float = 0.975,
+                 data_subdir: str = 'normalized-signals'):
+        self.model = model
+        self.window_size = window_size
+        self.shift = shift
+        self.batch_size = batch_size
+        self.train_split = train_split
+        self.data_subdir = data_subdir
+
+    def _subject_signal(self, subject_dir: Path) -> np.ndarray:
+        bvp = np.load(subject_dir / 'bvp.npy')
+        acc = np.load(subject_dir / 'acc.npy')
+        return np.stack([bvp, acc], axis=-1).astype(np.float32)
+
+    def _windowed(self, subject_dir: Path) -> tuple[tf.data.Dataset, int]:
+        """One subject's unbatched window tuples. Override to add conditioning."""
+        sig_ds, count = window_signal(self._subject_signal(subject_dir),
+                                      self.window_size, self.shift)
+        return sig_ds.map(lambda s: (s,)), count
+
+    def subject_datasets(self, data_root, seed):
+        data_dir = data_root / self.data_subdir
+        subject_dirs = sorted(data_dir.glob('S*'))
+        if not subject_dirs:
+            raise FileNotFoundError(
+                f"Signal dataset not found at {data_dir}. Run get-dataset.py first.")
+
+        subj_train, subj_eval = [], []
+        for d in subject_dirs:
+            ds, count = self._windowed(d)
+            ds = ds.shuffle(count, seed=seed).batch(self.batch_size, drop_remainder=True)
+            n_train = int(len(ds) * self.train_split)
+            subj_train.append(ds.take(n_train))
+            subj_eval.append(ds.skip(n_train))
+        return subj_train, subj_eval
+
+    def representative_dataset(self, dataset):
+        return dataset.take(10).map(lambda s: {'signal': s})
+
+    def evaluate(self, dataset):
+        errors = [self.model.eval(*batch)['error'] for batch in dataset]
+        return {'recon_error': float(tf.reduce_mean(tf.concat(errors, axis=0)))}
+
+    def report(self, result_dir, eval_dataset):
+        import matplotlib.pyplot as plt
+        for batch in eval_dataset.take(1):
+            recon = self.model.eval(*batch)['reconstruction']
+            fig, axs = plt.subplots(1, 2)
+            axs[0].plot(batch[0][0].numpy())
+            axs[0].set_title('Input window [BVP, ACC]')
+            axs[1].plot(recon[0].numpy())
+            axs[1].set_title('Reconstruction')
+            fig.savefig(result_dir / 'reconstruction.png')
+            print(f"saved reconstruction plot to {result_dir / 'reconstruction.png'}")
+            break

@@ -6,26 +6,24 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel
 import tensorflow as tf
 
-from worker.models.feature_mlp import FeatureMLP, load_feature_dataset, get_rep_dataset_feed
+from worker.models.feature_mlp import get_trainer as get_feature_mlp_trainer
 from worker.saving import get_optimized_model
 
 router = APIRouter(prefix="/model")
 
+seed = 1234
 data_dir = Path('datasets/')
 model_dir = Path('results/')
 model_file = "post-train-odt.tflite"
-
-batch_size = 1
-
 
 class ModelPurpose(str, Enum):
     train_only = "train-only"
     embed_infer = "embed-infer"
     app_infer = "app-infer"
 
-
-feature_mlp_ds = load_feature_dataset(data_dir, batch_size, 1234)[1]
-feature_mlp_n_feat = int(next(iter(feature_mlp_ds))[0].shape[-1])
+feature_mlp_trainer = get_feature_mlp_trainer(data_dir, seed)
+feature_mlp_eval = feature_mlp_trainer.combine(
+    feature_mlp_trainer.subject_datasets(data_dir, seed)[1])
 
 models = {
     "feature-mlp": {
@@ -37,21 +35,14 @@ models = {
             "app_version": "1.0.0",
             "model_id": 1,
         },
-        "model": FeatureMLP(
-            name='feature_anomaly',
-            batch_size=batch_size,
-            n_features=feature_mlp_n_feat,
-            hidden_dim=32,
-            hidden_layers=4,
-            learning_rate=1e-3,
-        ),
-        "rep_dataset": get_rep_dataset_feed(feature_mlp_ds),
+        "model": feature_mlp_trainer.model,
+        "rep_dataset": feature_mlp_trainer.representative_dataset(feature_mlp_eval),
     },
 }
 
-del feature_mlp_ds, feature_mlp_n_feat
+del feature_mlp_eval
 
-MODEL_LIST = [{"key": key, **entry["meta"]} for key, entry in models.items()]
+model_list = [{"key": key, **entry["meta"]} for key, entry in models.items()]
 
 
 class ModelWeights(BaseModel):
@@ -60,7 +51,7 @@ class ModelWeights(BaseModel):
 
 @router.get("/list")
 async def list_models():
-    return MODEL_LIST
+    return model_list
 
 
 @router.get("/trainable/{key}/{id}", response_class=FileResponse)

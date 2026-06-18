@@ -6,7 +6,6 @@ from .main import app
 
 client = TestClient(app)
 
-
 def test_quantize_feature_mlp():
     list_response = client.get("/model/list")
     assert list_response.status_code == 200
