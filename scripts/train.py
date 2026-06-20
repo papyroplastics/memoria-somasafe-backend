@@ -3,10 +3,10 @@ from pathlib import Path
 import tensorflow as tf
 import matplotlib.pyplot as plt
 
-from ..models.common import Trainer
-from ..training import normal_loop, federated_loop, History
-from ..saving import save_tainable_model, save_optimized_model
-from ..models import (
+from ml.models.common import Trainer
+from ml.training import normal_loop, federated_loop, History
+from ml.saving import save_tainable_model, save_optimized_model
+from ml.models import (
     lstm_autoencoder,
     cond_lstm_autoencoder,
     gru_autoencoder,

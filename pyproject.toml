@@ -17,6 +17,8 @@ dependencies = [
     "redis>=5.2",
     "sqlmodel>=0.0.22",
     "psycopg[binary]>=3.2",
+    "pwdlib[argon2]>=0.2.1",
+    "python-multipart>=0.0.18",
 ]
 
 [project.optional-dependencies]
@@ -28,6 +30,7 @@ cuda = ["tensorflow[and-cuda]"]
 dev = [
   "ipython",
   "types-tensorflow",
+  "fakeredis>=2.26",
 ]
 
 [tool.pyrefly]

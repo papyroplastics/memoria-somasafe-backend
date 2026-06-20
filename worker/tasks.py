@@ -17,13 +17,12 @@ from common.db import (
     utcnow,
 )
 
-from common.models import models as MODEL_REGISTRY
 from ml.models.feature_mlp import get_trainer as get_feature_mlp_trainer
 from ml.saving import get_optimized_model
 
-# model_key -> Trainer builder (TensorFlow). Keyed by the shared MODEL_REGISTRY,
-# which is the source of truth for which models exist; this just attaches the
-# builder the worker uses to materialize each one.
+# model_key -> Trainer builder (TensorFlow). The DB ModelDefinition registry is
+# the source of truth for which models exist; this just attaches the builder the
+# worker uses to materialize each one.
 _TRAINER_BUILDERS = {
     "feature-mlp": get_feature_mlp_trainer,
 }
@@ -34,7 +33,7 @@ _cache: dict[str, tuple] = {}
 
 
 def _model_and_rep(model_key: str):
-    if model_key not in MODEL_REGISTRY:
+    if model_key not in _TRAINER_BUILDERS:
         raise ValueError(f"unknown model '{model_key}'")
     if model_key not in _cache:
         trainer = _TRAINER_BUILDERS[model_key](DATASETS_DIR, SEED)

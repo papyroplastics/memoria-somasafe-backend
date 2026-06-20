@@ -1,7 +1,9 @@
-ml-get-data:
-	uv run -m ml.scripts.get-dataset
-ml-train:
-	uv run -m ml.scripts.train feature-mlp
+get-data:
+	uv run -m scripts.get-dataset
+train-model:
+	uv run -m scripts.train feature-mlp
+seed:
+	uv run -m scripts.seed
 
 api-run:
 	uv run fastapi dev api --host 0.0.0.0
