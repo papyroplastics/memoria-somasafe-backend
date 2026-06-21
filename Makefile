@@ -1,9 +1,11 @@
 get-data:
-	uv run -m scripts.get-dataset
+	uv run -m scripts.get_dataset
 train-model:
 	uv run -m scripts.train feature-mlp
+
+nvs_csv := ../firmware/factory_nvs.csv
 seed:
-	uv run -m scripts.seed
+	uv run -m scripts.db_seed ${nvs_csv}
 
 api-run:
 	uv run fastapi dev api --host 0.0.0.0

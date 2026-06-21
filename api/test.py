@@ -21,7 +21,7 @@ import common.ratelimit
 from common.db import Session, User, engine, init_db
 from api.auth import hash_password
 from api.main import app
-from scripts.seed import seed_models
+from scripts.db_seed import seed_models
 
 # Rate limiting talks to Redis; swap in an in-memory fake for the test.
 common.ratelimit._client = fakeredis.FakeStrictRedis()
