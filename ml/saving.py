@@ -1,5 +1,6 @@
 import tempfile
 from pathlib import Path
+import numpy as np
 import tensorflow as tf
 from .models.common import TrainableModel
 
@@ -50,6 +51,14 @@ def save_optimized_model(output_dir: Path, model: TrainableModel, rep_dataset: t
     compiled_model_file.write_bytes(optimize_saved_model(rep_dataset, saved_model_dir))
 
     return tf.saved_model.load(str(saved_model_dir))
+
+def load_trainable_weights(tflite_path: Path) -> np.ndarray:
+    """Extract the flat float32 parameter buffer from a trainable .tflite via its
+    ``save`` signature — the same buffer the device extracts and uploads."""
+    interpreter = tf.lite.Interpreter(model_path=str(tflite_path))
+    save = interpreter.get_signature_runner('save')
+    return np.asarray(save()['parameters'], dtype=np.float32)
+
 
 def get_optimized_model(model: TrainableModel, rep_dataset: tf.data.Dataset) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:

@@ -7,6 +7,6 @@ class ModelPurpose(str, Enum):
     app_infer = "app-infer"
 
 
-# The model registry itself now lives in the database (ModelDefinition in
-# common.db, seeded by scripts.seed). This module keeps only the TF-free enum
-# shared by the table definition and the worker.
+# The model registry lives in ml.model_list (TensorFlow) and is projected into
+# the database by scripts.db_seed. This module keeps only the TF-free enum,
+# shared by the registry, the DB tables, and the gateway.

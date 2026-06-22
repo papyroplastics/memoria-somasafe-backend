@@ -27,23 +27,22 @@ class FeatureMLP(TrainableModel):
         self.label_shape = (batch_size, 1)
 
         self.in_layer = Dense(n_features, hidden_dim, activation=tf.nn.relu)
+        self.out_layer = Dense(hidden_dim, 1)
         self.hidden_layers = [
             Dense(hidden_dim, hidden_dim, activation=tf.nn.relu) for _ in range(hidden_layers)
         ]
-        self.out_layer = Dense(hidden_dim, 1)
+
+        self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
 
         self.eval = tf.function(self.eval_eager, input_signature=[
             tf.TensorSpec(shape=self.in_shape, dtype=tf.float32)
         ])
-
-        self._init_save_restore()
-
-        self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
-
         self.train = tf.function(self.train_eager, input_signature=[
             tf.TensorSpec(shape=self.in_shape, dtype=tf.float32),
             tf.TensorSpec(shape=self.label_shape, dtype=tf.float32),
         ])
+
+        self._init_save_restore()
 
     def _logits(self, features):
         activation = self.in_layer(features)

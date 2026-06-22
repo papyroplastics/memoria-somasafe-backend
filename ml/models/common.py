@@ -1,3 +1,4 @@
+import hashlib
 import math
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -47,8 +48,8 @@ class Dense(tf.Module):
         limit = math.sqrt(6.0 / (in_dim + out_dim))
         self.weight = tf.Variable(tf.random.uniform(
             shape=[in_dim, out_dim], minval=-limit, maxval=limit
-        ))
-        self.bias = tf.Variable(tf.zeros(shape=[out_dim]))
+        ), name='dense_weight')
+        self.bias = tf.Variable(tf.zeros(shape=[out_dim]), name='dense_bias')
         self.activation = activation if activation else (lambda x: x)
 
     def __call__(self, data):
@@ -62,13 +63,13 @@ class LSTMCell(tf.Module):
 
         limit_w = math.sqrt(6.0 / (in_dim + 4 * hidden_dim))
         self.W = tf.Variable(tf.random.uniform(
-            shape=[in_dim, 4 * hidden_dim], minval=-limit_w, maxval=limit_w))
+            shape=[in_dim, 4 * hidden_dim], minval=-limit_w, maxval=limit_w), name='lstm_W')
 
         limit_u = math.sqrt(6.0 / (hidden_dim + 4 * hidden_dim))
         self.U = tf.Variable(tf.random.uniform(
-            shape=[hidden_dim, 4 * hidden_dim], minval=-limit_u, maxval=limit_u))
+            shape=[hidden_dim, 4 * hidden_dim], minval=-limit_u, maxval=limit_u), name='lstm_U')
 
-        self.b = tf.Variable(tf.zeros(shape=[4 * hidden_dim]))
+        self.b = tf.Variable(tf.zeros(shape=[4 * hidden_dim]), name='lstm_b')
 
     def zero_state(self, batch_size: int):
         h = tf.zeros([batch_size, self.hidden_dim])
@@ -93,17 +94,17 @@ class GRUCell(tf.Module):
 
         limit_w = math.sqrt(6.0 / (in_dim + 3 * hidden_dim))
         self.W = tf.Variable(tf.random.uniform(
-            shape=[in_dim, 3 * hidden_dim], minval=-limit_w, maxval=limit_w))
+            shape=[in_dim, 3 * hidden_dim], minval=-limit_w, maxval=limit_w), name='gru_W')
 
         limit_zr = math.sqrt(6.0 / (hidden_dim + 2 * hidden_dim))
         self.U_zr = tf.Variable(tf.random.uniform(
-            shape=[hidden_dim, 2 * hidden_dim], minval=-limit_zr, maxval=limit_zr))
+            shape=[hidden_dim, 2 * hidden_dim], minval=-limit_zr, maxval=limit_zr), name='gru_U_zr')
 
         limit_n = math.sqrt(6.0 / (2 * hidden_dim))
         self.U_n = tf.Variable(tf.random.uniform(
-            shape=[hidden_dim, hidden_dim], minval=-limit_n, maxval=limit_n))
+            shape=[hidden_dim, hidden_dim], minval=-limit_n, maxval=limit_n), name='gru_U_n')
 
-        self.b = tf.Variable(tf.zeros(shape=[3 * hidden_dim]))
+        self.b = tf.Variable(tf.zeros(shape=[3 * hidden_dim]), name='gru_b')
 
     def zero_state(self, batch_size: int):
         return tf.zeros([batch_size, self.hidden_dim])
@@ -122,8 +123,8 @@ class Conv1D(tf.Module):
                  activation: Callable | None = None):
         limit = math.sqrt(6.0 / (kernel_size * (in_ch + out_ch)))
         self.kernel = tf.Variable(tf.random.uniform(
-            shape=[kernel_size, in_ch, out_ch], minval=-limit, maxval=limit))
-        self.bias = tf.Variable(tf.zeros(shape=[out_ch]))
+            shape=[kernel_size, in_ch, out_ch], minval=-limit, maxval=limit), name='conv_kernel')
+        self.bias = tf.Variable(tf.zeros(shape=[out_ch]), name='conv_bias')
         self.stride = stride
         self.activation = activation if activation else (lambda x: x)
 
@@ -147,6 +148,17 @@ class TrainableModel(tf.Module):
     train: tf.types.experimental.PolymorphicFunction = unbound   # type: ignore
     save: tf.types.experimental.PolymorphicFunction = unbound    # type: ignore
     restore: tf.types.experimental.PolymorphicFunction = unbound # type: ignore
+
+    def arch_fingerprint(self) -> str:
+        """Stable hash of the trainable-variable layout (ordered name/shape/dtype).
+        Two models share a fingerprint iff their flat parameter buffers are
+        interchangeable, so it is the weight-compatibility boundary. Not a
+        ``tf.function`` — it inspects the Python-side variable list directly."""
+        manifest = [
+            (var.name, tuple(int(d) for d in var.shape), var.dtype.name)
+            for var in self.trainable_variables
+        ]
+        return hashlib.sha256(repr(manifest).encode()).hexdigest()[:16]
 
     def _init_save_restore(self):
         self.parameter_sizes = [

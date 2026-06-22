@@ -17,29 +17,28 @@ from common.db import (
     utcnow,
 )
 
-from ml.models.feature_mlp import get_trainer as get_feature_mlp_trainer
+from ml.model_list import MODELS, build_fingerprinted
 from ml.saving import get_optimized_model
 
-# model_key -> Trainer builder (TensorFlow). The DB ModelDefinition registry is
-# the source of truth for which models exist; this just attaches the builder the
-# worker uses to materialize each one.
-_TRAINER_BUILDERS = {
-    "feature-mlp": get_feature_mlp_trainer,
-}
-
-# Per-process cache of (model, representative_dataset) so TensorFlow and the
-# calibration data load once per worker, not once per job.
-_cache: dict[str, tuple] = {}
+# Per-process cache of (model, representative_dataset, fingerprint), built once
+# at startup so TensorFlow and the calibration data load once per worker, not
+# once per job. Models whose dataset is absent (not trained yet) are skipped —
+# the worker only ever quantizes models that scripts.db_seed put in the DB.
+_models: dict[str, tuple] = {}
 
 
-def _model_and_rep(model_key: str):
-    if model_key not in _TRAINER_BUILDERS:
-        raise ValueError(f"unknown model '{model_key}'")
-    if model_key not in _cache:
-        trainer = _TRAINER_BUILDERS[model_key](DATASETS_DIR, SEED)
-        eval_ds = trainer.combine(trainer.subject_datasets(DATASETS_DIR, SEED)[1])
-        _cache[model_key] = (trainer.model, trainer.representative_dataset(eval_ds))
-    return _cache[model_key]
+def _init_models() -> None:
+    for key in MODELS:
+        try:
+            trainer, fingerprint = build_fingerprinted(key, DATASETS_DIR, SEED)
+            eval_ds = trainer.combine(trainer.subject_datasets(DATASETS_DIR, SEED)[1])
+            rep = trainer.representative_dataset(eval_ds)
+            _models[key] = (trainer.model, rep, fingerprint)
+        except Exception as exc:  # missing dataset / build error — skip, don't crash boot
+            print(f"[worker] model '{key}' unavailable, skipping: {exc}")
+
+
+_init_models()
 
 
 @app.task(name="worker.tasks.quantize_submission")
@@ -58,7 +57,13 @@ def quantize_submission(job_id: str) -> None:
         try:
             if submission is None:
                 raise ValueError(f"submission {job.submission_id} not found")
-            model, rep_dataset = _model_and_rep(job.model_key)
+            if job.model_key not in _models:
+                raise ValueError(f"model '{job.model_key}' not initialized")
+            model, rep_dataset, fingerprint = _models[job.model_key]
+            if submission.fingerprint != fingerprint:
+                raise ValueError(
+                    f"submission fingerprint {submission.fingerprint} != "
+                    f"current {fingerprint} for '{job.model_key}'")
             params = np.frombuffer(submission.parameters, dtype=np.float32).copy()
             model.restore(tf.constant(params, dtype=tf.float32))
             job.result = bytes(get_optimized_model(model, rep_dataset))
