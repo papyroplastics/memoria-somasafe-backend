@@ -19,6 +19,7 @@ dependencies = [
     "psycopg[binary]>=3.2",
     "pwdlib[argon2]>=0.2.1",
     "python-multipart>=0.0.18",
+    "cryptography>=44.0",
 ]
 
 [project.optional-dependencies]

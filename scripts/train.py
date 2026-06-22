@@ -6,24 +6,9 @@ import matplotlib.pyplot as plt
 from ml.models.common import Trainer
 from ml.training import normal_loop, federated_loop, History
 from ml.saving import save_tainable_model, save_optimized_model
-from ml.models import (
-    lstm_autoencoder,
-    cond_lstm_autoencoder,
-    gru_autoencoder,
-    cnn_autoencoder,
-    feature_mlp
-)
+from ml.model_list import MODELS, build_trainer
 
 SEED = 1234
-
-# Each model module exposes get_trainer(data_root, seed) -> Trainer.
-TRAINERS = {
-    'feature-mlp': feature_mlp.get_trainer,
-    'lstm-ae': lstm_autoencoder.get_trainer,
-    'cond-lstm-ae': cond_lstm_autoencoder.get_trainer,
-    'gru-ae': gru_autoencoder.get_trainer,
-    'cnn-ae': cnn_autoencoder.get_trainer,
-}
 
 
 def run_loop(trainer: Trainer, data_dir: Path, loop: str, 
@@ -70,7 +55,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='Train a SomaSafe model with a chosen training loop and export '
                     'SavedModel + TFLite artifacts into results/<model>.')
-    parser.add_argument('model', choices=sorted(TRAINERS), help='Model to train')
+    parser.add_argument('model', choices=sorted(MODELS), help='Model to train')
     parser.add_argument('--loop', choices=['normal', 'federated'], default='normal',
                         help='Training loop (default: normal)')
     parser.add_argument('--epochs', type=int, default=20, help='Epochs for the normal loop')
@@ -81,7 +66,7 @@ if __name__ == "__main__":
     result_dir = Path('results') / args.model
     result_dir.mkdir(parents=True, exist_ok=True)
 
-    trainer = TRAINERS[args.model](data_dir, SEED)
+    trainer = build_trainer(args.model, data_dir, SEED)
     history, eval_dataset = run_loop(trainer, data_dir, args.loop, args.epochs, args.local_epochs)
 
     save_artifacts(trainer, result_dir, eval_dataset)

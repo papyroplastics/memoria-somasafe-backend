@@ -37,3 +37,10 @@ DOWNLOAD_COOLDOWN_SECONDS = int(os.environ.get("DOWNLOAD_COOLDOWN_SECONDS", 300)
 # Per-user, per-model daily cap on quantization submissions.
 QUANTIZE_DAILY_LIMIT = int(os.environ.get("QUANTIZE_DAILY_LIMIT", 2))
 QUANTIZE_DAILY_WINDOW_SECONDS = int(os.environ.get("QUANTIZE_DAILY_WINDOW_SECONDS", 86400))
+
+# --- Device attestation (see api.device) ---
+# How long an issued ownership challenge stays valid before it must be reissued.
+DEVICE_CHALLENGE_TTL_SECONDS = int(os.environ.get("DEVICE_CHALLENGE_TTL_SECONDS", 300))
+# A device's owner may only change once per this window (24 h since the last
+# successful attestation). Failed/timed-out challenges do not count.
+DEVICE_ATTEST_COOLDOWN_SECONDS = int(os.environ.get("DEVICE_ATTEST_COOLDOWN_SECONDS", 86400))

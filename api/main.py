@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from common.db import init_db
 from .auth import router as auth_router
+from .device import router as device_router
 from .model import router
 
 
@@ -15,4 +16,5 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(lifespan=lifespan)
 app.include_router(auth_router)
+app.include_router(device_router)
 app.include_router(router)
