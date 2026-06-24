@@ -63,23 +63,18 @@ if __name__ == "__main__":
     parser.add_argument('--batch-size', type=int, default=None,
                         help='Override the model default batch size. Artifacts from a '
                              'non-default batch size are suffixed (e.g. trainable_32.tflite).')
-    parser.add_argument('--label-dir', type=Path, default=None,
-                        help='(feature-mlp only) directory of per-subject distilled labels '
-                             '(<dir>/S*/labels.npy) to train against instead of the synthetic '
-                             'ground truth.')
+    parser.add_argument('--dataset-dir', type=Path, default=Path('datasets'),
+                        help='Dataset directory to train on (default: datasets). Point this '
+                             'at an alternative source with the same structure as datasets/ '
+                             '(e.g. a distilled-labels directory) to train against distilled '
+                             'labels instead of the synthetic ground truth.')
     args = parser.parse_args()
 
-    if args.label_dir is not None and args.model != 'feature-mlp':
-        parser.error('--label-dir only applies to feature-mlp')
-
-    data_dir = Path('datasets')
+    data_dir = args.dataset_dir
     result_dir = Path('results') / args.model
     result_dir.mkdir(parents=True, exist_ok=True)
 
-    build_kwargs = {'batch_size': args.batch_size}
-    if args.label_dir is not None:
-        build_kwargs['label_dir'] = args.label_dir
-    trainer = build_trainer(args.model, data_dir, SEED, **build_kwargs)
+    trainer = build_trainer(args.model, data_dir, SEED, batch_size=args.batch_size)
     history, eval_dataset = run_loop(trainer, data_dir, args.loop, args.epochs, args.local_epochs)
 
     postfix = '' if trainer.batch_size == trainer.default_batch_size else f'_{trainer.batch_size}'

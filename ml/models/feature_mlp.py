@@ -3,8 +3,9 @@ import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 
-from .common import Dense, TrainableModel, Trainer
+from .common import Dense, TrainableModel, Trainer, DatasetUnavailibleError
 from ..optimizers import Adam
+from scripts.get_dataset import FEATURE_SUBDIR
 
 
 class FeatureMLP(TrainableModel):
@@ -65,36 +66,30 @@ class FeatureMLP(TrainableModel):
 
 
 class FeatureMLPTrainer(Trainer):
-    """Trains the FeatureMLP on the per-subject feature dataset. ``label_dir`` is a
-    directory of per-subject labels (``<label_dir>/S*/labels.npy``) that overrides
-    where labels are read from — used by the distillation script to feed teacher
-    pseudo-labels instead of the synthetic ground truth; features always come from
-    the feature dataset."""
+    """Trains the FeatureMLP on the per-subject feature dataset. Both features and
+    labels are read from ``<data_root>/anomalous-features/S*/``; to train against
+    distilled teacher labels instead of the synthetic ground truth, point the data
+    root at a directory with the same structure (see ``distill_labels.py``)."""
 
     primary_metric = 'accuracy'
     default_batch_size = 1
 
     def __init__(self, model: FeatureMLP, batch_size: int = 1,
-                 train_split: float = 0.8, label_dir: Path | None = None):
+                 train_split: float = 0.8):
         self.model = model
         self.batch_size = batch_size
         self.train_split = train_split
-        self.label_dir = label_dir
 
     def subject_datasets(self, data_root, seed):
-        feature_dir = data_root / 'feature-anomaly'
+        feature_dir = data_root / FEATURE_SUBDIR
         subject_dirs = sorted(feature_dir.glob('S*'))
         if not subject_dirs:
-            raise FileNotFoundError(
-                f"Feature dataset not found at {feature_dir}. Run get-dataset.py first.")
+            raise DatasetUnavailibleError('Feature', feature_dir)
 
         subj_train, subj_eval = [], []
         for d in subject_dirs:
             x = np.load(d / 'features.npy')
-            if self.label_dir is not None:
-                y = np.load(self.label_dir / d.name / 'labels.npy')
-            else:
-                y = np.load(d / 'labels.npy')
+            y = np.load(d / 'labels.npy')
 
             ds = (tf.data.Dataset.from_tensor_slices((x, y))
                   .shuffle(len(x), seed=seed)
@@ -117,14 +112,13 @@ class FeatureMLPTrainer(Trainer):
         return {'accuracy': correct / total if total else 0.0}
 
 
-def get_trainer(data_root: Path, seed: int, batch_size: int | None = None,
-                label_dir: Path | None = None) -> FeatureMLPTrainer:
+def get_trainer(data_root: Path, seed: int,
+                batch_size: int | None = None) -> FeatureMLPTrainer:
     batch_size = batch_size or FeatureMLPTrainer.default_batch_size
-    feature_dir = data_root / 'feature-anomaly'
+    feature_dir = data_root / FEATURE_SUBDIR
     subject_dirs = sorted(feature_dir.glob('S*'))
     if not subject_dirs:
-        raise FileNotFoundError(
-            f"Feature dataset not found at {feature_dir}. Run get-dataset.py first.")
+        raise DatasetUnavailibleError('Feature', feature_dir)
 
     n_features = int(np.load(subject_dirs[0] / 'features.npy').shape[-1])
 
@@ -136,4 +130,4 @@ def get_trainer(data_root: Path, seed: int, batch_size: int | None = None,
         hidden_layers=3,
         learning_rate=1e-3,
     )
-    return FeatureMLPTrainer(model, batch_size=batch_size, label_dir=label_dir)
+    return FeatureMLPTrainer(model, batch_size=batch_size)

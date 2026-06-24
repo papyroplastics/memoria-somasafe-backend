@@ -8,9 +8,20 @@ from ml.saving import load_trainable_weights
 from ml.model_list import MODELS, build_trainer
 from ml.models.common import AutoencoderTrainer
 from ml.models.cond_lstm_autoencoder import ConditionalAutoencoderTrainer
-from scripts.get_dataset import NORMALIZED_ANOMALOUS_SUBDIR
+from scripts.get_dataset import NORMALIZED_ANOMALOUS_SUBDIR, FEATURE_SUBDIR
 
 SEED = 1234
+
+
+def relink(link: Path, target: Path):
+    """Point ``link`` at ``target`` with a relative symlink, replacing any existing
+    one. Used to mirror the feature dataset into the distilled-label tree without
+    copying the (potentially large) feature arrays."""
+    link.parent.mkdir(parents=True, exist_ok=True)
+    rel = target.resolve().relative_to(link.parent.resolve(), walk_up=True)
+    if link.is_symlink() or link.exists():
+        link.unlink()
+    link.symlink_to(rel)
 
 
 def window_errors(model, bvp: np.ndarray, acc: np.ndarray,
@@ -56,7 +67,9 @@ if __name__ == "__main__":
         description='Distill window labels from a trained autoencoder: score the '
                     'synthetic-anomaly windows by reconstruction error, pick the '
                     'accuracy-maximizing threshold against the ground-truth labels, '
-                    'and write feature-mlp-shaped labels into results/<model>/.')
+                    'and write a datasets-shaped tree (anomalous-features/S*/ with '
+                    'distilled labels.npy + symlinked features) into results/<model>/ '
+                    'that train.py can consume via --dataset-dir.')
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to distill from')
     parser.add_argument('--out-subdir', default='distilled-labels',
                         help='Subdirectory of results/<model>/ for the labels (default: distilled-labels)')
@@ -80,7 +93,7 @@ if __name__ == "__main__":
 
     window = trainer.window_size
     norm_anom_dir = data_dir / NORMALIZED_ANOMALOUS_SUBDIR
-    feature_dir = data_dir / 'feature-anomaly'
+    feature_dir = data_dir / FEATURE_SUBDIR
 
     subject_dirs = sorted(norm_anom_dir.glob('S*'))
     if not subject_dirs:
@@ -114,11 +127,17 @@ if __name__ == "__main__":
     print(f"\nthreshold={thr:.6f} accuracy={acc:.4f} precision={precision:.4f} recall={recall:.4f}")
     print(f"ground-truth anomaly rate={truth.mean():.1%}  distilled rate={pred.mean():.1%}")
 
+    # Mirror the feature dataset's structure under out_dir so it can be passed to
+    # train.py as a --dataset-dir: only the distilled labels.npy are written; the
+    # feature arrays and global stats are symlinked back to the real dataset.
     out_dir = result_dir / args.out_subdir
+    out_feature_dir = out_dir / FEATURE_SUBDIR
     for sid, errs in per_subject.items():
         labels = (errs > thr).astype(np.float32).reshape(-1, 1)
-        save_dir = out_dir / sid
+        save_dir = out_feature_dir / sid
         save_dir.mkdir(parents=True, exist_ok=True)
         np.save(save_dir / 'labels.npy', labels)
+        relink(save_dir / 'features.npy', feature_dir / sid / 'features.npy')
+    relink(out_feature_dir / 'feature_stats.npy', feature_dir / 'feature_stats.npy')
     np.save(out_dir / 'threshold.npy', np.array([thr], dtype=np.float32))
-    print(f"Wrote distilled labels for {len(per_subject)} subjects to {out_dir}/")
+    print(f"Wrote distilled-label dataset for {len(per_subject)} subjects to {out_dir}/")

@@ -14,7 +14,7 @@ SUBJECTS_SUBDIR = 'subject-signals'
 NORMALIZED_SUBDIR = 'normalized-signals'
 ANOMALOUS_SUBDIR = 'anomalous-signals'
 NORMALIZED_ANOMALOUS_SUBDIR = 'normalized-anomalous-signals'
-FEATURE_SUBDIR = 'feature-anomaly'
+FEATURE_SUBDIR = 'anomalous-features'
 NORM_PARAMS_FILE = 'norm-params.npy'
 
 DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'
@@ -310,7 +310,7 @@ def normalize_anomalous_signals(subjects_dir: Path, anomalous_dir: Path,
 
     This is the autoencoder's input for label distillation: same normalization as
     normalized-signals, but with the injected anomalies kept and *no* context trim,
-    so 8-second windows line up 1:1 with feature-anomaly.
+    so 8-second windows line up 1:1 with anomalous-features.
     """
     normalized_anomalous_dir.mkdir(parents=True, exist_ok=True)
     bvp_mean, bvp_std, acc_mean, acc_std = load_norm_params(subjects_dir)
@@ -489,7 +489,7 @@ if __name__ == '__main__':
         normalize_anomalous_signals(subjects_dir, anomalous_dir, normalized_anomalous_dir)
 
     if feature_dir.is_dir():
-        print(f"feature-anomaly already present at {feature_dir}")
+        print(f"{FEATURE_SUBDIR} already present at {feature_dir}")
     else:
         print(f"\nStage 4: Building feature dataset in {feature_dir}/ ...")
         build_feature_dataset(anomalous_dir, subjects_dir, feature_dir)

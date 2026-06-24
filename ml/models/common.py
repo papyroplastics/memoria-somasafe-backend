@@ -39,6 +39,11 @@ class UnboundError(NotImplementedError):
         self.message = message
         super().__init__(self.message)
 
+class DatasetUnavailibleError(FileNotFoundError):
+    def __init__(self, topic: str, data_dir: str | Path):
+        self.message = f"{topic} dataset not found at {data_dir}. Run scripts/get_dataset.py first."
+        super().__init__(self.message)
+
 
 def unbound(*_, **__):
     raise UnboundError('This function is bound dynamically at init time')
@@ -342,8 +347,7 @@ class AutoencoderTrainer(Trainer):
         data_dir = data_root / self.data_subdir
         subject_dirs = sorted(data_dir.glob('S*'))
         if not subject_dirs:
-            raise FileNotFoundError(
-                f"Signal dataset not found at {data_dir}. Run get-dataset.py first.")
+            raise DatasetUnavailibleError('Signal', data_dir)
 
         subj_train, subj_eval = [], []
         for d in subject_dirs:
