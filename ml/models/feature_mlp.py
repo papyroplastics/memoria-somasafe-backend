@@ -65,16 +65,17 @@ class FeatureMLP(TrainableModel):
 
 
 class FeatureMLPTrainer(Trainer):
-    """Trains the FeatureMLP on the per-subject feature dataset. ``label_dir``
-    overrides where labels are read from (used by the distillation script to
-    feed teacher pseudo-labels instead of the synthetic ground truth);
-    features always come from the feature dataset."""
+    """Trains the FeatureMLP on the per-subject feature dataset. ``label_dir`` is a
+    directory of per-subject labels (``<label_dir>/S*/labels.npy``) that overrides
+    where labels are read from — used by the distillation script to feed teacher
+    pseudo-labels instead of the synthetic ground truth; features always come from
+    the feature dataset."""
 
     primary_metric = 'accuracy'
     default_batch_size = 1
 
     def __init__(self, model: FeatureMLP, batch_size: int = 1,
-                 train_split: float = 0.8, label_dir: str | None = None):
+                 train_split: float = 0.8, label_dir: Path | None = None):
         self.model = model
         self.batch_size = batch_size
         self.train_split = train_split
@@ -91,7 +92,7 @@ class FeatureMLPTrainer(Trainer):
         for d in subject_dirs:
             x = np.load(d / 'features.npy')
             if self.label_dir is not None:
-                y = np.load(data_root / self.label_dir / d.name / 'labels.npy')
+                y = np.load(self.label_dir / d.name / 'labels.npy')
             else:
                 y = np.load(d / 'labels.npy')
 
@@ -117,7 +118,7 @@ class FeatureMLPTrainer(Trainer):
 
 
 def get_trainer(data_root: Path, seed: int, batch_size: int | None = None,
-                label_dir: str | None = None) -> FeatureMLPTrainer:
+                label_dir: Path | None = None) -> FeatureMLPTrainer:
     batch_size = batch_size or FeatureMLPTrainer.default_batch_size
     feature_dir = data_root / 'feature-anomaly'
     subject_dirs = sorted(feature_dir.glob('S*'))

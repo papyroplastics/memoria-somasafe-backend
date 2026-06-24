@@ -13,6 +13,7 @@ RAW_SUBDIR = 'PPG_FieldStudy'
 SUBJECTS_SUBDIR = 'subject-signals'
 NORMALIZED_SUBDIR = 'normalized-signals'
 ANOMALOUS_SUBDIR = 'anomalous-signals'
+NORMALIZED_ANOMALOUS_SUBDIR = 'normalized-anomalous-signals'
 FEATURE_SUBDIR = 'feature-anomaly'
 NORM_PARAMS_FILE = 'norm-params.npy'
 
@@ -68,11 +69,24 @@ def user_description_vector(quest: dict) -> np.ndarray:
 # Stage 1 — Extract raw signals
 # ---------------------------------------------------------------------------
 
+def weighted_mean_std(stats: list[tuple[int, float, float]]) -> tuple[float, float]:
+    """Combine per-subject (count, mean, std) into a single mean/std, weighting
+    each subject by its sample count so longer recordings count proportionally."""
+    sizes = np.array([n for n, _, _ in stats], dtype=np.float64)
+    means = np.array([m for _, m, _ in stats], dtype=np.float64)
+    stds  = np.array([s for _, _, s in stats], dtype=np.float64)
+    total = sizes.sum()
+    mean = float((sizes * means).sum() / total)
+    std  = float((sizes * stds).sum() / total)
+    return mean, std
+
+
 def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
     """Extract raw BVP (64 Hz) and ACC magnitude (32 Hz) per subject.
 
     BVP and ACC are stored in separate files because they have different lengths.
-    Global min/max bounds are saved to norm-params.npy for use in normalization.
+    Global mean/std (size-weighted across subjects) are saved to norm-params.npy
+    for z-score normalization downstream.
     """
     subjects_dir.mkdir(parents=True, exist_ok=True)
 
@@ -81,7 +95,8 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
         if p.is_dir() and p.name[1:].isdigit()
     )
 
-    bvp_min = bvp_max = acc_min = acc_max = None
+    bvp_stats: list[tuple[int, float, float]] = []
+    acc_stats: list[tuple[int, float, float]] = []
     processed = []
 
     for subject_id in subject_ids:
@@ -102,10 +117,8 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
         np.save(save_dir / 'acc_mag.npy', acc)
         np.save(save_dir / 'static.npy', static)
 
-        bvp_min = bvp.min() if bvp_min is None else min(bvp_min, float(bvp.min()))
-        bvp_max = bvp.max() if bvp_max is None else max(bvp_max, float(bvp.max()))
-        acc_min = acc.min() if acc_min is None else min(acc_min, float(acc.min()))
-        acc_max = acc.max() if acc_max is None else max(acc_max, float(acc.max()))
+        bvp_stats.append((len(bvp), float(bvp.mean()), float(bvp.std())))
+        acc_stats.append((len(acc), float(acc.mean()), float(acc.std())))
 
         processed.append(subject_id)
         print(f"  S{subject_id}: BVP {len(bvp)} samples @ {BVP_RATE} Hz, ACC {len(acc)} samples @ {ACC_RATE} Hz")
@@ -113,10 +126,12 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
     if not processed:
         return []
 
+    bvp_mean, bvp_std = weighted_mean_std(bvp_stats)
+    acc_mean, acc_std = weighted_mean_std(acc_stats)
     np.save(subjects_dir / NORM_PARAMS_FILE,
-            np.array([[bvp_min, bvp_max], [acc_min, acc_max]], dtype=np.float32))
+            np.array([[bvp_mean, bvp_std], [acc_mean, acc_std]], dtype=np.float32))
 
-    print(f"  Global bounds saved to {subjects_dir / NORM_PARAMS_FILE}")
+    print(f"  Global mean/std saved to {subjects_dir / NORM_PARAMS_FILE}")
     return processed
 
 
@@ -124,15 +139,23 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
 # Stage 2 — Normalize and compute activity context
 # ---------------------------------------------------------------------------
 
+EPS = 1e-8
+
+
+def load_norm_params(subjects_dir: Path) -> tuple[float, float, float, float]:
+    """Read the global BVP/ACC (mean, std) saved by Stage 1, guarding against a
+    zero std. Returns (bvp_mean, bvp_std, acc_mean, acc_std)."""
+    params = np.load(subjects_dir / NORM_PARAMS_FILE)
+    bvp_mean, bvp_std = float(params[0][0]), float(params[0][1])
+    acc_mean, acc_std = float(params[1][0]), float(params[1][1])
+    return bvp_mean, bvp_std + EPS, acc_mean, acc_std + EPS
+
+
 def normalize_signals(subjects_dir: Path, normalized_dir: Path):
-    """Normalize BVP and ACC, interpolate ACC to BVP rate, compute activity context."""
+    """Z-score normalize BVP and ACC, interpolate ACC to BVP rate, compute activity context."""
     normalized_dir.mkdir(parents=True, exist_ok=True)
 
-    params = np.load(subjects_dir / NORM_PARAMS_FILE)
-    bvp_min, bvp_max = float(params[0][0]), float(params[0][1])
-    acc_min, acc_max = float(params[1][0]), float(params[1][1])
-    bvp_range = bvp_max - bvp_min
-    acc_range = acc_max - acc_min
+    bvp_mean, bvp_std, acc_mean, acc_std = load_norm_params(subjects_dir)
 
     # Rolling window in samples on interpolated (64 Hz) ACC
     context_window = CONTEXT_WINDOW_S * BVP_RATE
@@ -148,8 +171,8 @@ def normalize_signals(subjects_dir: Path, normalized_dir: Path):
         acc = np.load(subject_dir / 'acc_mag.npy')
         static = np.load(subject_dir / 'static.npy')
 
-        norm_bvp = ((bvp - bvp_min) / bvp_range).astype(np.float32)
-        norm_acc = ((acc - acc_min) / acc_range).astype(np.float32)
+        norm_bvp = ((bvp - bvp_mean) / bvp_std).astype(np.float32)
+        norm_acc = ((acc - acc_mean) / acc_std).astype(np.float32)
 
         acc_interp = np.interp(
             np.linspace(0, 1, len(norm_bvp)),
@@ -175,18 +198,16 @@ def normalize_signals(subjects_dir: Path, normalized_dir: Path):
         all_ctx_mean.append(ctx_mean)
         all_ctx_std.append(ctx_std)
 
-    # Compute global context normalization bounds
+    # Compute global context normalization stats (mean/std)
     ctx_mean_all = np.concatenate(all_ctx_mean)
     ctx_std_all  = np.concatenate(all_ctx_std)
-    cm_min, cm_max = float(ctx_mean_all.min()), float(ctx_mean_all.max())
-    cs_min, cs_max = float(ctx_std_all.min()),  float(ctx_std_all.max())
-    cm_range = cm_max - cm_min
-    cs_range = cs_max - cs_min
+    cm_mean, cm_std = float(ctx_mean_all.mean()), float(ctx_mean_all.std()) + EPS
+    cs_mean, cs_std = float(ctx_std_all.mean()),  float(ctx_std_all.std())  + EPS
 
     # Second pass: normalize context and save everything
     for subject_id, data in subject_cache.items():
-        norm_cm = ((data['ctx_mean'] - cm_min) / cm_range).astype(np.float32)
-        norm_cs = ((data['ctx_std']  - cs_min) / cs_range).astype(np.float32)
+        norm_cm = ((data['ctx_mean'] - cm_mean) / cm_std).astype(np.float32)
+        norm_cs = ((data['ctx_std']  - cs_mean) / cs_std).astype(np.float32)
         context = np.column_stack([norm_cm, norm_cs]).astype(np.float32)
 
         save_dir = normalized_dir / subject_id
@@ -275,6 +296,45 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
         np.save(save_dir / 'labels.npy', labels)
 
         print(f"  {subject_id}: {len(bvp)} samples, {labels.mean():.1%} anomalous")
+
+
+# ---------------------------------------------------------------------------
+# Stage 3b — Normalized anomalous signals (autoencoder input for distillation)
+# ---------------------------------------------------------------------------
+
+def normalize_anomalous_signals(subjects_dir: Path, anomalous_dir: Path,
+                                normalized_anomalous_dir: Path):
+    """Z-score normalize the anomalous BVP (anomalies preserved) and its matching
+    ACC with the global mean/std, interpolate ACC to the BVP rate, and carry the
+    per-sample labels through.
+
+    This is the autoencoder's input for label distillation: same normalization as
+    normalized-signals, but with the injected anomalies kept and *no* context trim,
+    so 8-second windows line up 1:1 with feature-anomaly.
+    """
+    normalized_anomalous_dir.mkdir(parents=True, exist_ok=True)
+    bvp_mean, bvp_std, acc_mean, acc_std = load_norm_params(subjects_dir)
+
+    for subject_dir in sorted(anomalous_dir.glob('S*')):
+        sid = subject_dir.name
+        bvp = np.load(subject_dir / 'bvp.npy')
+        labels = np.load(subject_dir / 'labels.npy')
+        acc = np.load(subjects_dir / sid / 'acc_mag.npy')
+
+        norm_bvp = ((bvp - bvp_mean) / bvp_std).astype(np.float32)
+        norm_acc = ((acc - acc_mean) / acc_std).astype(np.float32)
+        acc_interp = np.interp(
+            np.linspace(0, 1, len(norm_bvp)),
+            np.linspace(0, 1, len(norm_acc)),
+            norm_acc,
+        ).astype(np.float32)
+
+        save_dir = normalized_anomalous_dir / sid
+        save_dir.mkdir(parents=True, exist_ok=True)
+        np.save(save_dir / 'bvp.npy',    norm_bvp)
+        np.save(save_dir / 'acc.npy',    acc_interp)
+        np.save(save_dir / 'labels.npy', labels)
+        print(f"  {sid}: {len(norm_bvp)} samples, {labels.mean():.1%} anomalous")
 
 
 # ---------------------------------------------------------------------------
@@ -395,6 +455,7 @@ if __name__ == '__main__':
     subjects_dir  = datasets_dir / SUBJECTS_SUBDIR
     normalized_dir = datasets_dir / NORMALIZED_SUBDIR
     anomalous_dir = datasets_dir / ANOMALOUS_SUBDIR
+    normalized_anomalous_dir = datasets_dir / NORMALIZED_ANOMALOUS_SUBDIR
     feature_dir   = datasets_dir / FEATURE_SUBDIR
 
     if raw_dir.is_dir():
@@ -420,6 +481,12 @@ if __name__ == '__main__':
     else:
         print(f"\nStage 3: Creating anomalous signals in {anomalous_dir}/ ...")
         create_anomalous_signals(subjects_dir, anomalous_dir)
+
+    if normalized_anomalous_dir.is_dir() and any(normalized_anomalous_dir.glob('S*')):
+        print(f"normalized-anomalous-signals already present at {normalized_anomalous_dir}")
+    else:
+        print(f"\nStage 3b: Normalizing anomalous signals into {normalized_anomalous_dir}/ ...")
+        normalize_anomalous_signals(subjects_dir, anomalous_dir, normalized_anomalous_dir)
 
     if feature_dir.is_dir():
         print(f"feature-anomaly already present at {feature_dir}")

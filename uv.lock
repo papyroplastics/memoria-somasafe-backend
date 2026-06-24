@@ -1737,6 +1737,7 @@ dependencies = [
     { name = "redis" },
     { name = "sqlmodel" },
     { name = "tensorflow" },
+    { name = "tqdm" },
 ]
 
 [package.optional-dependencies]
@@ -1769,6 +1770,7 @@ requires-dist = [
     { name = "sqlmodel", specifier = ">=0.0.22" },
     { name = "tensorflow", specifier = ">=2.21.0" },
     { name = "tensorflow", extras = ["and-cuda"], marker = "extra == 'cuda'" },
+    { name = "tqdm", specifier = ">=4.68" },
 ]
 provides-extras = ["cuda"]
 
