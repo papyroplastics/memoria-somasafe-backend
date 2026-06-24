@@ -26,7 +26,7 @@ def normal_loop(trainer: Trainer, train_dataset: tf.data.Dataset,
         loss = trainer.train_epoch(train_dataset)
         metrics = trainer.evaluate(eval_dataset)
         history.append((epoch, loss, metrics))
-        print(f"epoch={epoch:03d} loss={loss:.4f} {_format(metrics)}", flush=True)
+        print(f"epoch={epoch + 1}/{epochs} loss={loss:.4f} {_format(metrics)}", flush=True)
     return history
 
 
@@ -55,5 +55,5 @@ def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Datase
 
         metrics = trainer.evaluate(eval_dataset)
         history.append((r, loss, metrics))
-        print(f"round={r:03d} {_format(metrics)}", flush=True)
+        print(f"round={r + 1}/{global_epochs} {_format(metrics)}", flush=True)
     return history

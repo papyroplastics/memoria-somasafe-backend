@@ -6,6 +6,7 @@ from typing import Callable
 
 import numpy as np
 import tensorflow as tf
+from tqdm import tqdm
 
 from ..optimizers import Adam
 
@@ -281,17 +282,22 @@ class Trainer(ABC):
 
     def train_epoch(self, dataset: tf.data.Dataset) -> float:
         """One pass over ``dataset``; returns mean training loss. Datasets yield
-        tuples matching ``model.train``'s arguments, so this stays arity-agnostic."""
-        total, batches = 0.0, 0
-        for batch in dataset:
+        tuples matching ``model.train``'s arguments, so this stays arity-agnostic.
+        Relies on the dataset carrying a known cardinality (asserted in ``combine``
+        and the per-subject splits) so the progress bar has a total."""
+        batches = len(dataset)
+        total = 0.0
+        for batch in tqdm(dataset, total=batches, desc='train', leave=False):
             total += float(self.model.train(*batch)['loss'])
-            batches += 1
         return total / batches if batches else 0.0
 
     def combine(self, datasets: list[tf.data.Dataset]) -> tf.data.Dataset:
         """Merge per-subject datasets for the non-federated loops. Default is
         uniform sampling; override for weighted/interleaved mixing."""
-        return tf.data.Dataset.sample_from_datasets(datasets)
+        count = sum([len(ds) for ds in datasets])
+
+        return tf.data.Dataset.sample_from_datasets(datasets)\
+               .apply(tf.data.experimental.assert_cardinality(count))
 
     def report(self, result_dir: Path, eval_dataset: tf.data.Dataset) -> None:
         """Optional model-specific artifact (e.g. an AE reconstruction plot)."""
