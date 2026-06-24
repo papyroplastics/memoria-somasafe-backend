@@ -15,7 +15,3 @@ api-test:
 worker-run:
 	uv run -m celery -A worker.celery_app worker -B --loglevel=info
 
-services-up:
-	podman compose -f compose.yaml up -d
-services-down:
-	podman compose -f compose.yaml down

@@ -27,7 +27,7 @@ from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from common import challenge
 from common.config import DEVICE_ATTEST_COOLDOWN_SECONDS
@@ -64,6 +64,17 @@ def _payload(nonce: bytes, instance_id: str, server_time: int,
         + user_id.to_bytes(8, "big")
         + serial.encode("ascii")
     )
+
+
+@router.get("/owned")
+def owned_devices(session: Session = Depends(get_session),
+                  user: User = Depends(get_current_user)) -> list[str]:
+    """Serials of every device the caller currently owns. Lets a client check
+    whether the server still considers it the owner (ownership can be lost when
+    someone else re-attests the same device)."""
+    return list(session.exec(
+        select(Device.serial).where(Device.owner_id == user.id)
+    ).all())
 
 
 @router.post("/challenge")
