@@ -1,6 +1,7 @@
 from pathlib import Path
 import numpy as np
 import tensorflow as tf
+from tqdm import tqdm
 
 from .common import Dense, TrainableModel, Trainer
 from ..optimizers import Adam
@@ -105,9 +106,10 @@ class FeatureMLPTrainer(Trainer):
     def representative_dataset(self, dataset):
         return dataset.take(10).map(lambda x, y: {'features': x})
 
-    def evaluate(self, dataset):
+    def evaluate(self, dataset, prefix=''):
         correct, total = 0.0, 0.0
-        for x, y in dataset:
+        for x, y in tqdm(dataset, total=len(dataset),
+                         desc=f'{prefix} eval'.strip(), leave=False):
             pred = tf.cast(self.model.eval(x)['logits'] > 0.0, tf.float32)
             correct += float(tf.reduce_sum(tf.cast(tf.equal(pred, y), tf.float32)))
             total += float(y.shape[0])

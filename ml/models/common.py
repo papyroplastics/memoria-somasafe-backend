@@ -277,17 +277,19 @@ class Trainer(ABC):
         """Feed-dict stream for the int8 TFLite converter."""
 
     @abstractmethod
-    def evaluate(self, dataset: tf.data.Dataset) -> dict[str, float]:
-        """Metrics relevant to this model type (accuracy, recon error, ...)."""
+    def evaluate(self, dataset: tf.data.Dataset, prefix: str = '') -> dict[str, float]:
+        """Metrics relevant to this model type (accuracy, recon error, ...).
+        ``prefix`` labels the progress bar (e.g. ``epoch=3/20``)."""
 
-    def train_epoch(self, dataset: tf.data.Dataset) -> float:
+    def train_epoch(self, dataset: tf.data.Dataset, prefix: str = '') -> float:
         """One pass over ``dataset``; returns mean training loss. Datasets yield
         tuples matching ``model.train``'s arguments, so this stays arity-agnostic.
         Relies on the dataset carrying a known cardinality (asserted in ``combine``
-        and the per-subject splits) so the progress bar has a total."""
+        and the per-subject splits) so the progress bar has a total. ``prefix``
+        labels the bar (e.g. ``epoch=3/20``)."""
         batches = len(dataset)
         total = 0.0
-        for batch in tqdm(dataset, total=batches, desc='train', leave=False):
+        for batch in tqdm(dataset, total=batches, desc=f'{prefix} train'.strip(), leave=False):
             total += float(self.model.train(*batch)['loss'])
         return total / batches if batches else 0.0
 
@@ -355,8 +357,10 @@ class AutoencoderTrainer(Trainer):
     def representative_dataset(self, dataset):
         return dataset.take(10).map(lambda s: {'signal': s})
 
-    def evaluate(self, dataset):
-        errors = [self.model.eval(*batch)['error'] for batch in dataset]
+    def evaluate(self, dataset, prefix=''):
+        errors = [self.model.eval(*batch)['error']
+                  for batch in tqdm(dataset, total=len(dataset),
+                                    desc=f'{prefix} eval'.strip(), leave=False)]
         return {'recon_error': float(tf.reduce_mean(tf.concat(errors, axis=0)))}
 
     def report(self, result_dir, eval_dataset):

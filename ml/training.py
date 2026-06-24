@@ -23,10 +23,11 @@ def normal_loop(trainer: Trainer, train_dataset: tf.data.Dataset,
                 eval_dataset: tf.data.Dataset, epochs: int) -> History:
     history: History = []
     for epoch in range(epochs):
-        loss = trainer.train_epoch(train_dataset)
-        metrics = trainer.evaluate(eval_dataset)
+        prefix = f"epoch={epoch + 1}/{epochs}"
+        loss = trainer.train_epoch(train_dataset, prefix)
+        metrics = trainer.evaluate(eval_dataset, prefix)
         history.append((epoch, loss, metrics))
-        print(f"epoch={epoch + 1}/{epochs} loss={loss:.4f} {_format(metrics)}", flush=True)
+        print(f"{prefix} loss={loss:.4f} {_format(metrics)}", flush=True)
     return history
 
 
@@ -42,18 +43,20 @@ def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Datase
 
     history: History = []
     for r in range(global_epochs):
+        round_prefix = f"round={r + 1}/{global_epochs}"
         client_weights: list[tf.Tensor] = []
         loss = 0.0
-        for train_ds in subject_train_datasets:
+        for s, train_ds in enumerate(subject_train_datasets):
             model.restore(tf.constant(global_weights))
-            for _ in range(local_epochs):
-                loss = trainer.train_epoch(train_ds)
+            for e in range(local_epochs):
+                prefix = f"{round_prefix} subject={s + 1}/{len(subject_train_datasets)} local={e + 1}/{local_epochs}"
+                loss = trainer.train_epoch(train_ds, prefix)
             client_weights.append(model.save()['parameters'])
 
         global_weights = aggregate(client_weights, sizes)
         model.restore(tf.constant(global_weights))
 
-        metrics = trainer.evaluate(eval_dataset)
+        metrics = trainer.evaluate(eval_dataset, round_prefix)
         history.append((r, loss, metrics))
-        print(f"round={r + 1}/{global_epochs} {_format(metrics)}", flush=True)
+        print(f"{round_prefix} {_format(metrics)}", flush=True)
     return history
