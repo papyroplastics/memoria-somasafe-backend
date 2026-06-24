@@ -160,6 +160,27 @@ class TrainableModel(tf.Module):
         ]
         return hashlib.sha256(repr(manifest).encode()).hexdigest()[:16]
 
+    def transfer_from(self, source: 'TrainableModel') -> None:
+        """Copy ``source``'s trainable variables into this model for transfer
+        learning. Both models must share the architecture (same ordered variable
+        list) and differ only in things like batch size. Where a variable's shape
+        matches it is copied whole; where it differs the overlapping leading
+        region is copied and the rest left at this model's init, so a model
+        trained at a larger batch size still seeds a smaller one."""
+        if len(self.trainable_variables) != len(source.trainable_variables):
+            raise ValueError(
+                f"variable count mismatch: {len(self.trainable_variables)} vs "
+                f"{len(source.trainable_variables)} — models are not the same architecture")
+
+        for dst, src in zip(self.trainable_variables, source.trainable_variables):
+            if dst.shape == src.shape:
+                dst.assign(src)
+                continue
+            region = tuple(slice(0, min(d, s)) for d, s in zip(dst.shape, src.shape))
+            merged = dst.numpy()
+            merged[region] = src.numpy()[region]
+            dst.assign(merged)
+
     def _init_save_restore(self):
         self.parameter_sizes = [
             int(var.shape.num_elements()) for var in self.trainable_variables
@@ -240,6 +261,8 @@ class Trainer(ABC):
 
     model: TrainableModel
     primary_metric: str
+    default_batch_size: int
+    batch_size: int
 
     @abstractmethod
     def subject_datasets(
@@ -284,6 +307,7 @@ class AutoencoderTrainer(Trainer):
     """
 
     primary_metric = 'recon_error'
+    default_batch_size = 12
 
     def __init__(self, model: TrainableModel, window_size: int, shift: int,
                  batch_size: int, train_split: float = 0.975,

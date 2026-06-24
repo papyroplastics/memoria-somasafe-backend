@@ -70,6 +70,7 @@ class FeatureMLPTrainer(Trainer):
     features always come from the feature dataset."""
 
     primary_metric = 'accuracy'
+    default_batch_size = 1
 
     def __init__(self, model: FeatureMLP, batch_size: int = 1,
                  train_split: float = 0.8, label_dir: str | None = None):
@@ -113,7 +114,9 @@ class FeatureMLPTrainer(Trainer):
         return {'accuracy': correct / total if total else 0.0}
 
 
-def get_trainer(data_root: Path, seed: int, label_dir: str | None = None) -> FeatureMLPTrainer:
+def get_trainer(data_root: Path, seed: int, batch_size: int | None = None,
+                label_dir: str | None = None) -> FeatureMLPTrainer:
+    batch_size = batch_size or FeatureMLPTrainer.default_batch_size
     feature_dir = data_root / 'feature-anomaly'
     subject_dirs = sorted(feature_dir.glob('S*'))
     if not subject_dirs:
@@ -124,10 +127,10 @@ def get_trainer(data_root: Path, seed: int, label_dir: str | None = None) -> Fea
 
     model = FeatureMLP(
         name='feature_anomaly',
-        batch_size=1,
+        batch_size=batch_size,
         n_features=n_features,
         hidden_dim=32,
         hidden_layers=3,
         learning_rate=1e-3,
     )
-    return FeatureMLPTrainer(model, batch_size=1, label_dir=label_dir)
+    return FeatureMLPTrainer(model, batch_size=batch_size, label_dir=label_dir)

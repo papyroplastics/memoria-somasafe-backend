@@ -112,11 +112,11 @@ class ConditionalAutoencoderTrainer(AutoencoderTrainer):
             lambda s, c, st: {'signal': s, 'context': c, 'static': st})
 
 
-def get_trainer(data_root, seed) -> ConditionalAutoencoderTrainer:
+def get_trainer(data_root, seed, batch_size=None) -> ConditionalAutoencoderTrainer:
     sample_rate = 64
     window_size = sample_rate * 8       # 8 s windows
     shift = sample_rate * 3             # 3 s stride
-    batch_size = 12
+    batch_size = batch_size or ConditionalAutoencoderTrainer.default_batch_size
 
     model = ConditionalLSTMAutoencoder(
         name='dalia_cond_lstm_ae', batch_size=batch_size, seq_len=window_size,

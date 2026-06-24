@@ -41,11 +41,11 @@ class GRUAutoencoder(TrainableAutoencoder):
         return tf.stack(outputs, axis=1)
 
 
-def get_trainer(data_root, seed) -> AutoencoderTrainer:
+def get_trainer(data_root, seed, batch_size=None) -> AutoencoderTrainer:
     sample_rate = 64
     window_size = sample_rate * 8       # 8 s windows
     shift = sample_rate * 3             # 3 s stride
-    batch_size = 12
+    batch_size = batch_size or AutoencoderTrainer.default_batch_size
 
     model = GRUAutoencoder(
         name='dalia_gru_ae', batch_size=batch_size, seq_len=window_size,
