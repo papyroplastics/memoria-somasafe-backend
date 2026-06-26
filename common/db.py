@@ -5,12 +5,20 @@ from enum import Enum
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from common.config import DATABASE_URL
-from common.models import ModelPurpose
 
 
 def utcnow() -> datetime:
     # Naive UTC to match the default TIMESTAMP WITHOUT TIME ZONE columns.
     return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+class ModelPurpose(str, Enum):
+    """TF-free model role, shared by the code registry (ml.model_list) and the
+    ModelDefinition table the registry is projected into by the seed script."""
+
+    train_only = "train-only"
+    embed_infer = "embed-infer"
+    app_infer = "app-infer"
 
 
 class JobStatus(str, Enum):
@@ -23,7 +31,7 @@ class JobStatus(str, Enum):
 
 class User(SQLModel, table=True):
     """An account allowed to talk to the gateway. Created by the seed script
-    (no public registration); the password is argon2-hashed (see api.auth)."""
+    (no public registration); the password is argon2-hashed (see api.routes.auth)."""
 
     id: int | None = Field(default=None, primary_key=True)
     username: str = Field(unique=True, index=True)
@@ -51,7 +59,7 @@ class AuthSession(SQLModel, table=True):
 class Device(SQLModel, table=True):
     """A physical SomaSafe device, provisioned with a factory ECDSA P-256 key.
     Seeded ownerless by scripts.db_seed from a factory NVS image; ``owner_id`` is
-    set once a user attests ownership (see api.device). ``last_attested_at``
+    set once a user attests ownership (see api.routes.device). ``last_attested_at``
     gates ownership changes to once per DEVICE_ATTEST_COOLDOWN_SECONDS."""
 
     serial: str = Field(primary_key=True)

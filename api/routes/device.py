@@ -29,7 +29,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from common import challenge
+from api.lib import challenge
 from common.config import DEVICE_ATTEST_COOLDOWN_SECONDS
 from common.db import Device, User, get_session, utcnow
 from .auth import get_current_user
@@ -53,17 +53,6 @@ class ChallengeResponse(BaseModel):
 class AttestRequest(BaseModel):
     instance_id: str
     signature: str      # base64 (standard) of the DER ECDSA signature
-
-
-def _payload(nonce: bytes, instance_id: str, server_time: int,
-             user_id: int, serial: str) -> bytes:
-    return (
-        nonce
-        + uuid.UUID(instance_id).bytes
-        + server_time.to_bytes(8, "big")
-        + user_id.to_bytes(8, "big")
-        + serial.encode("ascii")
-    )
 
 
 @router.get("/owned")
@@ -127,7 +116,7 @@ def attest(body: AttestRequest,
     if device is None:
         raise HTTPException(status_code=404, detail="Device no longer exists")
 
-    payload = _payload(
+    payload = challenge.build_payload(
         base64.b64decode(stored["nonce"]),
         body.instance_id,
         stored["server_time"],

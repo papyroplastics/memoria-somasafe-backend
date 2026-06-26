@@ -31,7 +31,7 @@ from common.db import (
     user_owns_device,
     utcnow,
 )
-from common.ratelimit import enforce_cooldown, enforce_daily_quota
+from api.lib.ratelimit import enforce_cooldown, enforce_daily_quota
 from .auth import get_current_user
 
 router = APIRouter(prefix="/model")
@@ -103,21 +103,22 @@ def list_models(session: Session = Depends(get_session),
 def quantize_model(key: str, weights: ModelWeights,
                    session: Session = Depends(get_session),
                    user: User = Depends(get_current_user)):
-    meta = require_model(session, key)
     require_device_owner(session, user)
+    enforce_daily_quota("quantize", user.id, key, QUANTIZE_DAILY_LIMIT, QUANTIZE_DAILY_WINDOW_SECONDS)
+    meta = require_model(session, key)
+
     # Resolve the base weights the client trained from; they pin the architecture.
     base = session.get(GlobalWeights, weights.weights_id)
     if base is None or base.model_key != key:
         raise HTTPException(status_code=400,
                             detail=f"Unknown base weights for model '{key}'")
+
     # Reject weights trained against an outdated architecture — the worker could
     # not restore them, and aggregation must not mix fingerprints.
     if base.fingerprint != meta.fingerprint:
         raise HTTPException(
             status_code=409,
             detail=f"Stale architecture; model '{key}' is now {meta.fingerprint}")
-    enforce_daily_quota("quantize", user.id, key,
-                        QUANTIZE_DAILY_LIMIT, QUANTIZE_DAILY_WINDOW_SECONDS)
 
     submission = WeightSubmission(
         user_id=user.id,
@@ -183,8 +184,8 @@ def get_weights(key: str,
     model when the fingerprint hasn't changed. Headers carry the architecture,
     the weights id (echoed back to /quantize) and the timestamp (which the
     client compares against to decide when to refresh)."""
-    require_model(session, key)
     require_device_owner(session, user)
+    require_model(session, key)
     weights = get_latest_weights(session, key)
     if weights is None:
         raise HTTPException(status_code=404, detail=f"No weights for model '{key}'")
@@ -207,9 +208,9 @@ def download_model(artifact: Artifact, key: str,
     """Serve a model's trainable or default int8 artifact from results/<key>/.
     The current architecture fingerprint travels in a header so the client can
     record which architecture the downloaded model belongs to."""
-    meta = require_model(session, key)
     require_device_owner(session, user)
     enforce_cooldown("download", user.id, key, DOWNLOAD_COOLDOWN_SECONDS)
+    meta = require_model(session, key)
     return FileResponse(
         path=RESULTS_DIR / key / f"{artifact.value}.tflite",
         filename=f"{key}-{artifact.value}.tflite",

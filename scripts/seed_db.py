@@ -14,7 +14,7 @@ from pathlib import Path
 
 from sqlmodel import Session, select
 
-from api.auth import hash_password
+from api.routes.auth import hash_password
 from common.config import DATASETS_DIR, RESULTS_DIR, SEED, SEED_EMAIL, SEED_PASSWORD, SEED_USER
 from common.db import (
     Device,

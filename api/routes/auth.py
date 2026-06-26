@@ -12,13 +12,8 @@ from common.config import ACCESS_TOKEN_TTL_SECONDS, REFRESH_TOKEN_TTL_SECONDS
 from common.db import AuthSession, User, get_session, utcnow
 
 router = APIRouter(prefix="/auth")
-
 password_hash = PasswordHash.recommended()
-# Constant-time-ish protection against username enumeration on login.
-_DUMMY_HASH = password_hash.hash("dummypassword")
-
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
-
 
 class TokenPair(BaseModel):
     access_token: str
@@ -89,16 +84,16 @@ async def get_current_user(token: str = Depends(oauth2_scheme),
 @router.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends(),
           session: Session = Depends(get_session)) -> TokenPair:
-    user = session.exec(
-        select(User).where(User.username == form_data.username)
-    ).first()
+    user = session.exec(select(User).where(User.username == form_data.username)).first()
+
     if user is None:
-        password_hash.verify(form_data.password, _DUMMY_HASH)  # equalize timing
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Incorrect username or password")
+        # equalize timing to protect agains user enumeration
+        password_hash.verify(form_data.password, "dummypassword") 
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
+
     if user.disabled or not password_hash.verify(form_data.password, user.hashed_password):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
-                            detail="Incorrect username or password")
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
+
     return _new_session(session, user.id)
 
 

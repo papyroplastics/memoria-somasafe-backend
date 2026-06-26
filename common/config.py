@@ -20,7 +20,7 @@ CLEANUP_INTERVAL_SECONDS = int(os.environ.get("CLEANUP_INTERVAL_SECONDS", 120))
 # Seed used to rebuild the representative dataset for int8 calibration.
 SEED = int(os.environ.get("SEED", 1234))
 
-# --- Auth (stateful opaque tokens, see api.auth) ---
+# --- Auth (stateful opaque tokens, see api.routes.auth) ---
 ACCESS_TOKEN_TTL_SECONDS = int(os.environ.get("ACCESS_TOKEN_TTL_SECONDS", 1800))      # 30 min
 REFRESH_TOKEN_TTL_SECONDS = int(os.environ.get("REFRESH_TOKEN_TTL_SECONDS", 2592000))  # 30 days
 
@@ -29,7 +29,7 @@ SEED_USER = os.environ.get("SEED_USER", "somasafe")
 SEED_PASSWORD = os.environ.get("SEED_PASSWORD", "somasafe")
 SEED_EMAIL = os.environ.get("SEED_EMAIL") or None
 
-# --- Rate limiting (Redis-backed, see common.ratelimit) ---
+# --- Rate limiting (Redis-backed, see api.lib.ratelimit) ---
 # Separate Redis db from the Celery broker (db 0) to keep counters isolated.
 RATELIMIT_URL = os.environ.get("RATELIMIT_URL", "redis://localhost:6379/1")
 # Per-user, per-model cooldown between artifact downloads (trainable/quantized).
@@ -38,7 +38,7 @@ DOWNLOAD_COOLDOWN_SECONDS = int(os.environ.get("DOWNLOAD_COOLDOWN_SECONDS", 300)
 QUANTIZE_DAILY_LIMIT = int(os.environ.get("QUANTIZE_DAILY_LIMIT", 2))
 QUANTIZE_DAILY_WINDOW_SECONDS = int(os.environ.get("QUANTIZE_DAILY_WINDOW_SECONDS", 86400))
 
-# --- Device attestation (see api.device) ---
+# --- Device attestation (see api.routes.device) ---
 # How long an issued ownership challenge stays valid before it must be reissued.
 DEVICE_CHALLENGE_TTL_SECONDS = int(os.environ.get("DEVICE_CHALLENGE_TTL_SECONDS", 300))
 # A device's owner may only change once per this window (24 h since the last

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from common.models import ModelPurpose
+from common.db import ModelPurpose
 from ml.models import (
     cnn_autoencoder,
     cond_lstm_autoencoder,

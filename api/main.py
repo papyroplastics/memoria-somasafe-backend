@@ -3,9 +3,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from common.db import init_db
-from .auth import router as auth_router
-from .device import router as device_router
-from .model import router
+from .routes.auth import router as auth_router
+from .routes.device import router as device_router
+from .routes.model import router
 
 
 @asynccontextmanager

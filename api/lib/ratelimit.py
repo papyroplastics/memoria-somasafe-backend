@@ -48,3 +48,11 @@ def enforce_daily_quota(action: str, user_id: int, model_key: str,
     if count > limit:
         ttl = _client.ttl(key)
         raise _too_many(ttl, f"Daily limit of {limit} reached; retry in {ttl}s")
+
+
+def reset() -> None:
+    """Drop every ``rl:`` counter. Test helper: lets the rate-limited endpoints
+    be exercised repeatedly against a shared Redis without waiting out windows."""
+    keys = list(_client.scan_iter(match="rl:*"))
+    if keys:
+        _client.delete(*keys)
