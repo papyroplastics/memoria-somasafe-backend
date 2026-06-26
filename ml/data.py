@@ -29,6 +29,8 @@ WINDOW_SECONDS = 8
 BVP_WINDOW = BVP_RATE * WINDOW_SECONDS    # 512 samples
 ACC_WINDOW = ACC_RATE * WINDOW_SECONDS    # 256 samples
 ANOMALY_PROB = 0.5
+MIN_ANOMALY_WINDOWS = 8
+MAX_ANOMALY_WINDOWS = 30
 FEATURE_SEED = 1234
 N_FEATURES = 17
 EPS = 1e-8
@@ -144,58 +146,68 @@ def inject_anomalies(
     rng: np.random.Generator,
     anomaly_prob: float,
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Inject anomalies into a raw BVP signal at random intervals.
+    """Inject anomalies into a raw BVP signal on window-aligned boundaries.
 
-    Perturbations are scaled relative to the signal's own range / std so that
-    they are equally disruptive regardless of the sensor's absolute output range.
-    Returns (anomalous_bvp, labels) where labels is a per-sample bitmap.
+    Anomalies span whole ``BVP_WINDOW``-sample windows, so every feature window is
+    either fully clean or fully anomalous (no partial-overlap windows) and the
+    per-window labels map 1:1 onto the feature/distillation grid. Perturbations are
+    scaled relative to the signal's own range / std so that they are equally
+    disruptive regardless of the sensor's absolute output range. Returns
+    (anomalous_bvp, win_labels) where win_labels is a per-window bitmap of length
+    ``len(bvp) // BVP_WINDOW``.
     """
     result = bvp.copy()
-    labels = np.zeros(len(bvp), dtype=np.float32)
+    n_windows = len(bvp) // BVP_WINDOW
+    win_labels = np.zeros(n_windows, dtype=np.float32)
+    if n_windows == 0:
+        return result.astype(np.float32), win_labels
 
     sig_range = float(bvp.max() - bvp.min())
     sig_std   = float(bvp.std())
-    n = len(bvp)
 
-    min_len = BVP_RATE * 8    # at least one 8-second window
-    max_len = BVP_RATE * 60   # up to 60 seconds
-    target  = int(n * anomaly_prob)
+    min_w  = min(MIN_ANOMALY_WINDOWS, n_windows)
+    max_w  = max(min_w, min(MAX_ANOMALY_WINDOWS, n_windows))
+    target = int(n_windows * anomaly_prob)
 
     attempts = 0
-    while int(labels.sum()) < target and attempts < 10_000:
+    while int(win_labels.sum()) < target and attempts < 10_000:
         attempts += 1
-        length = int(rng.integers(min_len, min(max_len, n // 2) + 1))
-        start  = int(rng.integers(0, max(1, n - length)))
-        seg    = slice(start, start + length)
+        length = int(rng.integers(min_w, max_w + 1))
+        start  = int(rng.integers(0, max(1, n_windows - length + 1)))
+        wins   = slice(start, start + length)
 
-        if labels[seg].any():
+        if win_labels[wins].any():
             continue
 
+        seg = slice(start * BVP_WINDOW, (start + length) * BVP_WINDOW)
+        seg_len = seg.stop - seg.start
         kind = int(rng.integers(0, 5))
         if kind == 0:   # transient spike
             scale = sig_range * float(rng.uniform(0.3, 0.8))
             result[seg] += scale * float(rng.choice([-1.0, 1.0]))
         elif kind == 1: # flatline / sensor dropout
-            result[seg] = result[start]
+            result[seg] = result[seg.start]
         elif kind == 2: # amplitude blow-up around local mean
             mean = float(result[seg].mean())
             result[seg] = mean + (result[seg] - mean) * float(rng.uniform(2.0, 4.0))
         elif kind == 3: # low-frequency baseline wander
-            t = np.linspace(0, float(rng.uniform(1.0, 3.0)) * np.pi, length)
+            t = np.linspace(0, float(rng.uniform(1.0, 3.0)) * np.pi, seg_len)
             result[seg] += sig_range * 0.3 * np.sin(t + float(rng.uniform(0, np.pi)))
         else:           # noise burst
-            result[seg] += rng.normal(0.0, sig_std * 0.5, size=length)
+            result[seg] += rng.normal(0.0, sig_std * 0.5, size=seg_len)
 
-        labels[seg] = 1.0
+        win_labels[wins] = 1.0
 
-    return result.astype(np.float32), labels
+    return result.astype(np.float32), win_labels
 
 
 def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
     """Add synthetic anomalies to raw BVP from subject-signals.
 
     Only BVP is modified; ACC is not stored here (load from subject-signals directly).
-    labels.npy is a per-sample bitmap: 1 = anomalous, 0 = clean.
+    labels.npy is a per-window bitmap (1 = anomalous, 0 = clean) of length
+    ``len(bvp) // BVP_WINDOW`` — anomalies are window-aligned, so it maps directly
+    onto the feature/distillation window grid.
     """
     anomalous_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(FEATURE_SEED)
@@ -204,14 +216,14 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
         subject_id = subject_dir.name
         bvp = np.load(subject_dir / 'bvp.npy')
 
-        anomalous_bvp, labels = inject_anomalies(bvp, rng, ANOMALY_PROB)
+        anomalous_bvp, win_labels = inject_anomalies(bvp, rng, ANOMALY_PROB)
 
         save_dir = anomalous_dir / subject_id
         save_dir.mkdir(parents=True, exist_ok=True)
         np.save(save_dir / 'bvp.npy',    anomalous_bvp)
-        np.save(save_dir / 'labels.npy', labels)
+        np.save(save_dir / 'labels.npy', win_labels)
 
-        print(f"  {subject_id}: {len(bvp)} samples, {labels.mean():.1%} anomalous")
+        print(f"  {subject_id}: {len(win_labels)} windows, {win_labels.mean():.1%} anomalous")
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +272,8 @@ def build_feature_dataset(anomalous_dir: Path, subjects_dir: Path, feature_dir: 
 
     BVP comes from anomalous-signals (raw with anomalies, un-normalized).
     ACC comes from subject-signals (raw magnitude, 32 Hz).
-    Windows are labeled 1 if any BVP sample in the window is anomalous.
+    Per-window labels are taken straight from anomalous-signals (anomalies are
+    window-aligned, so each window is fully clean or fully anomalous).
     Features are stored per subject under S*/; standardization (z-score) stats
     are still computed globally and saved at the top level for on-device use.
     """
@@ -272,11 +285,11 @@ def build_feature_dataset(anomalous_dir: Path, subjects_dir: Path, feature_dir: 
     for subject_dir in sorted(anomalous_dir.glob('S*')):
         subject_id = subject_dir.name
         bvp = np.load(subject_dir / 'bvp.npy')
-        lbl = np.load(subject_dir / 'labels.npy')
+        win_lbl = np.load(subject_dir / 'labels.npy')   # per-window
         acc = np.load(subjects_dir / subject_id / 'acc.npy')
 
         n_windows = min(
-            (len(bvp) - BVP_WINDOW) // BVP_WINDOW + 1,
+            len(win_lbl),
             (len(acc) - ACC_WINDOW) // ACC_WINDOW + 1,
         )
 
@@ -288,10 +301,9 @@ def build_feature_dataset(anomalous_dir: Path, subjects_dir: Path, feature_dir: 
 
             bvp_win = bvp[bvp_start : bvp_start + BVP_WINDOW]
             acc_win = acc[acc_start : acc_start + ACC_WINDOW]
-            lbl_win = lbl[bvp_start : bvp_start + BVP_WINDOW]
 
             features.append(extract_features(bvp_win, acc_win))
-            labels.append(1.0 if lbl_win.any() else 0.0)
+            labels.append(float(win_lbl[i]))
 
         per_subject[subject_id] = (
             np.stack(features),
