@@ -3,9 +3,10 @@ import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 
-from .common import Dense, TrainableModel, Trainer, DatasetUnavailibleError
+from ..layers import Dense
+from .common import TrainableModel, Trainer
+from ..data import DatasetUnavailibleError, FEATURE_SUBDIR
 from ..optimizers import Adam
-from scripts.get_dataset import FEATURE_SUBDIR
 
 
 class FeatureMLP(TrainableModel):

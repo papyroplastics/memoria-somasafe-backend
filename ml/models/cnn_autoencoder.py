@@ -1,6 +1,7 @@
 import tensorflow as tf
 
-from .common import Conv1D, TrainableAutoencoder, AutoencoderTrainer
+from ..layers import Conv1D
+from .common import TrainableAutoencoder, AutoencoderTrainer
 
 
 class CNNAutoencoder(TrainableAutoencoder):
@@ -9,14 +10,16 @@ class CNNAutoencoder(TrainableAutoencoder):
     Strided convolutions downsample the window to a temporal bottleneck;
     nearest-neighbour upsampling + convolutions reconstruct it. No recurrence,
     so it quantizes cleanly for TFLM and avoids the LSTM's 1024-step unroll.
+    Encoder sees ``[BVP, ACC]``; decoder reconstructs BVP only.
     ``seq_len`` must be divisible by ``2 ** 3`` (three stride-2 stages)."""
 
     def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int,
                  hidden_dim: int, latent_dim: int, kernel_size: int = 7,
+                 n_outputs: int = 1, diff_weight: float = 1.0,
                  learning_rate: float = 1e-3, beta1: float = 0.9,
                  beta2: float = 0.999, epsilon: float = 1e-7):
         super().__init__(name=name, batch_size=batch_size, seq_len=seq_len,
-                         n_signals=n_signals)
+                         n_signals=n_signals, n_outputs=n_outputs, diff_weight=diff_weight)
 
         self.enc1 = Conv1D(n_signals, hidden_dim, kernel_size, stride=2, activation=tf.nn.relu)
         self.enc2 = Conv1D(hidden_dim, hidden_dim, kernel_size, stride=2, activation=tf.nn.relu)
@@ -24,7 +27,7 @@ class CNNAutoencoder(TrainableAutoencoder):
 
         self.dec1 = Conv1D(latent_dim, hidden_dim, kernel_size, activation=tf.nn.relu)
         self.dec2 = Conv1D(hidden_dim, hidden_dim, kernel_size, activation=tf.nn.relu)
-        self.dec3 = Conv1D(hidden_dim, n_signals, kernel_size, activation=None)
+        self.dec3 = Conv1D(hidden_dim, n_outputs, kernel_size, activation=None)
 
         self._bind(learning_rate, beta1, beta2, epsilon)
 

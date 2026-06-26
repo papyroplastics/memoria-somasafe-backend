@@ -1,37 +1,14 @@
 import hashlib
-import math
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Callable
 
-import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 
 from ..optimizers import Adam
-
-
-@tf.function
-def mse_loss(x: tf.Tensor, y: tf.Tensor) -> tf.Tensor:
-    return tf.reduce_mean((y - x) ** 2)
-
-
-def reconstruction_error(reconstruction: tf.Tensor, signal: tf.Tensor) -> tf.Tensor:
-    """Per-window mean squared error — the anomaly score for autoencoders."""
-    return tf.reduce_mean(tf.square(reconstruction - signal), axis=[1, 2])
-
-
-def window_signal(signal: np.ndarray, window_size: int, shift: int):
-    """Window a ``(T, n_signals)`` array into ``(window_size, n_signals)`` frames.
-
-    Returns the windowed dataset and its (asserted) cardinality.
-    """
-    count = (len(signal) - window_size) // shift + 1
-    ds = (tf.data.Dataset.from_tensor_slices(signal)
-          .window(size=window_size, shift=shift, drop_remainder=True)
-          .flat_map(lambda w: w.batch(window_size, drop_remainder=True))
-          .apply(tf.data.experimental.assert_cardinality(count)))
-    return ds, count
+from ..metrics import mse_loss, first_difference_loss, reconstruction_error
+from ..data import (DatasetUnavailibleError, SUBJECTS_SUBDIR,
+                    windowed_normalized)
 
 
 class UnboundError(NotImplementedError):
@@ -39,104 +16,9 @@ class UnboundError(NotImplementedError):
         self.message = message
         super().__init__(self.message)
 
-class DatasetUnavailibleError(FileNotFoundError):
-    def __init__(self, topic: str, data_dir: str | Path):
-        self.message = f"{topic} dataset not found at {data_dir}. Run scripts/get_dataset.py first."
-        super().__init__(self.message)
-
 
 def unbound(*_, **__):
     raise UnboundError('This function is bound dynamically at init time')
-
-
-class Dense(tf.Module):
-    def __init__(self, in_dim: int, out_dim: int, activation: Callable | None =None):
-        limit = math.sqrt(6.0 / (in_dim + out_dim))
-        self.weight = tf.Variable(tf.random.uniform(
-            shape=[in_dim, out_dim], minval=-limit, maxval=limit
-        ), name='dense_weight')
-        self.bias = tf.Variable(tf.zeros(shape=[out_dim]), name='dense_bias')
-        self.activation = activation if activation else (lambda x: x)
-
-    def __call__(self, data):
-        out = data @ self.weight + self.bias
-        return self.activation(out)
-
-
-class LSTMCell(tf.Module):
-    def __init__(self, in_dim: int, hidden_dim: int):
-        self.hidden_dim = hidden_dim
-
-        limit_w = math.sqrt(6.0 / (in_dim + 4 * hidden_dim))
-        self.W = tf.Variable(tf.random.uniform(
-            shape=[in_dim, 4 * hidden_dim], minval=-limit_w, maxval=limit_w), name='lstm_W')
-
-        limit_u = math.sqrt(6.0 / (hidden_dim + 4 * hidden_dim))
-        self.U = tf.Variable(tf.random.uniform(
-            shape=[hidden_dim, 4 * hidden_dim], minval=-limit_u, maxval=limit_u), name='lstm_U')
-
-        self.b = tf.Variable(tf.zeros(shape=[4 * hidden_dim]), name='lstm_b')
-
-    def zero_state(self, batch_size: int):
-        h = tf.zeros([batch_size, self.hidden_dim])
-        c = tf.zeros([batch_size, self.hidden_dim])
-        return h, c
-
-    def step(self, h, c, x_t):
-        z = x_t @ self.W + h @ self.U + self.b
-        i, f, g, o = tf.split(z, 4, axis=-1)
-        i = tf.sigmoid(i)
-        f = tf.sigmoid(f)
-        o = tf.sigmoid(o)
-        g = tf.tanh(g)
-        c_new = f * c + i * g
-        h_new = o * tf.tanh(c_new)
-        return h_new, c_new
-
-
-class GRUCell(tf.Module):
-    def __init__(self, in_dim: int, hidden_dim: int):
-        self.hidden_dim = hidden_dim
-
-        limit_w = math.sqrt(6.0 / (in_dim + 3 * hidden_dim))
-        self.W = tf.Variable(tf.random.uniform(
-            shape=[in_dim, 3 * hidden_dim], minval=-limit_w, maxval=limit_w), name='gru_W')
-
-        limit_zr = math.sqrt(6.0 / (hidden_dim + 2 * hidden_dim))
-        self.U_zr = tf.Variable(tf.random.uniform(
-            shape=[hidden_dim, 2 * hidden_dim], minval=-limit_zr, maxval=limit_zr), name='gru_U_zr')
-
-        limit_n = math.sqrt(6.0 / (2 * hidden_dim))
-        self.U_n = tf.Variable(tf.random.uniform(
-            shape=[hidden_dim, hidden_dim], minval=-limit_n, maxval=limit_n), name='gru_U_n')
-
-        self.b = tf.Variable(tf.zeros(shape=[3 * hidden_dim]), name='gru_b')
-
-    def zero_state(self, batch_size: int):
-        return tf.zeros([batch_size, self.hidden_dim])
-
-    def step(self, h, x_t):
-        xz, xr, xn = tf.split(x_t @ self.W + self.b, 3, axis=-1)
-        hz, hr = tf.split(h @ self.U_zr, 2, axis=-1)
-        z = tf.sigmoid(xz + hz)
-        r = tf.sigmoid(xr + hr)
-        n = tf.tanh(xn + (r * h) @ self.U_n)
-        return (1.0 - z) * n + z * h
-
-
-class Conv1D(tf.Module):
-    def __init__(self, in_ch: int, out_ch: int, kernel_size: int, stride: int = 1,
-                 activation: Callable | None = None):
-        limit = math.sqrt(6.0 / (kernel_size * (in_ch + out_ch)))
-        self.kernel = tf.Variable(tf.random.uniform(
-            shape=[kernel_size, in_ch, out_ch], minval=-limit, maxval=limit), name='conv_kernel')
-        self.bias = tf.Variable(tf.zeros(shape=[out_ch]), name='conv_bias')
-        self.stride = stride
-        self.activation = activation if activation else (lambda x: x)
-
-    def __call__(self, x):
-        out = tf.nn.conv1d(x, self.kernel, stride=self.stride, padding='SAME') + self.bias
-        return self.activation(out)
 
 
 class TrainableModel(tf.Module):
@@ -220,16 +102,22 @@ class TrainableAutoencoder(TrainableModel):
 
     Subclasses build their encoder/decoder layers and implement ``_forward``;
     the train/eval bodies, signature binding and Adam optimizer are shared. The
-    per-window reconstruction error is the anomaly score. Conditional variants
-    (extra demographics/context inputs) stay outside this hierarchy so they can
-    be compared against a plain reconstruction model.
+    encoder sees ``n_signals`` channels (``[BVP, ACC]``) but the decoder only
+    reconstructs the first ``n_outputs`` (BVP) — ACC is exogenous context that
+    explains motion artifacts and is not part of the anomaly score. The objective
+    is reconstruction MSE plus a first-difference term that penalizes flat output.
+    Conditional variants stay outside this hierarchy so they can be compared
+    against a plain reconstruction model.
     """
 
-    def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int):
+    def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int,
+                 n_outputs: int = 1, diff_weight: float = 1.0):
         super().__init__(name=name)
         self.batch_size = batch_size
         self.seq_len = seq_len
         self.n_signals = n_signals
+        self.n_outputs = n_outputs
+        self.diff_weight = diff_weight
         self.signal_shape = (batch_size, seq_len, n_signals)
 
     def _bind(self, learning_rate: float, beta1: float, beta2: float, epsilon: float):
@@ -246,12 +134,16 @@ class TrainableAutoencoder(TrainableModel):
 
     def eval_eager(self, signal: tf.Tensor):
         reconstruction = self._forward(signal)
+        target = signal[..., :self.n_outputs]
         return {'reconstruction': reconstruction,
-                'error': reconstruction_error(reconstruction, signal)}
+                'error': reconstruction_error(reconstruction, target)}
 
     def train_eager(self, signal: tf.Tensor):
+        target = signal[..., :self.n_outputs]
         with tf.GradientTape() as tape:
-            loss = mse_loss(self._forward(signal), signal)
+            reconstruction = self._forward(signal)
+            loss = (mse_loss(reconstruction, target)
+                    + self.diff_weight * first_difference_loss(reconstruction, target))
         grads = tape.gradient(loss, self.trainable_variables)
         self.optimizer.apply(self.trainable_variables, grads)
         return {'loss': loss}
@@ -314,9 +206,10 @@ class Trainer(ABC):
 class AutoencoderTrainer(Trainer):
     """Shared trainer for non-conditional autoencoders (LSTM/GRU/CNN/...).
 
-    Windows the normalized ``[BVP, ACC]`` signals at load time and scores with
-    reconstruction error. Conditional variants subclass this and override only
-    ``_windowed`` / ``representative_dataset``.
+    Windows the raw ``[BVP, ACC]`` signals from subject-signals and z-score
+    normalizes them at load time (so no normalized copy is stored on disk), then
+    scores with reconstruction error. Conditional variants subclass this and
+    override only ``_windowed`` / ``representative_dataset``.
     """
 
     primary_metric = 'recon_error'
@@ -324,7 +217,7 @@ class AutoencoderTrainer(Trainer):
 
     def __init__(self, model: TrainableModel, window_size: int, shift: int,
                  batch_size: int, train_split: float = 0.975,
-                 data_subdir: str = 'normalized-signals'):
+                 data_subdir: str = SUBJECTS_SUBDIR):
         self.model = model
         self.window_size = window_size
         self.shift = shift
@@ -332,15 +225,10 @@ class AutoencoderTrainer(Trainer):
         self.train_split = train_split
         self.data_subdir = data_subdir
 
-    def _subject_signal(self, subject_dir: Path) -> np.ndarray:
-        bvp = np.load(subject_dir / 'bvp.npy')
-        acc = np.load(subject_dir / 'acc.npy')
-        return np.stack([bvp, acc], axis=-1).astype(np.float32)
-
     def _windowed(self, subject_dir: Path) -> tuple[tf.data.Dataset, int]:
         """One subject's unbatched window tuples. Override to add conditioning."""
-        sig_ds, count = window_signal(self._subject_signal(subject_dir),
-                                      self.window_size, self.shift)
+        sig_ds, count = windowed_normalized(
+            subject_dir.parent, subject_dir.name, self.window_size, self.shift)
         return sig_ds.map(lambda s: (s,)), count
 
     def subject_datasets(self, data_root, seed):
@@ -375,7 +263,7 @@ class AutoencoderTrainer(Trainer):
             axs[0].plot(batch[0][0].numpy())
             axs[0].set_title('Input window [BVP, ACC]')
             axs[1].plot(recon[0].numpy())
-            axs[1].set_title('Reconstruction')
+            axs[1].set_title('Reconstruction [BVP]')
             fig.savefig(result_dir / 'reconstruction.png')
             print(f"saved reconstruction plot to {result_dir / 'reconstruction.png'}")
             break

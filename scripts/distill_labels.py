@@ -8,7 +8,9 @@ from ml.saving import load_trainable_weights
 from ml.model_list import MODELS, build_trainer
 from ml.models.common import AutoencoderTrainer
 from ml.models.cond_lstm_autoencoder import ConditionalAutoencoderTrainer
-from scripts.get_dataset import NORMALIZED_ANOMALOUS_SUBDIR, FEATURE_SUBDIR
+from ml.data import (SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, FEATURE_SUBDIR,
+                     FEATURE_STATS_FILE, stacked_signal, norm_stats, normalize)
+from ml.metrics import best_threshold, classification_report
 
 SEED = 1234
 
@@ -24,42 +26,17 @@ def relink(link: Path, target: Path):
     link.symlink_to(rel)
 
 
-def window_errors(model, bvp: np.ndarray, acc: np.ndarray,
-                  window: int, n_windows: int) -> np.ndarray:
-    """Reconstruction error for the first ``n_windows`` non-overlapping
-    ``[BVP, ACC]`` windows — the autoencoder's per-window anomaly score. Built
-    with a batch-size-1 model so each window scores independently."""
+def window_errors(model, signal: np.ndarray, window: int, n_windows: int) -> np.ndarray:
+    """Reconstruction error for the first ``n_windows`` non-overlapping windows of a
+    normalized ``[BVP, ACC]`` signal — the autoencoder's per-window anomaly score.
+    Built with a batch-size-1 model so each window scores independently."""
     errors = np.empty(n_windows, dtype=np.float32)
     for w in range(n_windows):
         s = w * window
-        win = np.stack([bvp[s:s + window], acc[s:s + window]], axis=-1)
+        win = signal[s:s + window]
         out = model.eval(win[None].astype(np.float32))
         errors[w] = float(out['error'][0])
     return errors
-
-
-def best_threshold(errors: np.ndarray, labels: np.ndarray) -> tuple[float, float]:
-    """Reconstruction-error threshold (predict anomalous when error > threshold)
-    that maximizes accuracy against ``labels``. Single sorted sweep."""
-    order = np.argsort(errors, kind='stable')
-    e = errors[order]
-    y = labels[order].astype(bool)
-    n = len(y)
-
-    # Split i predicts windows [i, n) anomalous; accuracy = correct negatives in
-    # [0, i) + correct positives in [i, n).
-    cumneg = np.concatenate([[0], np.cumsum(~y)])          # negatives in [0, i)
-    pos_suffix = int(y.sum()) - np.concatenate([[0], np.cumsum(y)])  # positives in [i, n)
-    acc = (cumneg + pos_suffix) / n
-
-    i = int(np.argmax(acc))
-    if i == 0:
-        thr = float(e[0]) - 1.0
-    elif i == n:
-        thr = float(e[-1]) + 1.0
-    else:
-        thr = float((e[i - 1] + e[i]) / 2.0)
-    return thr, float(acc[i])
 
 
 if __name__ == "__main__":
@@ -92,12 +69,15 @@ if __name__ == "__main__":
     trainer.model.restore(tf.constant(load_trainable_weights(weights_path)))
 
     window = trainer.window_size
-    norm_anom_dir = data_dir / NORMALIZED_ANOMALOUS_SUBDIR
+    subjects_dir = data_dir / SUBJECTS_SUBDIR
+    anomalous_dir = data_dir / ANOMALOUS_SUBDIR
     feature_dir = data_dir / FEATURE_SUBDIR
 
-    subject_dirs = sorted(norm_anom_dir.glob('S*'))
+    subject_dirs = sorted(anomalous_dir.glob('S*'))
     if not subject_dirs:
-        raise SystemExit(f"{norm_anom_dir} is empty. Run get_dataset.py first.")
+        raise SystemExit(f"{anomalous_dir} is empty. Run get_dataset.py first.")
+
+    mean, std = norm_stats(subjects_dir)
 
     per_subject: dict[str, np.ndarray] = {}
     all_err: list[np.ndarray] = []
@@ -105,10 +85,10 @@ if __name__ == "__main__":
     print("Scoring windows by reconstruction error:")
     for d in subject_dirs:
         sid = d.name
-        bvp = np.load(d / 'bvp.npy')
-        acc = np.load(d / 'acc.npy')
+        signal = normalize(stacked_signal(subjects_dir, sid, anomalous_dir=anomalous_dir),
+                           mean, std)
         truth = np.load(feature_dir / sid / 'labels.npy').reshape(-1)  # per-window ground truth
-        errs = window_errors(trainer.model, bvp, acc, window, len(truth))
+        errs = window_errors(trainer.model, signal, window, len(truth))
         per_subject[sid] = errs
         all_err.append(errs)
         all_lbl.append(truth)
@@ -119,12 +99,9 @@ if __name__ == "__main__":
     thr, acc = best_threshold(errors, truth)
 
     pred = errors > thr
-    tp = int(np.sum(pred & (truth > 0.5)))
-    fp = int(np.sum(pred & (truth < 0.5)))
-    fn = int(np.sum(~pred & (truth > 0.5)))
-    precision = tp / (tp + fp) if tp + fp else 0.0
-    recall = tp / (tp + fn) if tp + fn else 0.0
-    print(f"\nthreshold={thr:.6f} accuracy={acc:.4f} precision={precision:.4f} recall={recall:.4f}")
+    report = classification_report(pred, truth)
+    print(f"\nthreshold={thr:.6f} accuracy={acc:.4f} "
+          f"precision={report['precision']:.4f} recall={report['recall']:.4f}")
     print(f"ground-truth anomaly rate={truth.mean():.1%}  distilled rate={pred.mean():.1%}")
 
     # Mirror the feature dataset's structure under out_dir so it can be passed to
@@ -138,6 +115,6 @@ if __name__ == "__main__":
         save_dir.mkdir(parents=True, exist_ok=True)
         np.save(save_dir / 'labels.npy', labels)
         relink(save_dir / 'features.npy', feature_dir / sid / 'features.npy')
-    relink(out_feature_dir / 'feature_stats.npy', feature_dir / 'feature_stats.npy')
+    relink(out_feature_dir / FEATURE_STATS_FILE, feature_dir / FEATURE_STATS_FILE)
     np.save(out_dir / 'threshold.npy', np.array([thr], dtype=np.float32))
     print(f"Wrote distilled-label dataset for {len(per_subject)} subjects to {out_dir}/")
