@@ -1,18 +1,15 @@
 import argparse
+import json
 from pathlib import Path
 
 import numpy as np
-import tensorflow as tf
 
-from ml.saving import load_trainable_weights
-from ml.model_list import MODELS, build_trainer
-from ml.models.common import AutoencoderTrainer
-from ml.models.cond_lstm_autoencoder import ConditionalAutoencoderTrainer
+from common.config import RESULTS_DIR, DATASETS_DIR
 from ml.data import (SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, FEATURE_SUBDIR,
                      FEATURE_STATS_FILE, stacked_signal, norm_stats, normalize)
-from ml.metrics import best_threshold, classification_report
-
-SEED = 1234
+from ml.model_list import MODELS
+from .test_autoencoder import load_autoencoder, window_errors
+from .common.post_train import get_report_dir, AE_TEST_REPORT
 
 
 def relink(link: Path, target: Path):
@@ -26,47 +23,34 @@ def relink(link: Path, target: Path):
     link.symlink_to(rel)
 
 
-def window_errors(model, signal: np.ndarray, window: int, n_windows: int) -> np.ndarray:
-    """Reconstruction error for the first ``n_windows`` non-overlapping windows of a
-    normalized ``[BVP, ACC]`` signal — the autoencoder's per-window anomaly score.
-    Built with a batch-size-1 model so each window scores independently."""
-    errors = np.empty(n_windows, dtype=np.float32)
-    for w in range(n_windows):
-        s = w * window
-        win = signal[s:s + window]
-        out = model.eval(win[None].astype(np.float32))
-        errors[w] = float(out['error'][0])
-    return errors
+def load_threshold(model_name: str) -> float:
+    """Read the reconstruction-error threshold picked by test_autoencoder.py."""
+    report_path = get_report_dir(RESULTS_DIR / model_name) / AE_TEST_REPORT
+    if not report_path.exists():
+        raise SystemExit(
+            f"no evaluation report at {report_path}. Run test_autoencoder '{model_name}' "
+            f"first to pick the threshold.")
+    return float(json.loads(report_path.read_text())['threshold'])
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='Distill window labels from a trained autoencoder: score the '
-                    'synthetic-anomaly windows by reconstruction error, pick the '
-                    'accuracy-maximizing threshold against the ground-truth labels, '
-                    'and write a datasets-shaped tree (anomalous-features/S*/ with '
-                    'distilled labels.npy + symlinked features) into results/<model>/ '
-                    'that train.py can consume via --dataset-dir.')
+                    'synthetic-anomaly windows by reconstruction error, label them '
+                    'with the threshold chosen by test_autoencoder.py, and write a '
+                    'datasets-shaped tree (anomalous-features/S*/ with distilled '
+                    'labels.npy + symlinked features) into results/<model>/ that '
+                    'train.py can consume via --dataset-dir.')
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to distill from')
     parser.add_argument('--out-subdir', default='distilled-labels',
                         help='Subdirectory of results/<model>/ for the labels (default: distilled-labels)')
     args = parser.parse_args()
 
-    data_dir = Path('datasets')
-    result_dir = Path('results') / args.model
+    data_dir = DATASETS_DIR
+    result_dir = RESULTS_DIR / args.model
 
-    # Batch size 1 so we can score windows one at a time regardless of how the
-    # model was trained; trainable weights are batch-size independent.
-    trainer = build_trainer(args.model, data_dir, SEED, batch_size=1)
-    if not isinstance(trainer, AutoencoderTrainer) or isinstance(trainer, ConditionalAutoencoderTrainer):
-        raise SystemExit(
-            f"'{args.model}' is not a non-conditional autoencoder; distillation needs "
-            f"one (lstm-ae, gru-ae, cnn-ae).")
-
-    weights_path = result_dir / 'trainable.tflite'
-    if not weights_path.exists():
-        raise SystemExit(f"trained model not found at {weights_path}. Train '{args.model}' first.")
-    trainer.model.restore(tf.constant(load_trainable_weights(weights_path)))
+    thr = load_threshold(args.model)
+    trainer = load_autoencoder(args.model, data_dir)
 
     window = trainer.window_size
     subjects_dir = data_dir / SUBJECTS_SUBDIR
@@ -80,29 +64,15 @@ if __name__ == "__main__":
     mean, std = norm_stats(subjects_dir)
 
     per_subject: dict[str, np.ndarray] = {}
-    all_err: list[np.ndarray] = []
-    all_lbl: list[np.ndarray] = []
-    print("Scoring windows by reconstruction error:")
+    print(f"Labeling windows at threshold={thr:.6f}:")
     for d in subject_dirs:
         sid = d.name
         signal = normalize(stacked_signal(subjects_dir, sid, anomalous_dir=anomalous_dir),
                            mean, std)
-        truth = np.load(feature_dir / sid / 'labels.npy').reshape(-1)  # per-window ground truth
-        errs = window_errors(trainer.model, signal, window, len(truth))
+        n_windows = len(np.load(feature_dir / sid / 'labels.npy').reshape(-1))
+        errs = window_errors(trainer.model, signal, window, n_windows)
         per_subject[sid] = errs
-        all_err.append(errs)
-        all_lbl.append(truth)
-        print(f"  {sid}: {len(truth)} windows")
-
-    errors = np.concatenate(all_err)
-    truth = np.concatenate(all_lbl)
-    thr, acc = best_threshold(errors, truth)
-
-    pred = errors > thr
-    report = classification_report(pred, truth)
-    print(f"\nthreshold={thr:.6f} accuracy={acc:.4f} "
-          f"precision={report['precision']:.4f} recall={report['recall']:.4f}")
-    print(f"ground-truth anomaly rate={truth.mean():.1%}  distilled rate={pred.mean():.1%}")
+        print(f"  {sid}: {n_windows} windows")
 
     # Mirror the feature dataset's structure under out_dir so it can be passed to
     # train.py as a --dataset-dir: only the distilled labels.npy are written; the

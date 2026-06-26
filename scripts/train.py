@@ -1,15 +1,12 @@
 import argparse
 from pathlib import Path
 import tensorflow as tf
-import matplotlib.pyplot as plt
 
 from ml.models.common import Trainer
 from ml.training import normal_loop, federated_loop, History
-from ml.saving import save_tainable_model, save_optimized_model
 from ml.model_list import MODELS, build_trainer
-
-SEED = 1234
-
+from common.config import RESULTS_DIR, DATASETS_DIR, SEED
+from .common.post_train import save_artifacts, plot_history, get_report_dir
 
 def run_loop(trainer: Trainer, data_dir: Path, loop: str, 
              epochs: int, local_epochs: int) -> tuple[History, tf.data.Dataset]:
@@ -25,32 +22,6 @@ def run_loop(trainer: Trainer, data_dir: Path, loop: str,
     return history, eval_dataset
 
 
-def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset, postfix: str = ''):
-    saved_model, sm_path = save_tainable_model(result_dir, trainer.model, postfix)
-    print(f"Saved trainable model to {sm_path}")
-    try:
-        rep_dataset = trainer.representative_dataset(eval_dataset)
-        save_optimized_model(result_dir, trainer.model, rep_dataset, postfix)
-    except Exception as e:
-        print(f"Skipped int8 export (conversion failed): {e}")
-
-
-def plot_history(history: History, primary_metric: str, result_dir: Path):
-    steps = [h[0] for h in history]
-    losses = [h[1] for h in history]
-    metric = [h[2][primary_metric] for h in history]
-
-    fig, ax = plt.subplots()
-    ax.plot(steps, losses, 'b-', label='train loss')
-    ax.set_xlabel('step')
-    ax.set_ylabel('loss', color='b')
-    ax2 = ax.twinx()
-    ax2.plot(steps, metric, 'g-', label=primary_metric)
-    ax2.set_ylabel(primary_metric, color='g')
-    fig.savefig(result_dir / 'training.png')
-    print(f"saved training plot to {result_dir / 'training.png'}")
-
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description='Train a SomaSafe model with a chosen training loop and export '
@@ -63,7 +34,7 @@ if __name__ == "__main__":
     parser.add_argument('--batch-size', type=int, default=None,
                         help='Override the model default batch size. Artifacts from a '
                              'non-default batch size are suffixed (e.g. trainable_32.tflite).')
-    parser.add_argument('--dataset-dir', type=Path, default=Path('datasets'),
+    parser.add_argument('--dataset-dir', type=Path, default=DATASETS_DIR,
                         help='Dataset directory to train on (default: datasets). Point this '
                              'at an alternative source with the same structure as datasets/ '
                              '(e.g. a distilled-labels directory) to train against distilled '
@@ -71,13 +42,14 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     data_dir = args.dataset_dir
-    result_dir = Path('results') / args.model
-    result_dir.mkdir(parents=True, exist_ok=True)
+
+    result_dir = RESULTS_DIR / args.model
+    report_dir = get_report_dir(result_dir)
 
     trainer = build_trainer(args.model, data_dir, SEED, batch_size=args.batch_size)
     history, eval_dataset = run_loop(trainer, data_dir, args.loop, args.epochs, args.local_epochs)
 
     postfix = '' if trainer.batch_size == trainer.default_batch_size else f'_{trainer.batch_size}'
     save_artifacts(trainer, result_dir, eval_dataset, postfix)
-    plot_history(history, trainer.primary_metric, result_dir)
-    trainer.report(result_dir, eval_dataset)
+    plot_history(history, trainer.primary_metric, report_dir)
+    trainer.report(report_dir, eval_dataset)

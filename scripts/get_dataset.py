@@ -3,15 +3,14 @@ import tempfile
 import urllib.request
 import zipfile
 from pathlib import Path
+from common.config import DATASETS_DIR
 
 from ml.data import (
     RAW_SUBDIR, SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, FEATURE_SUBDIR,
     extract_subject_signals, create_anomalous_signals, build_feature_dataset,
 )
 
-DEFAULT_DATASETS_DIR = Path('datasets')
 DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'
-
 
 def download_dataset(datasets_dir: Path, raw_dir: Path):
     datasets_dir.mkdir(parents=True, exist_ok=True)
@@ -36,8 +35,8 @@ def download_dataset(datasets_dir: Path, raw_dir: Path):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        'datasets_dir', nargs='?', type=Path, default=DEFAULT_DATASETS_DIR,
-        help=f"Datasets directory (default: {DEFAULT_DATASETS_DIR})")
+        'datasets_dir', nargs='?', type=Path, default=DATASETS_DIR,
+        help=f"Datasets directory (default: {DATASETS_DIR})")
     args = parser.parse_args()
 
     datasets_dir: Path = args.datasets_dir

@@ -2,13 +2,11 @@ import argparse
 from pathlib import Path
 import tensorflow as tf
 
+from common.config import DATASETS_DIR, RESULTS_DIR, SEED
 from ml.training import normal_loop
 from ml.saving import load_trainable_weights
 from ml.model_list import MODELS, build_trainer
-from scripts.train import save_artifacts, plot_history
-
-SEED = 1234
-
+from .common.post_train import save_artifacts, plot_history, get_report_dir
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -23,8 +21,9 @@ if __name__ == "__main__":
                         help='Fine-tuning epochs after the weight transfer')
     args = parser.parse_args()
 
-    data_dir = Path('datasets')
-    result_dir = Path('results') / args.model
+    data_dir = DATASETS_DIR
+    result_dir = RESULTS_DIR / args.model
+    report_dir = get_report_dir(result_dir)
 
     # Target: a fresh model at the default batch size — the one we fine-tune and export.
     target_trainer = build_trainer(args.model, data_dir, SEED)
@@ -53,5 +52,5 @@ if __name__ == "__main__":
     history = normal_loop(target_trainer, train_dataset, eval_dataset, args.epochs)
 
     save_artifacts(target_trainer, result_dir, eval_dataset)
-    plot_history(history, target_trainer.primary_metric, result_dir)
-    target_trainer.report(result_dir, eval_dataset)
+    plot_history(history, target_trainer.primary_metric, report_dir)
+    target_trainer.report(report_dir, eval_dataset)

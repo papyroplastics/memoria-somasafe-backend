@@ -31,6 +31,9 @@ ACC_WINDOW = ACC_RATE * WINDOW_SECONDS    # 256 samples
 ANOMALY_PROB = 0.5
 MIN_ANOMALY_WINDOWS = 8
 MAX_ANOMALY_WINDOWS = 30
+# Anomaly kinds, indexed by inject_anomalies' kind (0..4); stored per window as
+# kind+1 in kinds.npy (0 = clean) so reconstruction recall can be broken down.
+ANOMALY_KINDS = ('spike', 'flatline', 'blowup', 'wander', 'noise')
 FEATURE_SEED = 1234
 N_FEATURES = 17
 EPS = 1e-8
@@ -153,14 +156,16 @@ def inject_anomalies(
     per-window labels map 1:1 onto the feature/distillation grid. Perturbations are
     scaled relative to the signal's own range / std so that they are equally
     disruptive regardless of the sensor's absolute output range. Returns
-    (anomalous_bvp, win_labels) where win_labels is a per-window bitmap of length
+    (anomalous_bvp, win_labels, win_kinds): per-window bitmap and per-window kind
+    (0 = clean, otherwise the ANOMALY_KINDS index + 1), both of length
     ``len(bvp) // BVP_WINDOW``.
     """
     result = bvp.copy()
     n_windows = len(bvp) // BVP_WINDOW
     win_labels = np.zeros(n_windows, dtype=np.float32)
+    win_kinds = np.zeros(n_windows, dtype=np.int8)
     if n_windows == 0:
-        return result.astype(np.float32), win_labels
+        return result.astype(np.float32), win_labels, win_kinds
 
     sig_range = float(bvp.max() - bvp.min())
     sig_std   = float(bvp.std())
@@ -197,8 +202,9 @@ def inject_anomalies(
             result[seg] += rng.normal(0.0, sig_std * 0.5, size=seg_len)
 
         win_labels[wins] = 1.0
+        win_kinds[wins] = kind + 1
 
-    return result.astype(np.float32), win_labels
+    return result.astype(np.float32), win_labels, win_kinds
 
 
 def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
@@ -207,7 +213,8 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
     Only BVP is modified; ACC is not stored here (load from subject-signals directly).
     labels.npy is a per-window bitmap (1 = anomalous, 0 = clean) of length
     ``len(bvp) // BVP_WINDOW`` — anomalies are window-aligned, so it maps directly
-    onto the feature/distillation window grid.
+    onto the feature/distillation window grid. kinds.npy is the matching per-window
+    anomaly kind (0 = clean, else ANOMALY_KINDS index + 1) for per-kind evaluation.
     """
     anomalous_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(FEATURE_SEED)
@@ -216,12 +223,13 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
         subject_id = subject_dir.name
         bvp = np.load(subject_dir / 'bvp.npy')
 
-        anomalous_bvp, win_labels = inject_anomalies(bvp, rng, ANOMALY_PROB)
+        anomalous_bvp, win_labels, win_kinds = inject_anomalies(bvp, rng, ANOMALY_PROB)
 
         save_dir = anomalous_dir / subject_id
         save_dir.mkdir(parents=True, exist_ok=True)
         np.save(save_dir / 'bvp.npy',    anomalous_bvp)
         np.save(save_dir / 'labels.npy', win_labels)
+        np.save(save_dir / 'kinds.npy',  win_kinds)
 
         print(f"  {subject_id}: {len(win_labels)} windows, {win_labels.mean():.1%} anomalous")
 
