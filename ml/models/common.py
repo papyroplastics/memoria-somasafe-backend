@@ -9,7 +9,7 @@ from ..optimizers import Adam
 from ..layers import Dense
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
 from ..data import (
-    DatasetUnavailibleError, SUBJECTS_SUBDIR,\
+    DatasetUnavailibleError, SUBJECTS_SUBDIR, BVP_RATE,
     windowed_conditional, get_sorted_paths, combine_datasets
 )
 
@@ -100,9 +100,9 @@ class TrainableModel(tf.Module):
 
 
 class TrainableAutoencoder(TrainableModel):
-    def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int,
-                 n_cond: int, cond_embed_dim: int = 16, n_outputs: int = 1,
-                 diff_weight: float = 1.0, latent_dropout: float = 0.1):
+
+    def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int, n_cond: int,
+                 cond_embed_dim, n_outputs, diff_weight, latent_dropout: float):
         super().__init__(name=name)
         self.batch_size = batch_size
         self.seq_len = seq_len
@@ -238,11 +238,17 @@ class TrainerBuilder(Protocol):
     def __call__(self, batch_size: int | None = None) -> Trainer: ...
 
 class AutoencoderTrainer(Trainer):
-    primary_metric = 'recon_error'
-    default_batch_size = 12
 
-    def __init__(self, model: TrainableModel, window_size: int, shift: int,
-                 batch_size: int, data_subdir: str = SUBJECTS_SUBDIR):
+    primary_metric = 'recon_error'
+
+    default_batch_size = 12
+    default_sample_rate = BVP_RATE
+    default_window_size = default_sample_rate * 8
+    default_shift = default_sample_rate * 3
+
+    def __init__(self, model: TrainableModel, window_size: int = default_window_size,
+                 shift: int = default_shift, batch_size: int = default_batch_size, 
+                 data_subdir: str = SUBJECTS_SUBDIR):
         self.model = model
         self.window_size = window_size
         self.shift = shift

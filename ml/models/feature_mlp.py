@@ -19,8 +19,8 @@ class FeatureMLP(TrainableModel):
     and FedAvg weight transfer.
     """
 
-    def __init__(self, name: str, batch_size: int, n_features: int,
-                 hidden_dim: int, hidden_layers: int, learning_rate: float,
+    def __init__(self, name: str, batch_size: int, n_features: int = N_FEATURES,
+                 hidden_dim: int = 32, hidden_layers: int = 3, learning_rate: float = 1e-3,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
         super().__init__(name=name)
 
@@ -106,9 +106,5 @@ def get_trainer(batch_size: int | None = None) -> FeatureMLPTrainer:
     model = FeatureMLP(
         name='feature_anomaly',
         batch_size=batch_size,
-        n_features=N_FEATURES,
-        hidden_dim=32,
-        hidden_layers=3,
-        learning_rate=1e-3,
     )
     return FeatureMLPTrainer(model, batch_size=batch_size)

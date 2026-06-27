@@ -18,11 +18,11 @@ class LSTMAutoencoder(TrainableAutoencoder):
     the score). The reduced-length output is upsampled and smoothed back to the full
     window. Encoder sees ``[BVP, ACC]``; decoder reconstructs BVP only."""
 
-    def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int,
-                 n_cond: int, hidden_dim: int, latent_dim: int, learning_rate: float,
-                 cond_embed_dim: int = 16, down_factor: int = 8, pe_dim: int = 16,
-                 kernel_size: int = 7, n_outputs: int = 1, diff_weight: float = 1.0,
-                 latent_dropout: float = 0.1,
+    def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int = 2,
+                 n_cond: int = N_COND, hidden_dim: int = 64, latent_dim: int = 16, 
+                 learning_rate: float = 1e-3, cond_embed_dim: int = 16, down_factor: int = 8, 
+                 pe_dim: int = 16, kernel_size: int = 7, n_outputs: int = 1,
+                 diff_weight: float = 1.0, latent_dropout: float = 0.1,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
         super().__init__(name=name, batch_size=batch_size, seq_len=seq_len,
                          n_signals=n_signals, n_cond=n_cond, cond_embed_dim=cond_embed_dim,
@@ -73,14 +73,10 @@ class LSTMAutoencoder(TrainableAutoencoder):
 
 
 def get_trainer(batch_size: int | None = None) -> AutoencoderTrainer:
-    sample_rate = 64
-    window_size = sample_rate * 8       # 8 s windows
-    shift = sample_rate * 3             # 3 s stride
     batch_size = batch_size or AutoencoderTrainer.default_batch_size
 
     model = LSTMAutoencoder(
-        name='dalia_lstm_ae', batch_size=batch_size, seq_len=window_size,
-        n_signals=2, n_cond=N_COND, hidden_dim=64, latent_dim=16, learning_rate=1e-3,
+        name='dalia_lstm_ae', batch_size=batch_size,
+        seq_len=AutoencoderTrainer.default_window_size,
     )
-    return AutoencoderTrainer(model, window_size=window_size, shift=shift,
-                              batch_size=batch_size)
+    return AutoencoderTrainer(model, batch_size=batch_size)
