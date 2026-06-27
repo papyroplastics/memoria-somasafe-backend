@@ -9,35 +9,33 @@ from common.config import RESULTS_DIR, DATASETS_DIR, SEED
 from ml.saving import load_trainable_weights
 from ml.model_list import MODELS, build_trainer
 from ml.models.common import AutoencoderTrainer
-from ml.models.cond_lstm_autoencoder import ConditionalAutoencoderTrainer
 from ml.data import (SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, MIXED_SUBDIR,
-                     MIXED_FEATURE_SUBDIR, ANOMALY_KINDS,
-                     stacked_signal, norm_stats, normalize)
+                     MIXED_FEATURE_SUBDIR, ANOMALY_KINDS, conditional_windows)
 from ml.metrics import best_threshold, classification_report
 from .common.post_train import get_report_dir, AE_TEST_REPORT
 
 
-def window_errors(model, signal: np.ndarray, window: int, n_windows: int) -> np.ndarray:
+def window_errors(model, signal: np.ndarray, cond: np.ndarray,
+                  window: int, n_windows: int) -> np.ndarray:
     """Reconstruction error for the first ``n_windows`` non-overlapping windows of a
-    normalized ``[BVP, ACC]`` signal — the autoencoder's per-window anomaly score.
+    normalized ``[BVP, ACC]`` signal, each scored with its conditioning vector.
     Built with a batch-size-1 model so each window scores independently."""
     errors = np.empty(n_windows, dtype=np.float32)
     for w in range(n_windows):
         s = w * window
         win = signal[s:s + window]
-        out = model.eval(win[None].astype(np.float32))
+        out = model.eval(win[None].astype(np.float32), cond[w][None].astype(np.float32))
         errors[w] = float(out['error'][0])
     return errors
 
 
 def load_autoencoder(model_name: str, data_dir: Path) -> AutoencoderTrainer:
-    """Build a batch-size-1 trainer for a non-conditional autoencoder and restore
-    its trained weights from results/<model>/trainable.tflite."""
+    """Build a batch-size-1 autoencoder trainer and restore its trained weights from
+    results/<model>/trainable.tflite."""
     trainer = build_trainer(model_name, data_dir, SEED, batch_size=1)
-    if not isinstance(trainer, AutoencoderTrainer) or isinstance(trainer, ConditionalAutoencoderTrainer):
+    if not isinstance(trainer, AutoencoderTrainer):
         raise SystemExit(
-            f"'{model_name}' is not a non-conditional autoencoder; testing needs "
-            f"one (lstm-ae, gru-ae, cnn-ae).")
+            f"'{model_name}' is not an autoencoder; testing needs one (lstm-ae, gru-ae, cnn-ae).")
 
     weights_path = RESULTS_DIR / model_name / 'trainable.tflite'
     if not weights_path.exists():
@@ -46,7 +44,7 @@ def load_autoencoder(model_name: str, data_dir: Path) -> AutoencoderTrainer:
     return trainer
 
 
-def score_mixed(trainer: AutoencoderTrainer, data_dir: Path, mean, std):
+def score_mixed(trainer: AutoencoderTrainer, data_dir: Path):
     """Score the realistic mixed-anomaly windows; returns (errors, truth) per window,
     aligned 1:1 with the mixed-feature labels."""
     window = trainer.window_size
@@ -61,15 +59,15 @@ def score_mixed(trainer: AutoencoderTrainer, data_dir: Path, mean, std):
     all_err, all_lbl = [], []
     for d in subject_dirs:
         sid = d.name
-        signal = normalize(stacked_signal(subjects_dir, sid, anomalous_dir=mixed_dir), mean, std)
+        signal, cond = conditional_windows(subjects_dir, sid, window, anomalous_dir=mixed_dir)
         truth = np.load(feature_dir / sid / 'labels.npy').reshape(-1)
-        all_err.append(window_errors(trainer.model, signal, window, len(truth)))
+        all_err.append(window_errors(trainer.model, signal, cond, window, len(truth)))
         all_lbl.append(truth)
     return np.concatenate(all_err), np.concatenate(all_lbl)
 
 
 def score_bvp_dir(trainer: AutoencoderTrainer, data_dir: Path,
-                  bvp_dir: Path | None, mean, std) -> np.ndarray:
+                  bvp_dir: Path | None) -> np.ndarray:
     """Score every non-overlapping window across all subjects, taking BVP from
     ``bvp_dir`` (None = clean subject-signals) and ACC from subject-signals. Used for
     a single anomaly kind (every window anomalous) or the clean baseline."""
@@ -79,10 +77,9 @@ def score_bvp_dir(trainer: AutoencoderTrainer, data_dir: Path,
     all_err = []
     for d in sorted(subjects_dir.glob('S*')):
         sid = d.name
-        signal = normalize(stacked_signal(subjects_dir, sid, anomalous_dir=bvp_dir), mean, std)
-        n = (len(signal) - window) // window + 1
-        if n > 0:
-            all_err.append(window_errors(trainer.model, signal, window, n))
+        signal, cond = conditional_windows(subjects_dir, sid, window, anomalous_dir=bvp_dir)
+        if len(cond) > 0:
+            all_err.append(window_errors(trainer.model, signal, cond, window, len(cond)))
     return np.concatenate(all_err) if all_err else np.empty(0, dtype=np.float32)
 
 
@@ -98,23 +95,22 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     trainer = load_autoencoder(args.model, DATASETS_DIR)
-    mean, std = norm_stats(DATASETS_DIR / SUBJECTS_SUBDIR)
 
     print("Scoring mixed-anomaly windows (threshold + overall metrics)...")
-    errors, truth = score_mixed(trainer, DATASETS_DIR, mean, std)
+    errors, truth = score_mixed(trainer, DATASETS_DIR)
     thr, f1 = best_threshold(errors, truth, objective='f1')
     pred = errors > thr
     report = classification_report(pred, truth)
 
     print("Scoring clean windows (false-positive rate)...")
-    clean_err = score_bvp_dir(trainer, DATASETS_DIR, None, mean, std)
+    clean_err = score_bvp_dir(trainer, DATASETS_DIR, None)
     clean_fpr = float((clean_err > thr).mean()) if len(clean_err) else 0.0
 
     print("Scoring per-type anomalous windows...")
     anomalous_dir = DATASETS_DIR / ANOMALOUS_SUBDIR
     kind_recall = {}
     for name in ANOMALY_KINDS:
-        errs = score_bvp_dir(trainer, DATASETS_DIR, anomalous_dir / name, mean, std)
+        errs = score_bvp_dir(trainer, DATASETS_DIR, anomalous_dir / name)
         kind_recall[name] = {'recall': float((errs > thr).mean()) if len(errs) else None,
                              'count': int(len(errs))}
 

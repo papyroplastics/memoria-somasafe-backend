@@ -1,22 +1,26 @@
 import tensorflow as tf
 
 from ..layers import Conv1D, Dense, GRUCell, sinusoidal_encoding
+from ..data import N_COND
 from .common import TrainableAutoencoder, AutoencoderTrainer
 
 
 class GRUAutoencoder(TrainableAutoencoder):
-    """GRU autoencoder for reconstruction-based anomaly detection. Same decimating
-    conv front-end + positional-encoding decoder as ``LSTMAutoencoder`` but with
-    single-state GRU cells, so it is lighter (fewer gates / parameters) — a
-    candidate if the LSTM is too heavy for on-device training."""
+    """Conditional GRU autoencoder for reconstruction-based anomaly detection. Same
+    decimating conv front-end + positional-encoding decoder and cond-fused latent as
+    ``LSTMAutoencoder`` but with single-state GRU cells, so it is lighter (fewer
+    gates / parameters) — a candidate if the LSTM is too heavy for on-device training."""
 
     def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int,
-                 hidden_dim: int, latent_dim: int, learning_rate: float,
-                 down_factor: int = 8, pe_dim: int = 16, kernel_size: int = 7,
-                 n_outputs: int = 1, diff_weight: float = 1.0,
+                 n_cond: int, hidden_dim: int, latent_dim: int, learning_rate: float,
+                 cond_embed_dim: int = 16, down_factor: int = 8, pe_dim: int = 16,
+                 kernel_size: int = 7, n_outputs: int = 1, diff_weight: float = 1.0,
+                 latent_dropout: float = 0.1,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
         super().__init__(name=name, batch_size=batch_size, seq_len=seq_len,
-                         n_signals=n_signals, n_outputs=n_outputs, diff_weight=diff_weight)
+                         n_signals=n_signals, n_cond=n_cond, cond_embed_dim=cond_embed_dim,
+                         n_outputs=n_outputs, diff_weight=diff_weight,
+                         latent_dropout=latent_dropout)
         assert seq_len % down_factor == 0, 'seq_len must be divisible by down_factor'
         self.down_factor = down_factor
         self.reduced_len = seq_len // down_factor
@@ -26,7 +30,7 @@ class GRUAutoencoder(TrainableAutoencoder):
         self.enc_conv2 = Conv1D(hidden_dim, hidden_dim, kernel_size, stride=2, activation=tf.nn.relu)
         self.enc_conv3 = Conv1D(hidden_dim, hidden_dim, kernel_size, stride=2, activation=tf.nn.relu)
         self.encoder_gru = GRUCell(hidden_dim, hidden_dim)
-        self.to_latent = Dense(hidden_dim, latent_dim)
+        self.to_latent = Dense(hidden_dim + cond_embed_dim, latent_dim)
 
         self.latent_to_hidden = Dense(latent_dim, hidden_dim, activation=tf.nn.tanh)
         self.pe = sinusoidal_encoding(self.reduced_len, pe_dim)
@@ -36,12 +40,13 @@ class GRUAutoencoder(TrainableAutoencoder):
 
         self._bind(learning_rate, beta1, beta2, epsilon)
 
-    def _forward(self, signal):
+    def _forward(self, signal, cond, training=False):
+        emb = self._embed_cond(cond)
         x = self.enc_conv3(self.enc_conv2(self.enc_conv1(signal)))
         h = self.encoder_gru.zero_state(self.batch_size)
         for t in range(self.reduced_len):
             h = self.encoder_gru.step(h, x[:, t, :])
-        z = self.to_latent(h)
+        z = self._drop_latent(self.to_latent(tf.concat([h, emb], axis=1)), training)
 
         dh = self.latent_to_hidden(z)
         pe_dim = self.pe.shape[-1]
@@ -64,7 +69,7 @@ def get_trainer(data_root, seed, batch_size=None) -> AutoencoderTrainer:
 
     model = GRUAutoencoder(
         name='dalia_gru_ae', batch_size=batch_size, seq_len=window_size,
-        n_signals=2, hidden_dim=64, latent_dim=32, learning_rate=1e-3,
+        n_signals=2, n_cond=N_COND, hidden_dim=64, latent_dim=16, learning_rate=1e-3,
     )
     return AutoencoderTrainer(model, window_size=window_size, shift=shift,
                               batch_size=batch_size)

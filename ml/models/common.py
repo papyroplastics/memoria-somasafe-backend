@@ -6,9 +6,10 @@ import tensorflow as tf
 from tqdm import tqdm
 
 from ..optimizers import Adam
+from ..layers import Dense
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
 from ..data import (DatasetUnavailibleError, SUBJECTS_SUBDIR,
-                    windowed_normalized)
+                    windowed_conditional)
 
 
 class UnboundError(NotImplementedError):
@@ -98,50 +99,71 @@ class TrainableModel(tf.Module):
 
 
 class TrainableAutoencoder(TrainableModel):
-    """Non-conditional reconstruction autoencoder base.
+    """Conditional reconstruction autoencoder base.
 
-    Subclasses build their encoder/decoder layers and implement ``_forward``;
-    the train/eval bodies, signature binding and Adam optimizer are shared. The
-    encoder sees ``n_signals`` channels (``[BVP, ACC]``) but the decoder only
-    reconstructs the first ``n_outputs`` (BVP) — ACC is exogenous context that
-    explains motion artifacts and is not part of the anomaly score. The objective
-    is reconstruction MSE plus a first-difference term that penalizes flat output.
-    Conditional variants stay outside this hierarchy so they can be compared
-    against a plain reconstruction model.
+    Subclasses build their encoder/decoder layers and implement ``_forward(signal,
+    cond, training)``; the train/eval bodies, signature binding, conditioning
+    embedding, latent dropout and Adam optimizer are shared. The encoder sees
+    ``n_signals`` channels (``[BVP, ACC]``) but the decoder only reconstructs the
+    first ``n_outputs`` (BVP) — ACC is exogenous context, not part of the anomaly
+    score. Every model is conditioned on a single ``cond`` vector (z-scored
+    demographics + a causal activity context); the embedding here feeds the
+    subclass's conditioning mechanism (FiLM for the CNN, latent fusion for the
+    RNNs). Latent dropout pushes the decoder to rely on the condition rather than
+    copy the input through the bottleneck. The objective is reconstruction MSE plus
+    a first-difference term that penalizes flat output.
     """
 
     def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int,
-                 n_outputs: int = 1, diff_weight: float = 1.0):
+                 n_cond: int, cond_embed_dim: int = 16, n_outputs: int = 1,
+                 diff_weight: float = 1.0, latent_dropout: float = 0.1):
         super().__init__(name=name)
         self.batch_size = batch_size
         self.seq_len = seq_len
         self.n_signals = n_signals
+        self.n_cond = n_cond
+        self.cond_embed_dim = cond_embed_dim
         self.n_outputs = n_outputs
         self.diff_weight = diff_weight
+        self.latent_dropout = latent_dropout
         self.signal_shape = (batch_size, seq_len, n_signals)
+        self.cond_shape = (batch_size, n_cond)
+
+        self.cond_dense1 = Dense(n_cond, 32, activation=tf.nn.relu)
+        self.cond_dense2 = Dense(32, cond_embed_dim, activation=tf.nn.relu)
+
+    def _embed_cond(self, cond: tf.Tensor) -> tf.Tensor:
+        return self.cond_dense2(self.cond_dense1(cond))
+
+    def _drop_latent(self, z: tf.Tensor, training: bool) -> tf.Tensor:
+        if training and self.latent_dropout > 0.0:
+            return tf.nn.dropout(z, rate=self.latent_dropout)
+        return z
 
     def _bind(self, learning_rate: float, beta1: float, beta2: float, epsilon: float):
         """Bind train/eval/save/restore. Call once all layers exist."""
         self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
-        self.eval = tf.function(self.eval_eager, input_signature=[
-            tf.TensorSpec(shape=self.signal_shape, dtype=tf.float32)])
-        self.train = tf.function(self.train_eager, input_signature=[
-            tf.TensorSpec(shape=self.signal_shape, dtype=tf.float32)])
+        signature = [
+            tf.TensorSpec(shape=self.signal_shape, dtype=tf.float32),
+            tf.TensorSpec(shape=self.cond_shape, dtype=tf.float32),
+        ]
+        self.eval = tf.function(self.eval_eager, input_signature=signature)
+        self.train = tf.function(self.train_eager, input_signature=signature)
         self._init_save_restore()
 
-    def _forward(self, signal: tf.Tensor) -> tf.Tensor:
+    def _forward(self, signal: tf.Tensor, cond: tf.Tensor, training: bool = False) -> tf.Tensor:
         raise NotImplementedError
 
-    def eval_eager(self, signal: tf.Tensor):
-        reconstruction = self._forward(signal)
+    def eval_eager(self, signal: tf.Tensor, cond: tf.Tensor):
+        reconstruction = self._forward(signal, cond, training=False)
         target = signal[..., :self.n_outputs]
         return {'reconstruction': reconstruction,
                 'error': reconstruction_error(reconstruction, target)}
 
-    def train_eager(self, signal: tf.Tensor):
+    def train_eager(self, signal: tf.Tensor, cond: tf.Tensor):
         target = signal[..., :self.n_outputs]
         with tf.GradientTape() as tape:
-            reconstruction = self._forward(signal)
+            reconstruction = self._forward(signal, cond, training=True)
             loss = (mse_loss(reconstruction, target)
                     + self.diff_weight * first_difference_loss(reconstruction, target))
         grads = tape.gradient(loss, self.trainable_variables)
@@ -204,12 +226,12 @@ class Trainer(ABC):
 
 
 class AutoencoderTrainer(Trainer):
-    """Shared trainer for non-conditional autoencoders (LSTM/GRU/CNN/...).
+    """Shared trainer for the (conditional) autoencoders (LSTM/GRU/CNN/...).
 
     Windows the raw ``[BVP, ACC]`` signals from subject-signals and z-score
-    normalizes them at load time (so no normalized copy is stored on disk), then
-    scores with reconstruction error. Conditional variants subclass this and
-    override only ``_windowed`` / ``representative_dataset``.
+    normalizes them at load time (so no normalized copy is stored on disk), pairs
+    each window with its conditioning vector (demographics + activity context), and
+    scores with reconstruction error.
     """
 
     primary_metric = 'recon_error'
@@ -226,10 +248,9 @@ class AutoencoderTrainer(Trainer):
         self.data_subdir = data_subdir
 
     def _windowed(self, subject_dir: Path) -> tuple[tf.data.Dataset, int]:
-        """One subject's unbatched window tuples. Override to add conditioning."""
-        sig_ds, count = windowed_normalized(
+        """One subject's ``(signal, cond)`` window tuples."""
+        return windowed_conditional(
             subject_dir.parent, subject_dir.name, self.window_size, self.shift)
-        return sig_ds.map(lambda s: (s,)), count
 
     def subject_datasets(self, data_root, seed):
         data_dir = data_root / self.data_subdir
@@ -247,7 +268,7 @@ class AutoencoderTrainer(Trainer):
         return subj_train, subj_eval
 
     def representative_dataset(self, dataset):
-        return dataset.take(10).map(lambda s: {'signal': s})
+        return dataset.take(10).map(lambda s, c: {'signal': s, 'cond': c})
 
     def evaluate(self, dataset, prefix=''):
         errors = [self.model.eval(*batch)['error']

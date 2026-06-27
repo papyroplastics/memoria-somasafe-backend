@@ -42,6 +42,16 @@ FEATURE_SEED = 1234
 N_FEATURES = 17
 EPS = 1e-8
 
+# Conditioning vector for the autoencoders: z-scored demographics (static) + a causal
+# activity context (trailing-CONTEXT_SECONDS mean/std of the normalized ACC magnitude).
+# The context lets the decoder expect activity-appropriate rhythm (a fast pulse is normal
+# under high ACC, anomalous at rest). Warm-up (<CONTEXT_SECONDS of history) expands over
+# whatever is available — all subjects start at rest, so that's the at-rest average.
+CONTEXT_SECONDS = 120
+N_STATIC = 6
+N_CONTEXT = 2
+N_COND = N_STATIC + N_CONTEXT
+
 
 class DatasetUnavailibleError(FileNotFoundError):
     def __init__(self, topic: str, data_dir: str | Path):
@@ -454,15 +464,53 @@ def normalize(signal: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarr
     return ((signal - mean) / std).astype(np.float32)
 
 
-def windowed_normalized(subjects_dir: Path, sid: str, window_size: int, shift: int,
-                        anomalous_dir: Path | None = None) -> tuple[tf.data.Dataset, int]:
-    """Windowed, z-score-normalized ``[BVP, ACC]`` frames for one subject.
+def causal_rolling_mean_std(x: np.ndarray, win: int) -> tuple[np.ndarray, np.ndarray]:
+    """Per-sample trailing mean/std of ``x`` over the last ``win`` samples, expanding
+    over whatever history exists for the first ``win`` samples (causal, no look-ahead)."""
+    csum  = np.concatenate([[0.0], np.cumsum(x, dtype=np.float64)])
+    csum2 = np.concatenate([[0.0], np.cumsum(np.square(x, dtype=np.float64))])
+    idx = np.arange(1, len(x) + 1)
+    lo = np.maximum(0, idx - win)
+    count = idx - lo
+    mean = (csum[idx] - csum[lo]) / count
+    var  = np.maximum((csum2[idx] - csum2[lo]) / count - mean ** 2, 0.0)
+    return mean.astype(np.float32), np.sqrt(var).astype(np.float32)
 
-    Normalization is applied as a ``map`` over the windows (rather than stored on
-    disk), mirroring the on-device path where raw samples are normalized as they
-    are read."""
+
+def window_cond_vectors(subjects_dir: Path, sid: str, norm_signal: np.ndarray,
+                        window_size: int, shift: int, count: int) -> np.ndarray:
+    """Per-window conditioning vectors ``(count, N_COND)``: the subject's z-scored
+    demographics repeated, concatenated with the causal activity context (trailing
+    mean/std of the normalized ACC) sampled at each window's last sample."""
+    static = np.load(subjects_dir / sid / 'static.npy').astype(np.float32)   # (N_STATIC,)
+    ctx_mean, ctx_std = causal_rolling_mean_std(norm_signal[:, 1], CONTEXT_SECONDS * BVP_RATE)
+    ends = np.clip(np.arange(count) * shift + window_size - 1, 0, len(norm_signal) - 1)
+    ctx = np.stack([ctx_mean[ends], ctx_std[ends]], axis=1)                  # (count, N_CONTEXT)
+    static_rep = np.broadcast_to(static, (count, len(static)))
+    return np.concatenate([static_rep, ctx], axis=1).astype(np.float32)
+
+
+def windowed_conditional(subjects_dir: Path, sid: str, window_size: int, shift: int,
+                         anomalous_dir: Path | None = None) -> tuple[tf.data.Dataset, int]:
+    """Windowed, z-score-normalized ``[BVP, ACC]`` frames paired with their per-window
+    conditioning vector, for one subject.
+
+    Normalization happens at load time (no normalized copy on disk), mirroring the
+    on-device path. Yields ``(signal_window, cond)`` tuples."""
     raw = stacked_signal(subjects_dir, sid, anomalous_dir)
-    mean, std = norm_stats(subjects_dir)
-    ds, count = window_signal(raw, window_size, shift)
-    mean_t, std_t = tf.constant(mean), tf.constant(std)
-    return ds.map(lambda w: (w - mean_t) / std_t), count
+    norm = normalize(raw, *norm_stats(subjects_dir))
+    ds, count = window_signal(norm, window_size, shift)
+    cond = window_cond_vectors(subjects_dir, sid, norm, window_size, shift, count)
+    cond_ds = tf.data.Dataset.from_tensor_slices(cond)
+    return tf.data.Dataset.zip((ds, cond_ds)), count
+
+
+def conditional_windows(subjects_dir: Path, sid: str, window_size: int,
+                        anomalous_dir: Path | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """Normalized ``(T, 2)`` signal + per-window cond ``(n_windows, N_COND)`` for
+    non-overlapping windows — for test_autoencoder / distill_labels, which slice windows
+    manually rather than via tf.data."""
+    norm = normalize(stacked_signal(subjects_dir, sid, anomalous_dir), *norm_stats(subjects_dir))
+    count = max(0, (len(norm) - window_size) // window_size + 1)
+    cond = window_cond_vectors(subjects_dir, sid, norm, window_size, window_size, count)
+    return norm, cond

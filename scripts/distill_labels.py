@@ -6,7 +6,7 @@ import numpy as np
 
 from common.config import RESULTS_DIR, DATASETS_DIR
 from ml.data import (SUBJECTS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
-                     FEATURE_STATS_FILE, stacked_signal, norm_stats, normalize)
+                     FEATURE_STATS_FILE, conditional_windows)
 from ml.model_list import MODELS
 from .test_autoencoder import load_autoencoder, window_errors
 from .common.post_train import get_report_dir, AE_TEST_REPORT
@@ -61,16 +61,13 @@ if __name__ == "__main__":
     if not subject_dirs:
         raise SystemExit(f"{mixed_dir} is empty. Run get_dataset.py first.")
 
-    mean, std = norm_stats(subjects_dir)
-
     per_subject: dict[str, np.ndarray] = {}
     print(f"Labeling windows at threshold={thr:.6f}:")
     for d in subject_dirs:
         sid = d.name
-        signal = normalize(stacked_signal(subjects_dir, sid, anomalous_dir=mixed_dir),
-                           mean, std)
+        signal, cond = conditional_windows(subjects_dir, sid, window, anomalous_dir=mixed_dir)
         n_windows = len(np.load(feature_dir / sid / 'labels.npy').reshape(-1))
-        errs = window_errors(trainer.model, signal, window, n_windows)
+        errs = window_errors(trainer.model, signal, cond, window, n_windows)
         per_subject[sid] = errs
         print(f"  {sid}: {n_windows} windows")
 

@@ -20,7 +20,6 @@ from typing import Callable
 from common.db import ModelPurpose
 from ml.models import (
     cnn_autoencoder,
-    cond_lstm_autoencoder,
     feature_mlp,
     gru_autoencoder,
     lstm_autoencoder,
@@ -51,11 +50,6 @@ MODELS: dict[str, ModelSpec] = {
         key="lstm-ae", name="LSTM Autoencoder",
         purpose=ModelPurpose.train_only, app_version="1.0.0",
         build_trainer=lstm_autoencoder.get_trainer,
-    ),
-    "cond-lstm-ae": ModelSpec(
-        key="cond-lstm-ae", name="Conditional LSTM Autoencoder",
-        purpose=ModelPurpose.train_only, app_version="1.0.0",
-        build_trainer=cond_lstm_autoencoder.get_trainer,
     ),
     "gru-ae": ModelSpec(
         key="gru-ae", name="GRU Autoencoder",

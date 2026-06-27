@@ -95,6 +95,24 @@ class Conv1D(tf.Module):
         return self.activation(out)
 
 
+class FiLM(tf.Module):
+    """Feature-wise linear modulation: per-channel ``(scale, shift)`` predicted from a
+    conditioning vector and applied uniformly across time.
+
+    Time-preserving — it only rescales/shifts channels, so it conditions a conv stack
+    at every layer without disturbing the temporal axis. ``gamma`` is centred at 1 so an
+    untrained FiLM is close to the identity."""
+
+    def __init__(self, cond_dim: int, n_channels: int):
+        self.to_gamma = Dense(cond_dim, n_channels)
+        self.to_beta = Dense(cond_dim, n_channels)
+
+    def __call__(self, x, cond):
+        gamma = 1.0 + self.to_gamma(cond)          # (B, C)
+        beta = self.to_beta(cond)                  # (B, C)
+        return x * gamma[:, None, :] + beta[:, None, :]
+
+
 def sinusoidal_encoding(length: int, dim: int) -> tf.Tensor:
     """Fixed (non-trainable) ``(length, dim)`` sinusoidal positional encoding.
 
