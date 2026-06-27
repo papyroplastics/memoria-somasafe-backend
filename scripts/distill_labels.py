@@ -5,10 +5,12 @@ from pathlib import Path
 import numpy as np
 
 from common.config import RESULTS_DIR, DATASETS_DIR
-from ml.data import (SUBJECTS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
-                     FEATURE_STATS_FILE, conditional_windows)
+from ml.data import (
+    SUBJECTS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR, FEATURE_STATS_FILE, 
+    conditional_windows, get_sorted_paths
+)
 from ml.model_list import MODELS
-from .test_autoencoder import load_autoencoder, window_errors
+from .common.autoencoders import load_autoencoder, window_errors
 from .common.post_train import get_report_dir, AE_TEST_REPORT
 
 
@@ -50,14 +52,14 @@ if __name__ == "__main__":
     result_dir = RESULTS_DIR / args.model
 
     thr = load_threshold(args.model)
-    trainer = load_autoencoder(args.model, data_dir)
+    trainer = load_autoencoder(args.model)
 
     window = trainer.window_size
     subjects_dir = data_dir / SUBJECTS_SUBDIR
     mixed_dir = data_dir / MIXED_SUBDIR
     feature_dir = data_dir / MIXED_FEATURE_SUBDIR
 
-    subject_dirs = sorted(mixed_dir.glob('S*'))
+    subject_dirs = get_sorted_paths(mixed_dir)
     if not subject_dirs:
         raise SystemExit(f"{mixed_dir} is empty. Run get_dataset.py first.")
 

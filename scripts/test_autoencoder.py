@@ -1,48 +1,18 @@
 import argparse
 import json
 from pathlib import Path
-
 import numpy as np
-import tensorflow as tf
 
-from common.config import RESULTS_DIR, DATASETS_DIR, SEED
-from ml.saving import load_trainable_weights
-from ml.model_list import MODELS, build_trainer
+from common.config import RESULTS_DIR, DATASETS_DIR
+from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
-from ml.data import (SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, MIXED_SUBDIR,
-                     MIXED_FEATURE_SUBDIR, ANOMALY_KINDS, conditional_windows)
+from ml.data import (
+    SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR, ANOMALY_KINDS, 
+    conditional_windows, get_sorted_paths
+)
 from ml.metrics import best_threshold, classification_report
 from .common.post_train import get_report_dir, AE_TEST_REPORT
-
-
-def window_errors(model, signal: np.ndarray, cond: np.ndarray,
-                  window: int, n_windows: int) -> np.ndarray:
-    """Reconstruction error for the first ``n_windows`` non-overlapping windows of a
-    normalized ``[BVP, ACC]`` signal, each scored with its conditioning vector.
-    Built with a batch-size-1 model so each window scores independently."""
-    errors = np.empty(n_windows, dtype=np.float32)
-    for w in range(n_windows):
-        s = w * window
-        win = signal[s:s + window]
-        out = model.eval(win[None].astype(np.float32), cond[w][None].astype(np.float32))
-        errors[w] = float(out['error'][0])
-    return errors
-
-
-def load_autoencoder(model_name: str, data_dir: Path) -> AutoencoderTrainer:
-    """Build a batch-size-1 autoencoder trainer and restore its trained weights from
-    results/<model>/trainable.tflite."""
-    trainer = build_trainer(model_name, data_dir, SEED, batch_size=1)
-    if not isinstance(trainer, AutoencoderTrainer):
-        raise SystemExit(
-            f"'{model_name}' is not an autoencoder; testing needs one (lstm-ae, gru-ae, cnn-ae).")
-
-    weights_path = RESULTS_DIR / model_name / 'trainable.tflite'
-    if not weights_path.exists():
-        raise SystemExit(f"trained model not found at {weights_path}. Train '{model_name}' first.")
-    trainer.model.restore(tf.constant(load_trainable_weights(weights_path)))
-    return trainer
-
+from .common.autoencoders import load_autoencoder, window_errors
 
 def score_mixed(trainer: AutoencoderTrainer, data_dir: Path):
     """Score the realistic mixed-anomaly windows; returns (errors, truth) per window,
@@ -52,7 +22,7 @@ def score_mixed(trainer: AutoencoderTrainer, data_dir: Path):
     mixed_dir = data_dir / MIXED_SUBDIR
     feature_dir = data_dir / MIXED_FEATURE_SUBDIR
 
-    subject_dirs = sorted(mixed_dir.glob('S*'))
+    subject_dirs = get_sorted_paths(mixed_dir)
     if not subject_dirs:
         raise SystemExit(f"{mixed_dir} is empty. Run get_dataset.py first.")
 
@@ -75,7 +45,7 @@ def score_bvp_dir(trainer: AutoencoderTrainer, data_dir: Path,
     subjects_dir = data_dir / SUBJECTS_SUBDIR
 
     all_err = []
-    for d in sorted(subjects_dir.glob('S*')):
+    for d in get_sorted_paths(subjects_dir):
         sid = d.name
         signal, cond = conditional_windows(subjects_dir, sid, window, anomalous_dir=bvp_dir)
         if len(cond) > 0:
@@ -94,7 +64,7 @@ if __name__ == "__main__":
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to test')
     args = parser.parse_args()
 
-    trainer = load_autoencoder(args.model, DATASETS_DIR)
+    trainer = load_autoencoder(args.model)
 
     print("Scoring mixed-anomaly windows (threshold + overall metrics)...")
     errors, truth = score_mixed(trainer, DATASETS_DIR)

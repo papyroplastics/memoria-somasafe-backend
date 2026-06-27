@@ -54,10 +54,14 @@ N_COND = N_STATIC + N_CONTEXT
 
 
 class DatasetUnavailibleError(FileNotFoundError):
-    def __init__(self, topic: str, data_dir: str | Path):
-        self.message = f"{topic} dataset not found at {data_dir}. Run scripts/get_dataset.py first."
+    def __init__(self, data_dir: str | Path):
+        self.message = f"Dataset not found at {data_dir}. Run scripts/get_dataset.py first."
         super().__init__(self.message)
 
+
+def get_sorted_paths(dataset_dir: Path) -> list[Path]:
+    dir_list = [d for d in dataset_dir.glob('S*') if d.is_dir() and d.name[1:].isdigit()]
+    return sorted(dir_list, key=lambda d: int(d.name[1:]))
 
 def user_description_vector(quest: dict) -> np.ndarray:
     """Raw 6-dim demographics vector. Standardized globally in Stage 1."""
@@ -100,18 +104,16 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
     """
     subjects_dir.mkdir(parents=True, exist_ok=True)
 
-    subject_ids = sorted(
-        int(p.name[1:]) for p in raw_dir.glob('S*')
-        if p.is_dir() and p.name[1:].isdigit()
-    )
+    subject_raw_dirs = get_sorted_paths(raw_dir)
 
     bvp_stats: list[tuple[int, float, float]] = []
     acc_stats: list[tuple[int, float, float]] = []
-    statics: dict[int, np.ndarray] = {}
+    statics: dict[str, np.ndarray] = {}
     processed = []
 
-    for subject_id in subject_ids:
-        path = raw_dir / f'S{subject_id}' / f'S{subject_id}.pkl'
+    for subject_raw_dir in subject_raw_dirs:
+        subject_dir_name = subject_raw_dir.name
+        path = subject_raw_dir / f'{subject_dir_name}.pkl'
         raw = pkl.loads(path.read_bytes(), encoding='latin1')
 
         wrist = raw['signal']['wrist']
@@ -120,17 +122,18 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
         acc_g = wrist['ACC'] / 64.0
         acc = np.sqrt(np.sum(acc_g ** 2, axis=1)).astype(np.float32)
 
-        save_dir = subjects_dir / f'S{subject_id}'
+        save_dir = subjects_dir / f'S{subject_dir_name}'
         save_dir.mkdir(parents=True, exist_ok=True)
         np.save(save_dir / 'bvp.npy', bvp)
         np.save(save_dir / 'acc.npy', acc)
 
-        statics[subject_id] = user_description_vector(raw['questionnaire'])
         bvp_stats.append((len(bvp), float(bvp.mean()), float(bvp.std())))
         acc_stats.append((len(acc), float(acc.mean()), float(acc.std())))
 
-        processed.append(subject_id)
-        print(f"  S{subject_id}: BVP {len(bvp)} samples @ {BVP_RATE} Hz, ACC {len(acc)} samples @ {ACC_RATE} Hz")
+        statics[subject_dir_name] = user_description_vector(raw['questionnaire'])
+        processed.append(subject_dir_name)
+
+        print(f"  {subject_dir_name}: BVP {len(bvp)} samples @ {BVP_RATE} Hz, ACC {len(acc)} samples @ {ACC_RATE} Hz")
 
     if not processed:
         return []
@@ -140,7 +143,7 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
     np.save(subjects_dir / NORM_PARAMS_FILE,
             np.array([[bvp_mean, bvp_std], [acc_mean, acc_std]], dtype=np.float32))
 
-    all_static = np.stack([statics[sid] for sid in processed])
+    all_static = np.stack([statics[d] for d in processed])
     static_mean = all_static.mean(axis=0).astype(np.float32)
     static_std = (all_static.std(axis=0) + EPS).astype(np.float32)
     np.save(subjects_dir / STATIC_NORM_PARAMS_FILE,
@@ -267,7 +270,7 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
 
     for kind, name in enumerate(ANOMALY_KINDS):
         kind_dir = anomalous_dir / name
-        subject_dirs = sorted(subjects_dir.glob('S*'))
+        subject_dirs = get_sorted_paths(subjects_dir)
         for subject_dir in subject_dirs:
             sid = subject_dir.name
             bvp = np.load(subject_dir / 'bvp.npy')
@@ -288,7 +291,7 @@ def create_mixed_signals(subjects_dir: Path, mixed_dir: Path):
     mixed_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(FEATURE_SEED)
 
-    for subject_dir in sorted(subjects_dir.glob('S*')):
+    for subject_dir in get_sorted_paths(subjects_dir):
         subject_id = subject_dir.name
         bvp = np.load(subject_dir / 'bvp.npy')
 
@@ -358,7 +361,7 @@ def build_feature_dataset(mixed_dir: Path, subjects_dir: Path, feature_dir: Path
     per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
     print("Building feature dataset from:", end="")
-    for subject_dir in sorted(mixed_dir.glob('S*')):
+    for subject_dir in get_sorted_paths(subjects_dir):
         subject_id = subject_dir.name
         bvp = np.load(subject_dir / 'bvp.npy')
         win_lbl = np.load(subject_dir / 'labels.npy')   # per-window
@@ -409,7 +412,9 @@ def build_feature_dataset(mixed_dir: Path, subjects_dir: Path, feature_dir: Path
 # Load-time helpers (windowing + normalization)
 # ---------------------------------------------------------------------------
 
-def window_signal(signal: np.ndarray, window_size: int, shift: int):
+def window_signal(
+        signal: np.ndarray, window_size: int, shift: int
+    ) -> tf.data.Dataset:
     """Window a ``(T, n_signals)`` array into ``(window_size, n_signals)`` frames.
 
     Returns the windowed dataset and its (asserted) cardinality.
@@ -419,7 +424,7 @@ def window_signal(signal: np.ndarray, window_size: int, shift: int):
           .window(size=window_size, shift=shift, drop_remainder=True)
           .flat_map(lambda w: w.batch(window_size, drop_remainder=True))
           .apply(tf.data.experimental.assert_cardinality(count)))
-    return ds, count
+    return ds
 
 
 def load_norm_params(subjects_dir: Path) -> tuple[float, float, float, float]:
@@ -491,7 +496,7 @@ def window_cond_vectors(subjects_dir: Path, sid: str, norm_signal: np.ndarray,
 
 
 def windowed_conditional(subjects_dir: Path, sid: str, window_size: int, shift: int,
-                         anomalous_dir: Path | None = None) -> tuple[tf.data.Dataset, int]:
+                         anomalous_dir: Path | None = None) -> tf.data.Dataset:
     """Windowed, z-score-normalized ``[BVP, ACC]`` frames paired with their per-window
     conditioning vector, for one subject.
 
@@ -499,10 +504,18 @@ def windowed_conditional(subjects_dir: Path, sid: str, window_size: int, shift: 
     on-device path. Yields ``(signal_window, cond)`` tuples."""
     raw = stacked_signal(subjects_dir, sid, anomalous_dir)
     norm = normalize(raw, *norm_stats(subjects_dir))
-    ds, count = window_signal(norm, window_size, shift)
-    cond = window_cond_vectors(subjects_dir, sid, norm, window_size, shift, count)
+    ds = window_signal(norm, window_size, shift)
+    cond = window_cond_vectors(subjects_dir, sid, norm, window_size, shift, len(ds))
     cond_ds = tf.data.Dataset.from_tensor_slices(cond)
-    return tf.data.Dataset.zip((ds, cond_ds)), count
+    return tf.data.Dataset.zip(ds, cond_ds)
+
+def combine_datasets(datasets: list[tf.data.Dataset]) -> tf.data.Dataset:
+    """Merge per-subject datasets."""
+    count = sum([len(ds) for ds in datasets])
+
+    return (tf.data.Dataset
+            .sample_from_datasets(datasets, rerandomize_each_iteration=False)
+            .apply(tf.data.experimental.assert_cardinality(count)))
 
 
 def conditional_windows(subjects_dir: Path, sid: str, window_size: int,

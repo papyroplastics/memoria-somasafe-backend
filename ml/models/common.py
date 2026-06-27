@@ -1,16 +1,17 @@
-import hashlib
 from abc import ABC, abstractmethod
+from typing import Protocol
 from pathlib import Path
-
+import hashlib
 import tensorflow as tf
 from tqdm import tqdm
 
 from ..optimizers import Adam
 from ..layers import Dense
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
-from ..data import (DatasetUnavailibleError, SUBJECTS_SUBDIR,
-                    windowed_conditional)
-
+from ..data import (
+    DatasetUnavailibleError, SUBJECTS_SUBDIR,\
+    windowed_conditional, get_sorted_paths, combine_datasets
+)
 
 class UnboundError(NotImplementedError):
     def __init__(self, message: str):
@@ -156,12 +157,12 @@ class TrainableAutoencoder(TrainableModel):
 
     def eval_eager(self, signal: tf.Tensor, cond: tf.Tensor):
         reconstruction = self._forward(signal, cond, training=False)
-        target = signal[..., :self.n_outputs]
+        target = signal[:,:,:self.n_outputs]
         return {'reconstruction': reconstruction,
                 'error': reconstruction_error(reconstruction, target)}
 
     def train_eager(self, signal: tf.Tensor, cond: tf.Tensor):
-        target = signal[..., :self.n_outputs]
+        target = signal[:,:,:self.n_outputs]
         with tf.GradientTape() as tape:
             reconstruction = self._forward(signal, cond, training=True)
             loss = (mse_loss(reconstruction, target)
@@ -183,13 +184,11 @@ class Trainer(ABC):
     primary_metric: str
     default_batch_size: int
     batch_size: int
+    data_subdir: str
 
     @abstractmethod
-    def subject_datasets(
-        self, data_root: Path, seed: int
-    ) -> tuple[list[tf.data.Dataset], list[tf.data.Dataset]]:
-        """Per-subject ``(train, eval)`` splits — the primitive the federated
-        loop consumes directly and the normal loop ``combine``s."""
+    def subject_dataset(self, subject_dir: Path) -> tf.data.Dataset:
+        """Returns the data for a single subject"""
 
     @abstractmethod
     def representative_dataset(self, dataset: tf.data.Dataset) -> tf.data.Dataset:
@@ -201,29 +200,64 @@ class Trainer(ABC):
         ``prefix`` labels the progress bar (e.g. ``epoch=3/20``)."""
 
     def train_epoch(self, dataset: tf.data.Dataset, prefix: str = '') -> float:
-        """One pass over ``dataset``; returns mean training loss. Datasets yield
-        tuples matching ``model.train``'s arguments, so this stays arity-agnostic.
-        Relies on the dataset carrying a known cardinality (asserted in ``combine``
-        and the per-subject splits) so the progress bar has a total. ``prefix``
-        labels the bar (e.g. ``epoch=3/20``)."""
+        """One pass over ``dataset``; returns mean training loss. """
         batches = len(dataset)
         total = 0.0
         for batch in tqdm(dataset, total=batches, desc=f'{prefix} train'.strip(), leave=False):
             total += float(self.model.train(*batch)['loss'])
         return total / batches if batches else 0.0
 
-    def combine(self, datasets: list[tf.data.Dataset]) -> tf.data.Dataset:
-        """Merge per-subject datasets for the non-federated loops. Default is
-        uniform sampling; override for weighted/interleaved mixing."""
-        count = sum([len(ds) for ds in datasets])
-
-        return tf.data.Dataset.sample_from_datasets(datasets)\
-               .apply(tf.data.experimental.assert_cardinality(count))
-
     def report(self, result_dir: Path, eval_dataset: tf.data.Dataset) -> None:
         """Optional model-specific artifact (e.g. an AE reconstruction plot)."""
         pass
 
+    def subject_datasets(
+            self, data_root: Path, train_split: float
+        ) -> tuple[list[tf.data.Dataset], tf.data.Dataset]:
+        """Per-subject datasets for federated trainig loop"""
+
+        data_dir = data_root / self.data_subdir
+        subject_dirs = get_sorted_paths(data_dir)
+        if not subject_dirs:
+            raise DatasetUnavailibleError(data_dir)
+
+        subj_train, subj_eval = [], []
+        for d in subject_dirs:
+            ds = self.subject_dataset(d)
+            ds = ds.shuffle(len(ds)).batch(self.batch_size, drop_remainder=True)
+
+            n_train = int(len(ds) * train_split)
+            subj_train.append(ds.take(n_train))
+            subj_eval.append(ds.skip(n_train))
+
+        return subj_train, combine_datasets(subj_eval)
+
+    def combined_datasets(
+            self, data_root: Path, train_split: float
+        ) -> tuple[tf.data.Dataset, tf.data.Dataset]:
+        """Joint subject dataset for normal training loop"""
+
+        data_dir = data_root / self.data_subdir
+        subject_dirs = get_sorted_paths(data_dir)
+        if not subject_dirs:
+            raise DatasetUnavailibleError(data_dir)
+
+        subject_datasets = [
+            self.subject_dataset(d)
+            for d in subject_dirs
+        ]
+
+        ds = combine_datasets([
+                d.shuffle(len(d), reshuffle_each_iteration=False)
+                for d in subject_datasets
+            ]).batch(self.batch_size, drop_remainder=True)
+
+        n_train = int(len(ds) * train_split)
+
+        return ds.take(n_train).cache(), ds.skip(n_train).cache()
+
+class TrainerBuilder(Protocol):
+    def __call__(self, batch_size: int | None = None) -> Trainer: ...
 
 class AutoencoderTrainer(Trainer):
     """Shared trainer for the (conditional) autoencoders (LSTM/GRU/CNN/...).
@@ -238,34 +272,15 @@ class AutoencoderTrainer(Trainer):
     default_batch_size = 12
 
     def __init__(self, model: TrainableModel, window_size: int, shift: int,
-                 batch_size: int, train_split: float = 0.975,
-                 data_subdir: str = SUBJECTS_SUBDIR):
+                 batch_size: int, data_subdir: str = SUBJECTS_SUBDIR):
         self.model = model
         self.window_size = window_size
         self.shift = shift
         self.batch_size = batch_size
-        self.train_split = train_split
         self.data_subdir = data_subdir
 
-    def _windowed(self, subject_dir: Path) -> tuple[tf.data.Dataset, int]:
-        """One subject's ``(signal, cond)`` window tuples."""
-        return windowed_conditional(
-            subject_dir.parent, subject_dir.name, self.window_size, self.shift)
-
-    def subject_datasets(self, data_root, seed):
-        data_dir = data_root / self.data_subdir
-        subject_dirs = sorted(data_dir.glob('S*'))
-        if not subject_dirs:
-            raise DatasetUnavailibleError('Signal', data_dir)
-
-        subj_train, subj_eval = [], []
-        for d in subject_dirs:
-            ds, count = self._windowed(d)
-            ds = ds.shuffle(count, seed=seed).batch(self.batch_size, drop_remainder=True)
-            n_train = int(len(ds) * self.train_split)
-            subj_train.append(ds.take(n_train))
-            subj_eval.append(ds.skip(n_train))
-        return subj_train, subj_eval
+    def subject_dataset(self, subject_dir):
+        return windowed_conditional(subject_dir.parent, subject_dir.name, self.window_size, self.shift)
 
     def representative_dataset(self, dataset):
         return dataset.take(10).map(lambda s, c: {'signal': s, 'cond': c})

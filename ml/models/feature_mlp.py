@@ -1,11 +1,10 @@
-from pathlib import Path
 import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 
 from ..layers import Dense
 from .common import TrainableModel, Trainer
-from ..data import DatasetUnavailibleError, MIXED_FEATURE_SUBDIR
+from ..data import MIXED_FEATURE_SUBDIR, N_FEATURES
 from ..optimizers import Adam
 
 
@@ -80,25 +79,13 @@ class FeatureMLPTrainer(Trainer):
         self.model = model
         self.batch_size = batch_size
         self.train_split = train_split
+        self.data_subdir = MIXED_FEATURE_SUBDIR
 
-    def subject_datasets(self, data_root, seed):
-        feature_dir = data_root / MIXED_FEATURE_SUBDIR
-        subject_dirs = sorted(feature_dir.glob('S*'))
-        if not subject_dirs:
-            raise DatasetUnavailibleError('Feature', feature_dir)
+    def subject_dataset(self, subject_dir):
+        x = np.load(subject_dir / 'features.npy')
+        y = np.load(subject_dir / 'labels.npy')
 
-        subj_train, subj_eval = [], []
-        for d in subject_dirs:
-            x = np.load(d / 'features.npy')
-            y = np.load(d / 'labels.npy')
-
-            ds = (tf.data.Dataset.from_tensor_slices((x, y))
-                  .shuffle(len(x), seed=seed)
-                  .batch(self.batch_size, drop_remainder=True))
-            n_train = int(len(ds) * self.train_split)
-            subj_train.append(ds.take(n_train))
-            subj_eval.append(ds.skip(n_train))
-        return subj_train, subj_eval
+        return tf.data.Dataset.from_tensor_slices((x, y))
 
     def representative_dataset(self, dataset):
         return dataset.take(10).map(lambda x, y: {'features': x})
@@ -113,20 +100,13 @@ class FeatureMLPTrainer(Trainer):
         return {'accuracy': correct / total if total else 0.0}
 
 
-def get_trainer(data_root: Path, seed: int,
-                batch_size: int | None = None) -> FeatureMLPTrainer:
+def get_trainer(batch_size: int | None = None) -> FeatureMLPTrainer:
     batch_size = batch_size or FeatureMLPTrainer.default_batch_size
-    feature_dir = data_root / MIXED_FEATURE_SUBDIR
-    subject_dirs = sorted(feature_dir.glob('S*'))
-    if not subject_dirs:
-        raise DatasetUnavailibleError('Feature', feature_dir)
-
-    n_features = int(np.load(subject_dirs[0] / 'features.npy').shape[-1])
 
     model = FeatureMLP(
         name='feature_anomaly',
         batch_size=batch_size,
-        n_features=n_features,
+        n_features=N_FEATURES,
         hidden_dim=32,
         hidden_layers=3,
         learning_rate=1e-3,

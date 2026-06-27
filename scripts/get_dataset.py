@@ -8,7 +8,7 @@ from common.config import DATASETS_DIR
 from ml.data import (
     RAW_SUBDIR, SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
     extract_subject_signals, create_anomalous_signals, create_mixed_signals,
-    build_feature_dataset,
+    build_feature_dataset, get_sorted_paths
 )
 
 DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'

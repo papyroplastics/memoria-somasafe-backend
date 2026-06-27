@@ -15,7 +15,6 @@ not import it — the gateway trusts what scripts.db_seed wrote to the database.
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from common.db import ModelPurpose
 from ml.models import (
@@ -24,10 +23,7 @@ from ml.models import (
     gru_autoencoder,
     lstm_autoencoder,
 )
-from ml.models.common import Trainer
-
-TrainerBuilder = Callable[..., Trainer]
-
+from ml.models.common import Trainer, TrainerBuilder
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -63,13 +59,7 @@ MODELS: dict[str, ModelSpec] = {
     ),
 }
 
-
-def build_trainer(key: str, data_root: Path, seed: int, **kwargs) -> Trainer:
-    """Build a model's trainer. Used where the fingerprint is irrelevant."""
-    return MODELS[key].build_trainer(data_root, seed, **kwargs)
-
-
-def build_fingerprinted(key: str, data_root: Path, seed: int) -> tuple[Trainer, str]:
+def build_fingerprinted(key: str) -> tuple[Trainer, str]:
     """Build a trainer and compute its architecture fingerprint from the model."""
-    trainer = build_trainer(key, data_root, seed)
+    trainer = MODELS[key].build_trainer()
     return trainer, trainer.model.arch_fingerprint()

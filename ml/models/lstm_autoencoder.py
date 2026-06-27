@@ -72,7 +72,7 @@ class LSTMAutoencoder(TrainableAutoencoder):
         return self.smooth(up)
 
 
-def get_trainer(data_root, seed, batch_size=None) -> AutoencoderTrainer:
+def get_trainer(batch_size: int | None = None) -> AutoencoderTrainer:
     sample_rate = 64
     window_size = sample_rate * 8       # 8 s windows
     shift = sample_rate * 3             # 3 s stride
