@@ -17,7 +17,7 @@ import tensorflow as tf
 
 from common.config import DATASETS_DIR
 from ml.data import (
-    ANOMALOUS_SUBDIR, SUBJECTS_SUBDIR, FEATURE_SUBDIR,
+    MIXED_SUBDIR, SUBJECTS_SUBDIR, MIXED_FEATURE_SUBDIR,
     BVP_WINDOW, ACC_WINDOW,
 )
 
@@ -44,10 +44,10 @@ def window_raw(signal: np.ndarray, window: int, count: int) -> np.ndarray:
 
 def export_subject(subject: int, model_path: Path, datasets_dir: Path, out_path: Path):
     sid = f'S{subject}'
-    bvp_path   = datasets_dir / ANOMALOUS_SUBDIR / sid / 'bvp.npy'
-    acc_path   = datasets_dir / SUBJECTS_SUBDIR  / sid / 'acc.npy'
-    feat_path  = datasets_dir / FEATURE_SUBDIR   / sid / 'features.npy'
-    label_path = datasets_dir / FEATURE_SUBDIR   / sid / 'labels.npy'
+    bvp_path   = datasets_dir / MIXED_SUBDIR         / sid / 'bvp.npy'
+    acc_path   = datasets_dir / SUBJECTS_SUBDIR      / sid / 'acc.npy'
+    feat_path  = datasets_dir / MIXED_FEATURE_SUBDIR / sid / 'features.npy'
+    label_path = datasets_dir / MIXED_FEATURE_SUBDIR / sid / 'labels.npy'
     for path in (bvp_path, acc_path, feat_path, label_path):
         if not path.exists():
             raise FileNotFoundError(f"{path} not found. Run scripts/get_dataset.py first.")

@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 from common.config import RESULTS_DIR, DATASETS_DIR
-from ml.data import (SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, FEATURE_SUBDIR,
+from ml.data import (SUBJECTS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
                      FEATURE_STATS_FILE, stacked_signal, norm_stats, normalize)
 from ml.model_list import MODELS
 from .test_autoencoder import load_autoencoder, window_errors
@@ -38,7 +38,7 @@ if __name__ == "__main__":
         description='Distill window labels from a trained autoencoder: score the '
                     'synthetic-anomaly windows by reconstruction error, label them '
                     'with the threshold chosen by test_autoencoder.py, and write a '
-                    'datasets-shaped tree (anomalous-features/S*/ with distilled '
+                    'datasets-shaped tree (mixed-features/S*/ with distilled '
                     'labels.npy + symlinked features) into results/<model>/ that '
                     'train.py can consume via --dataset-dir.')
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to distill from')
@@ -54,12 +54,12 @@ if __name__ == "__main__":
 
     window = trainer.window_size
     subjects_dir = data_dir / SUBJECTS_SUBDIR
-    anomalous_dir = data_dir / ANOMALOUS_SUBDIR
-    feature_dir = data_dir / FEATURE_SUBDIR
+    mixed_dir = data_dir / MIXED_SUBDIR
+    feature_dir = data_dir / MIXED_FEATURE_SUBDIR
 
-    subject_dirs = sorted(anomalous_dir.glob('S*'))
+    subject_dirs = sorted(mixed_dir.glob('S*'))
     if not subject_dirs:
-        raise SystemExit(f"{anomalous_dir} is empty. Run get_dataset.py first.")
+        raise SystemExit(f"{mixed_dir} is empty. Run get_dataset.py first.")
 
     mean, std = norm_stats(subjects_dir)
 
@@ -67,7 +67,7 @@ if __name__ == "__main__":
     print(f"Labeling windows at threshold={thr:.6f}:")
     for d in subject_dirs:
         sid = d.name
-        signal = normalize(stacked_signal(subjects_dir, sid, anomalous_dir=anomalous_dir),
+        signal = normalize(stacked_signal(subjects_dir, sid, anomalous_dir=mixed_dir),
                            mean, std)
         n_windows = len(np.load(feature_dir / sid / 'labels.npy').reshape(-1))
         errs = window_errors(trainer.model, signal, window, n_windows)
@@ -78,7 +78,7 @@ if __name__ == "__main__":
     # train.py as a --dataset-dir: only the distilled labels.npy are written; the
     # feature arrays and global stats are symlinked back to the real dataset.
     out_dir = result_dir / args.out_subdir
-    out_feature_dir = out_dir / FEATURE_SUBDIR
+    out_feature_dir = out_dir / MIXED_FEATURE_SUBDIR
     for sid, errs in per_subject.items():
         labels = (errs > thr).astype(np.float32).reshape(-1, 1)
         save_dir = out_feature_dir / sid

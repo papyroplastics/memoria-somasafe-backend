@@ -5,7 +5,7 @@ from tqdm import tqdm
 
 from ..layers import Dense
 from .common import TrainableModel, Trainer
-from ..data import DatasetUnavailibleError, FEATURE_SUBDIR
+from ..data import DatasetUnavailibleError, MIXED_FEATURE_SUBDIR
 from ..optimizers import Adam
 
 
@@ -68,7 +68,7 @@ class FeatureMLP(TrainableModel):
 
 class FeatureMLPTrainer(Trainer):
     """Trains the FeatureMLP on the per-subject feature dataset. Both features and
-    labels are read from ``<data_root>/anomalous-features/S*/``; to train against
+    labels are read from ``<data_root>/mixed-features/S*/``; to train against
     distilled teacher labels instead of the synthetic ground truth, point the data
     root at a directory with the same structure (see ``distill_labels.py``)."""
 
@@ -82,7 +82,7 @@ class FeatureMLPTrainer(Trainer):
         self.train_split = train_split
 
     def subject_datasets(self, data_root, seed):
-        feature_dir = data_root / FEATURE_SUBDIR
+        feature_dir = data_root / MIXED_FEATURE_SUBDIR
         subject_dirs = sorted(feature_dir.glob('S*'))
         if not subject_dirs:
             raise DatasetUnavailibleError('Feature', feature_dir)
@@ -116,7 +116,7 @@ class FeatureMLPTrainer(Trainer):
 def get_trainer(data_root: Path, seed: int,
                 batch_size: int | None = None) -> FeatureMLPTrainer:
     batch_size = batch_size or FeatureMLPTrainer.default_batch_size
-    feature_dir = data_root / FEATURE_SUBDIR
+    feature_dir = data_root / MIXED_FEATURE_SUBDIR
     subject_dirs = sorted(feature_dir.glob('S*'))
     if not subject_dirs:
         raise DatasetUnavailibleError('Feature', feature_dir)

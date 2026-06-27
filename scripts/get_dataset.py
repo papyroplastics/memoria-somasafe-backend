@@ -6,8 +6,9 @@ from pathlib import Path
 from common.config import DATASETS_DIR
 
 from ml.data import (
-    RAW_SUBDIR, SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, FEATURE_SUBDIR,
-    extract_subject_signals, create_anomalous_signals, build_feature_dataset,
+    RAW_SUBDIR, SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
+    extract_subject_signals, create_anomalous_signals, create_mixed_signals,
+    build_feature_dataset,
 )
 
 DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'
@@ -43,7 +44,8 @@ if __name__ == '__main__':
     raw_dir       = datasets_dir / RAW_SUBDIR
     subjects_dir  = datasets_dir / SUBJECTS_SUBDIR
     anomalous_dir = datasets_dir / ANOMALOUS_SUBDIR
-    feature_dir   = datasets_dir / FEATURE_SUBDIR
+    mixed_dir     = datasets_dir / MIXED_SUBDIR
+    feature_dir   = datasets_dir / MIXED_FEATURE_SUBDIR
 
     if raw_dir.is_dir():
         print(f"Raw dataset already present at {raw_dir}")
@@ -57,14 +59,20 @@ if __name__ == '__main__':
         written = extract_subject_signals(raw_dir, subjects_dir)
         print(f"Processed {len(written)} subjects")
 
-    if anomalous_dir.is_dir() and any(anomalous_dir.glob('S*')):
+    if anomalous_dir.is_dir() and any(anomalous_dir.glob('*/S*')):
         print(f"anomalous-signals already present at {anomalous_dir}")
     else:
-        print(f"\nStage 2: Creating anomalous signals in {anomalous_dir}/ ...")
+        print(f"\nStage 2: Creating per-type anomalous signals in {anomalous_dir}/ ...")
         create_anomalous_signals(subjects_dir, anomalous_dir)
 
-    if feature_dir.is_dir():
-        print(f"{FEATURE_SUBDIR} already present at {feature_dir}")
+    if mixed_dir.is_dir() and any(mixed_dir.glob('S*')):
+        print(f"mixed-signals already present at {mixed_dir}")
     else:
-        print(f"\nStage 3: Building feature dataset in {feature_dir}/ ...")
-        build_feature_dataset(anomalous_dir, subjects_dir, feature_dir)
+        print(f"\nStage 3: Creating mixed-anomaly signals in {mixed_dir}/ ...")
+        create_mixed_signals(subjects_dir, mixed_dir)
+
+    if feature_dir.is_dir():
+        print(f"{MIXED_FEATURE_SUBDIR} already present at {feature_dir}")
+    else:
+        print(f"\nStage 4: Building feature dataset in {feature_dir}/ ...")
+        build_feature_dataset(mixed_dir, subjects_dir, feature_dir)
