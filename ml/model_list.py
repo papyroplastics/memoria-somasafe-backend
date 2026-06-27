@@ -1,18 +1,3 @@
-"""Single source of truth for the models the system knows about.
-
-Each entry pairs the model's static metadata (served by the gateway via the DB)
-with the TensorFlow trainer builder used to materialize it. The architecture
-fingerprint is *not* stored here — it is derived from a built model on demand
-(``trainer.model.arch_fingerprint()``) so it can never drift from the code:
-
-  - scripts.train builds a single trainer and ignores fingerprints.
-  - scripts.db_seed builds every (trained) model to upload its fingerprint.
-  - worker.tasks builds every available model once at startup.
-
-This module imports TensorFlow (via the model packages); the api package must
-not import it — the gateway trusts what scripts.db_seed wrote to the database.
-"""
-
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -60,6 +45,5 @@ MODELS: dict[str, ModelSpec] = {
 }
 
 def build_fingerprinted(key: str) -> tuple[Trainer, str]:
-    """Build a trainer and compute its architecture fingerprint from the model."""
     trainer = MODELS[key].build_trainer()
     return trainer, trainer.model.arch_fingerprint()

@@ -34,9 +34,6 @@ def normal_loop(trainer: Trainer, train_dataset: tf.data.Dataset,
 def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Dataset],
                    eval_dataset: tf.data.Dataset, local_epochs: int,
                    global_epochs: int, aggregate=fed_avg) -> History:
-    """Simulated FedAvg: each round every subject trains locally from the shared
-    weights, then ``aggregate`` merges the updates. ``aggregate`` is injectable
-    so other strategies (FedProx, weighted median, ...) can be dropped in."""
     model = trainer.model
     sizes = [len(ds) for ds in subject_train_datasets]
     global_weights = model.save()['parameters']

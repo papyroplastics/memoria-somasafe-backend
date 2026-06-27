@@ -15,9 +15,6 @@ from .common.post_train import get_report_dir, AE_TEST_REPORT
 
 
 def relink(link: Path, target: Path):
-    """Point ``link`` at ``target`` with a relative symlink, replacing any existing
-    one. Used to mirror the feature dataset into the distilled-label tree without
-    copying the (potentially large) feature arrays."""
     link.parent.mkdir(parents=True, exist_ok=True)
     rel = target.resolve().relative_to(link.parent.resolve(), walk_up=True)
     if link.is_symlink() or link.exists():
@@ -26,7 +23,6 @@ def relink(link: Path, target: Path):
 
 
 def load_threshold(model_name: str) -> float:
-    """Read the reconstruction-error threshold picked by test_autoencoder.py."""
     report_path = get_report_dir(RESULTS_DIR / model_name) / AE_TEST_REPORT
     if not report_path.exists():
         raise SystemExit(

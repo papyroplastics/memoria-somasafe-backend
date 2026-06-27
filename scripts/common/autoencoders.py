@@ -9,22 +9,27 @@ from ml.models.common import AutoencoderTrainer
 
 def window_errors(model, signal: np.ndarray, cond: np.ndarray,
                   window: int, n_windows: int) -> np.ndarray:
-    """Reconstruction error for the first ``n_windows`` non-overlapping windows of a
-    normalized ``[BVP, ACC]`` signal, each scored with its conditioning vector.
-    Built with a batch-size-1 model so each window scores independently."""
+    bs = model.batch_size
+    signal = signal.astype(np.float32)
+    cond = cond.astype(np.float32)
     errors = np.empty(n_windows, dtype=np.float32)
-    for w in range(n_windows):
-        s = w * window
-        win = signal[s:s + window]
-        out = model.eval(win[None].astype(np.float32), cond[w][None].astype(np.float32))
-        errors[w] = float(out['error'][0])
+    for start in range(0, n_windows, bs):
+        count = min(bs, n_windows - start)
+        wins = np.stack([signal[(start + i) * window:(start + i + 1) * window]
+                         for i in range(count)])
+        conds = cond[start:start + count]
+        if count < bs:   # pad the final batch up to the static batch size
+            wins = np.concatenate([wins, np.zeros((bs - count, *wins.shape[1:]), np.float32)])
+            conds = np.concatenate([conds, np.zeros((bs - count, *conds.shape[1:]), np.float32)])
+        out = model.eval(wins, conds)
+        errors[start:start + count] = out['error'].numpy()[:count]
     return errors
 
 
 def load_autoencoder(model_name: str) -> AutoencoderTrainer:
-    """Build a batch-size-1 autoencoder trainer and restore its trained weights from
-    results/<model>/trainable.tflite."""
-    trainer = MODELS[model_name].build_trainer(batch_size=1)
+    """Build an autoencoder trainer and restore its trained
+    weights from results/<model>/trainable.tflite."""
+    trainer = MODELS[model_name].build_trainer()
     if not isinstance(trainer, AutoencoderTrainer):
         raise SystemExit(
             f"'{model_name}' is not an autoencoder; testing needs one (lstm-ae, gru-ae, cnn-ae).")

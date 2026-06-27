@@ -26,8 +26,6 @@ VERSION = 1
 
 
 def quantize_features(features: np.ndarray, model_path: Path) -> np.ndarray:
-    """Quantize normalized float32 features to the int8 input the device echoes,
-    using the quantized model's input (scale, zero_point)."""
     interp = tf.lite.Interpreter(model_path=str(model_path))
     scale, zero_point = interp.get_input_details()[0]['quantization']
     if scale == 0:
@@ -37,7 +35,6 @@ def quantize_features(features: np.ndarray, model_path: Path) -> np.ndarray:
 
 
 def window_raw(signal: np.ndarray, window: int, count: int) -> np.ndarray:
-    """First `count` non-overlapping `window`-sample frames as float32."""
     frames = signal[: count * window].reshape(count, window)
     return frames.astype(np.float32)
 

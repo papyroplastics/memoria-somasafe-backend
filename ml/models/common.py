@@ -100,21 +100,6 @@ class TrainableModel(tf.Module):
 
 
 class TrainableAutoencoder(TrainableModel):
-    """Conditional reconstruction autoencoder base.
-
-    Subclasses build their encoder/decoder layers and implement ``_forward(signal,
-    cond, training)``; the train/eval bodies, signature binding, conditioning
-    embedding, latent dropout and Adam optimizer are shared. The encoder sees
-    ``n_signals`` channels (``[BVP, ACC]``) but the decoder only reconstructs the
-    first ``n_outputs`` (BVP) — ACC is exogenous context, not part of the anomaly
-    score. Every model is conditioned on a single ``cond`` vector (z-scored
-    demographics + a causal activity context); the embedding here feeds the
-    subclass's conditioning mechanism (FiLM for the CNN, latent fusion for the
-    RNNs). Latent dropout pushes the decoder to rely on the condition rather than
-    copy the input through the bottleneck. The objective is reconstruction MSE plus
-    a first-difference term that penalizes flat output.
-    """
-
     def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int,
                  n_cond: int, cond_embed_dim: int = 16, n_outputs: int = 1,
                  diff_weight: float = 1.0, latent_dropout: float = 0.1):
@@ -173,13 +158,6 @@ class TrainableAutoencoder(TrainableModel):
 
 
 class Trainer(ABC):
-    """Adapts a ``TrainableModel`` to the uniform surface the training loops in
-    ``training.py`` drive. A trainer owns data preparation, the per-epoch step,
-    the metrics relevant to its model type, and the representative dataset for
-    int8 export. Loops only ever talk to this interface, so any
-    ``(model, trainer)`` pair works with any loop.
-    """
-
     model: TrainableModel
     primary_metric: str
     default_batch_size: int
@@ -260,14 +238,6 @@ class TrainerBuilder(Protocol):
     def __call__(self, batch_size: int | None = None) -> Trainer: ...
 
 class AutoencoderTrainer(Trainer):
-    """Shared trainer for the (conditional) autoencoders (LSTM/GRU/CNN/...).
-
-    Windows the raw ``[BVP, ACC]`` signals from subject-signals and z-score
-    normalizes them at load time (so no normalized copy is stored on disk), pairs
-    each window with its conditioning vector (demographics + activity context), and
-    scores with reconstruction error.
-    """
-
     primary_metric = 'recon_error'
     default_batch_size = 12
 

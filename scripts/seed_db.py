@@ -91,8 +91,6 @@ def seed_users(session: Session) -> None:
 
 
 def _parse_factory_nvs(path: Path) -> dict[str, str]:
-    """Read the factory NVS CSV into a {key: value} map, ignoring # comments and
-    the header row (esp-idf NVS tooling allows # comment lines)."""
     values: dict[str, str] = {}
     with path.open(newline="") as f:
         for row in csv.reader(f):

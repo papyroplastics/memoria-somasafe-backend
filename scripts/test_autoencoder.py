@@ -15,8 +15,6 @@ from .common.post_train import get_report_dir, AE_TEST_REPORT
 from .common.autoencoders import load_autoencoder, window_errors
 
 def score_mixed(trainer: AutoencoderTrainer, data_dir: Path):
-    """Score the realistic mixed-anomaly windows; returns (errors, truth) per window,
-    aligned 1:1 with the mixed-feature labels."""
     window = trainer.window_size
     subjects_dir = data_dir / SUBJECTS_SUBDIR
     mixed_dir = data_dir / MIXED_SUBDIR
@@ -38,9 +36,6 @@ def score_mixed(trainer: AutoencoderTrainer, data_dir: Path):
 
 def score_bvp_dir(trainer: AutoencoderTrainer, data_dir: Path,
                   bvp_dir: Path | None) -> np.ndarray:
-    """Score every non-overlapping window across all subjects, taking BVP from
-    ``bvp_dir`` (None = clean subject-signals) and ACC from subject-signals. Used for
-    a single anomaly kind (every window anomalous) or the clean baseline."""
     window = trainer.window_size
     subjects_dir = data_dir / SUBJECTS_SUBDIR
 
