@@ -5,8 +5,8 @@ from ml.training import History
 from ml.models.common import Trainer
 from ml.saving import save_tainable_model, save_optimized_model
 
-# Autoencoder evaluation report (threshold + metrics), written by test_autoencoder.py
-# into results/<model>/reports/ and read back by distill_labels.py.
+# Autoencoder evaluation report (per-score thresholds + metrics), written by
+# autoencoder_test.py into results/<model>/reports/ and read back by distill_labels.py.
 AE_TEST_REPORT = 'autoencoder_test.json'
 
 def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset, postfix: str = ''):

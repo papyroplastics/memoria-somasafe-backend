@@ -122,7 +122,7 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
         acc_g = wrist['ACC'] / 64.0
         acc = np.sqrt(np.sum(acc_g ** 2, axis=1)).astype(np.float32)
 
-        save_dir = subjects_dir / f'S{subject_dir_name}'
+        save_dir = subjects_dir / subject_dir_name
         save_dir.mkdir(parents=True, exist_ok=True)
         np.save(save_dir / 'bvp.npy', bvp)
         np.save(save_dir / 'acc.npy', acc)
@@ -150,7 +150,7 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
             np.stack([static_mean, static_std]).astype(np.float32))
     for subject_id in processed:
         norm_static = ((statics[subject_id] - static_mean) / static_std).astype(np.float32)
-        np.save(subjects_dir / f'S{subject_id}' / 'static.npy', norm_static)
+        np.save(subjects_dir / subject_id / 'static.npy', norm_static)
 
     print(f"  Global BVP/ACC mean/std saved to {subjects_dir / NORM_PARAMS_FILE}")
     print(f"  Static mean/std saved to {subjects_dir / STATIC_NORM_PARAMS_FILE}")
@@ -160,6 +160,30 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
 # ---------------------------------------------------------------------------
 # Stage 2 — Synthetic anomalies on raw BVP
 # ---------------------------------------------------------------------------
+
+def wavy_noise(n: int, rng: np.random.Generator, std: float) -> np.ndarray:
+    """Smooth band-limited random noise over ``n`` samples, std-normalized to ``std``.
+
+    Random values on control points every ~0.12–0.38 s are interpolated to fill the
+    rest, so the result is wavy and below the PPG band rather than per-sample hiss.
+    Control points are evenly spaced (filled by FFT/trigonometric interpolation) or
+    randomly placed (smoothed linear interpolation), chosen per call for variety.
+    """
+    spacing = int(rng.integers(8, 25))
+    m = max(3, n // spacing)
+    if rng.random() < 0.5:                                   # regular grid → trig interp
+        noise = np.fft.irfft(np.fft.rfft(rng.normal(0.0, 1.0, size=m)), n)
+    else:                                                    # random points → smoothed linear
+        pos = np.concatenate((
+            [0],
+            np.sort(rng.choice(np.arange(1, n - 1), size=min(m, n - 2), replace=False)),
+            [n - 1]))
+        noise = np.interp(np.arange(n), pos, rng.normal(0.0, 1.0, size=len(pos)))
+        kernel = np.hanning(max(3, spacing))
+        noise = np.convolve(noise, kernel / kernel.sum(), mode='same')
+    sd = float(noise.std())
+    return (noise / sd * std if sd > 0 else noise).astype(np.float32)
+
 
 def apply_anomaly(segment: np.ndarray, kind: int, rng: np.random.Generator,
                   sig_range: float, sig_std: float) -> np.ndarray:
@@ -174,14 +198,14 @@ def apply_anomaly(segment: np.ndarray, kind: int, rng: np.random.Generator,
     n = len(seg)
     src = np.linspace(0, n - 1, n)
 
-    if kind == 0:    # spike — transient DC offset over the span
-        scale = sig_range * float(rng.uniform(0.3, 0.8))
+    if kind == 0:    # spike — baseline step (sustained DC offset over the span)
+        scale = sig_range * float(rng.uniform(0.1, 0.25))
         seg += scale * float(rng.choice([-1.0, 1.0]))
     elif kind == 1:  # blowup — amplitude blow-up around the local mean
         mean = float(seg.mean())
         seg = mean + (seg - mean) * float(rng.uniform(2.0, 4.0))
-    elif kind == 2:  # noise — additive noise burst
-        seg += rng.normal(0.0, sig_std * 0.5, size=n).astype(np.float32)
+    elif kind == 2:  # noise — wavy band-limited interference burst
+        seg += wavy_noise(n, rng, sig_std * float(rng.uniform(0.25, 0.4)))
     elif kind == 3:  # timewarp — uniform tempo change (tachy/brady): resample + refit
         factor = float(rng.uniform(1.4, 1.8)) if rng.random() < 0.5 else float(rng.uniform(0.55, 0.7))
         m = max(2, int(round(n / factor)))
@@ -361,10 +385,10 @@ def build_feature_dataset(mixed_dir: Path, subjects_dir: Path, feature_dir: Path
     per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
     print("Building feature dataset from:", end="")
-    for subject_dir in get_sorted_paths(subjects_dir):
+    for subject_dir in get_sorted_paths(mixed_dir):
         subject_id = subject_dir.name
-        bvp = np.load(subject_dir / 'bvp.npy')
-        win_lbl = np.load(subject_dir / 'labels.npy')   # per-window
+        bvp = np.load(subject_dir / 'bvp.npy')          # mixed-anomaly BVP
+        win_lbl = np.load(subject_dir / 'labels.npy')   # per-window labels
         acc = np.load(subjects_dir / subject_id / 'acc.npy')
 
         n_windows = min(
@@ -521,7 +545,7 @@ def combine_datasets(datasets: list[tf.data.Dataset]) -> tf.data.Dataset:
 def conditional_windows(subjects_dir: Path, sid: str, window_size: int,
                         anomalous_dir: Path | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Normalized ``(T, 2)`` signal + per-window cond ``(n_windows, N_COND)`` for
-    non-overlapping windows — for test_autoencoder / distill_labels, which slice windows
+    non-overlapping windows — for autoencoder_test / distill_labels, which slice windows
     manually rather than via tf.data."""
     norm = normalize(stacked_signal(subjects_dir, sid, anomalous_dir), *norm_stats(subjects_dir))
     count = max(0, (len(norm) - window_size) // window_size + 1)
