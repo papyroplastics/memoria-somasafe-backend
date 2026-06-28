@@ -6,7 +6,7 @@ from pathlib import Path
 from common.config import DATASETS_DIR
 
 from ml.data import (
-    RAW_SUBDIR, SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
+    RAW_SUBDIR, CLEAN_SUBDIR, ANOMALOUS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
     extract_subject_signals, create_anomalous_signals, create_mixed_signals,
     build_feature_dataset, get_sorted_paths
 )
@@ -42,7 +42,7 @@ if __name__ == '__main__':
 
     datasets_dir: Path = args.datasets_dir
     raw_dir       = datasets_dir / RAW_SUBDIR
-    subjects_dir  = datasets_dir / SUBJECTS_SUBDIR
+    subjects_dir  = datasets_dir / CLEAN_SUBDIR
     anomalous_dir = datasets_dir / ANOMALOUS_SUBDIR
     mixed_dir     = datasets_dir / MIXED_SUBDIR
     feature_dir   = datasets_dir / MIXED_FEATURE_SUBDIR
@@ -53,20 +53,20 @@ if __name__ == '__main__':
         download_dataset(datasets_dir, raw_dir)
 
     if subjects_dir.is_dir():
-        print(f"subject-signals already present at {subjects_dir}")
+        print(f"{CLEAN_SUBDIR} already present at {subjects_dir}")
     else:
         print(f"\nStage 1: Extracting raw signals into {subjects_dir}/ ...")
         written = extract_subject_signals(raw_dir, subjects_dir)
         print(f"Processed {len(written)} subjects")
 
     if anomalous_dir.is_dir() and any(anomalous_dir.glob('*/S*')):
-        print(f"anomalous-signals already present at {anomalous_dir}")
+        print(f"{ANOMALOUS_SUBDIR} already present at {anomalous_dir}")
     else:
         print(f"\nStage 2: Creating per-type anomalous signals in {anomalous_dir}/ ...")
         create_anomalous_signals(subjects_dir, anomalous_dir)
 
     if mixed_dir.is_dir() and any(mixed_dir.glob('S*')):
-        print(f"mixed-signals already present at {mixed_dir}")
+        print(f"{MIXED_SUBDIR} already present at {mixed_dir}")
     else:
         print(f"\nStage 3: Creating mixed-anomaly signals in {mixed_dir}/ ...")
         create_mixed_signals(subjects_dir, mixed_dir)

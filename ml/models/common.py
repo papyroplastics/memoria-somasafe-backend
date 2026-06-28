@@ -9,7 +9,7 @@ from ..optimizers import Adam
 from ..layers import Dense
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
 from ..data import (
-    DatasetUnavailibleError, SUBJECTS_SUBDIR, BVP_RATE,
+    DatasetUnavailibleError, CLEAN_SUBDIR, BVP_RATE,
     windowed_conditional, get_sorted_paths, combine_datasets
 )
 
@@ -248,7 +248,7 @@ class AutoencoderTrainer(Trainer):
 
     def __init__(self, model: TrainableModel, window_size: int = default_window_size,
                  shift: int = default_shift, batch_size: int = default_batch_size, 
-                 data_subdir: str = SUBJECTS_SUBDIR):
+                 data_subdir: str = CLEAN_SUBDIR):
         self.model = model
         self.window_size = window_size
         self.shift = shift

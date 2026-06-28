@@ -6,7 +6,7 @@ import numpy as np
 
 from common.config import RESULTS_DIR, DATASETS_DIR
 from ml.data import (
-    SUBJECTS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR, FEATURE_STATS_FILE,
+    CLEAN_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR, FEATURE_STATS_FILE,
     BVP_WINDOW, WINDOW_SECONDS, conditional_windows, get_sorted_paths
 )
 from ml.model_list import MODELS
@@ -65,7 +65,7 @@ if __name__ == "__main__":
             f"model window ({window} samples) does not match the {WINDOW_SECONDS}s feature "
             f"window ({BVP_WINDOW} samples) used to build mixed-features; the autoencoder "
             f"would produce a mismatched number of labels. Align the model's window size.")
-    subjects_dir = data_dir / SUBJECTS_SUBDIR
+    subjects_dir = data_dir / CLEAN_SUBDIR
     mixed_dir = data_dir / MIXED_SUBDIR
     feature_dir = data_dir / MIXED_FEATURE_SUBDIR
 

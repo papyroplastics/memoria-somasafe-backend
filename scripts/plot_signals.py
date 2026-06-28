@@ -6,7 +6,7 @@ import numpy as np
 from common.config import DATASETS_DIR, RESULTS_DIR
 from ml.model_list import MODELS
 from ml.data import (
-    SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_RATE,
+    CLEAN_SUBDIR, ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_RATE,
     conditional_windows, get_sorted_paths,
 )
 from .common.post_train import get_report_dir
@@ -19,7 +19,7 @@ def window_views(data_dir, sid, window, index):
     """Normalized [BVP, ACC] window + its conditioning vector for the clean signal
     and each anomaly kind, all sliced at the same window ``index``. Only BVP carries
     the anomaly; ACC is always the subject's clean signal."""
-    subjects_dir = data_dir / SUBJECTS_SUBDIR
+    subjects_dir = data_dir / CLEAN_SUBDIR
     anomalous_dir = data_dir / ANOMALOUS_SUBDIR
 
     views = {}
@@ -44,7 +44,7 @@ if __name__ == "__main__":
     trainer = load_autoencoder(args.model, batch_size=1)
     window = trainer.window_size
 
-    subjects_dir = DATASETS_DIR / SUBJECTS_SUBDIR
+    subjects_dir = DATASETS_DIR / CLEAN_SUBDIR
     subject_dirs = get_sorted_paths(subjects_dir)
     if not subject_dirs:
         raise SystemExit(f"{subjects_dir} is empty. Run get_dataset.py first.")

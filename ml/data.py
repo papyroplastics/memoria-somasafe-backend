@@ -16,7 +16,7 @@ import pandas as pd
 import tensorflow as tf
 
 RAW_SUBDIR = 'PPG_FieldStudy'
-SUBJECTS_SUBDIR = 'subject-signals'
+CLEAN_SUBDIR = 'clean-signals'
 ANOMALOUS_SUBDIR = 'anomalous-signals'      # per-type fully-anomalous BVP: <kind>/S*/
 MIXED_SUBDIR = 'mixed-signals'              # realistic ~50% mix: S*/ (bvp + binary labels)
 MIXED_FEATURE_SUBDIR = 'mixed-features'     # features windowed from mixed-signals
@@ -288,7 +288,7 @@ def inject_single_kind(bvp: np.ndarray, kind: int, rng: np.random.Generator) -> 
 def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
     """Per-type fully-anomalous BVP for isolated testing: for each kind in
     ANOMALY_KINDS, apply it to every window of each subject's clean BVP. Layout:
-    ``<anomalous_dir>/<kind>/S*/bvp.npy``. ACC is unchanged (load from subject-signals).
+    ``<anomalous_dir>/<kind>/S*/bvp.npy``. ACC is unchanged (load from clean-signals).
     """
     rng = np.random.default_rng(FEATURE_SEED)
 
@@ -308,7 +308,7 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
 def create_mixed_signals(subjects_dir: Path, mixed_dir: Path):
     """Realistic ~ANOMALY_PROB mix of anomaly kinds on window-aligned spans.
 
-    Only BVP is modified; ACC is not stored here (load from subject-signals). bvp.npy
+    Only BVP is modified; ACC is not stored here (load from clean-signals). bvp.npy
     + per-window binary labels.npy; used for threshold-picking, distillation and
     feature-mlp training.
     """
@@ -374,7 +374,7 @@ def build_feature_dataset(mixed_dir: Path, subjects_dir: Path, feature_dir: Path
     extract features.
 
     BVP comes from mixed-signals (raw with the anomaly mix, un-normalized).
-    ACC comes from subject-signals (raw magnitude, 32 Hz).
+    ACC comes from clean-signals (raw magnitude, 32 Hz).
     Per-window labels are taken straight from mixed-signals (anomalies are
     window-aligned, so each window is fully clean or fully anomalous).
     Features are stored per subject under S*/; standardization (z-score) stats
@@ -480,8 +480,8 @@ def _interp_acc(acc: np.ndarray, target_len: int) -> np.ndarray:
 def stacked_signal(subjects_dir: Path, sid: str,
                    anomalous_dir: Path | None = None) -> np.ndarray:
     """Raw, un-normalized ``(T, 2)`` ``[BVP(64 Hz), ACC(interp to 64 Hz)]`` for a
-    subject. BVP is read from ``anomalous_dir`` when given, else subject-signals;
-    ACC always comes from subject-signals."""
+    subject. BVP is read from ``anomalous_dir`` when given, else clean-signals;
+    ACC always comes from clean-signals."""
     bvp_src = anomalous_dir if anomalous_dir is not None else subjects_dir
     bvp = np.load(bvp_src / sid / 'bvp.npy').astype(np.float32)
     acc = np.load(subjects_dir / sid / 'acc.npy').astype(np.float32)

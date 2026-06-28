@@ -7,7 +7,7 @@ from common.config import RESULTS_DIR, DATASETS_DIR
 from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
 from ml.data import (
-    SUBJECTS_SUBDIR, ANOMALOUS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR, ANOMALY_KINDS,
+    CLEAN_SUBDIR, ANOMALOUS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR, ANOMALY_KINDS,
     conditional_windows, get_sorted_paths
 )
 from ml.metrics import classification_report
@@ -25,7 +25,7 @@ def score_mixed(trainer: AutoencoderTrainer, data_dir: Path):
     """Score the realistic mixed-anomaly windows; returns (scores, truth) aligned 1:1
     with the mixed-feature labels."""
     window = trainer.window_size
-    subjects_dir = data_dir / SUBJECTS_SUBDIR
+    subjects_dir = data_dir / CLEAN_SUBDIR
     mixed_dir = data_dir / MIXED_SUBDIR
     feature_dir = data_dir / MIXED_FEATURE_SUBDIR
 
@@ -47,10 +47,10 @@ def score_mixed(trainer: AutoencoderTrainer, data_dir: Path):
 def score_dir(trainer: AutoencoderTrainer, data_dir: Path,
               bvp_dir: Path | None) -> dict[str, np.ndarray]:
     """Score every non-overlapping window across all subjects, taking BVP from
-    ``bvp_dir`` (None = clean subject-signals) and ACC from subject-signals — a single
+    ``bvp_dir`` (None = clean clean-signals) and ACC from clean-signals — a single
     anomaly kind (every window anomalous) or the clean baseline."""
     window = trainer.window_size
-    subjects_dir = data_dir / SUBJECTS_SUBDIR
+    subjects_dir = data_dir / CLEAN_SUBDIR
 
     per_subject = []
     for d in get_sorted_paths(subjects_dir):
