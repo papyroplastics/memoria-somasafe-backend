@@ -6,8 +6,8 @@ import numpy as np
 
 from common.config import RESULTS_DIR, DATASETS_DIR
 from ml.data import (
-    SUBJECTS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR, FEATURE_STATS_FILE, 
-    conditional_windows, get_sorted_paths
+    SUBJECTS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR, FEATURE_STATS_FILE,
+    BVP_WINDOW, WINDOW_SECONDS, conditional_windows, get_sorted_paths
 )
 from ml.model_list import MODELS
 from .common.autoencoders import load_autoencoder, window_errors
@@ -48,9 +48,16 @@ if __name__ == "__main__":
     result_dir = RESULTS_DIR / args.model
 
     thr = load_threshold(args.model)
-    trainer = load_autoencoder(args.model)
+    # batch_size=1 so every window is scored, no batch remainder dropped — the distilled
+    # labels then line up 1:1 with the feature windows.
+    trainer = load_autoencoder(args.model, batch_size=1)
 
     window = trainer.window_size
+    if window != BVP_WINDOW:
+        raise SystemExit(
+            f"model window ({window} samples) does not match the {WINDOW_SECONDS}s feature "
+            f"window ({BVP_WINDOW} samples) used to build mixed-features; the autoencoder "
+            f"would produce a mismatched number of labels. Align the model's window size.")
     subjects_dir = data_dir / SUBJECTS_SUBDIR
     mixed_dir = data_dir / MIXED_SUBDIR
     feature_dir = data_dir / MIXED_FEATURE_SUBDIR

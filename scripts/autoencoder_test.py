@@ -29,8 +29,9 @@ def score_mixed(trainer: AutoencoderTrainer, data_dir: Path):
         sid = d.name
         signal, cond = conditional_windows(subjects_dir, sid, window, anomalous_dir=mixed_dir)
         truth = np.load(feature_dir / sid / 'labels.npy').reshape(-1)
-        all_err.append(window_errors(trainer.model, signal, cond, window, len(truth)))
-        all_lbl.append(truth)
+        err = window_errors(trainer.model, signal, cond, window, len(truth))
+        all_err.append(err)
+        all_lbl.append(truth[:len(err)])
     return np.concatenate(all_err), np.concatenate(all_lbl)
 
 
