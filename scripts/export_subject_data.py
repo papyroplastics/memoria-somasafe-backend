@@ -3,9 +3,8 @@
 The phone normally builds a dataset by streaming a subject through UART -> ESP ->
 BLE, which is slow. This produces the same per-window rows directly so they can be
 imported on-device for training tests. Each window is written exactly as the app's
-capture schema stores an ESP sample: raw float32 PPG/ACC, the int8 feature vector
-the device echoes (normalized features quantized with the model's input params),
-and the label in the int8 score field.
+capture schema stores an ESP sample: raw float32 PPG/ACC, the float32 normalized
+feature vector the device echoes, and the label in the int8 score field.
 """
 
 import argparse
@@ -13,7 +12,6 @@ import struct
 from pathlib import Path
 
 import numpy as np
-import tensorflow as tf
 
 from common.config import DATASETS_DIR
 from ml.data import (
@@ -25,21 +23,12 @@ MAGIC = b'SSDS'
 VERSION = 1
 
 
-def quantize_features(features: np.ndarray, model_path: Path) -> np.ndarray:
-    interp = tf.lite.Interpreter(model_path=str(model_path))
-    scale, zero_point = interp.get_input_details()[0]['quantization']
-    if scale == 0:
-        raise ValueError(f"{model_path} has no input quantization (scale=0)")
-    q = np.round(features / scale) + zero_point
-    return np.clip(q, -128, 127).astype(np.int8)
-
-
 def window_raw(signal: np.ndarray, window: int, count: int) -> np.ndarray:
     frames = signal[: count * window].reshape(count, window)
     return frames.astype(np.float32)
 
 
-def export_subject(subject: int, model_path: Path, datasets_dir: Path, out_path: Path):
+def export_subject(subject: int, datasets_dir: Path, out_path: Path):
     sid = f'S{subject}'
     bvp_path   = datasets_dir / MIXED_SUBDIR         / sid / 'bvp.npy'
     acc_path   = datasets_dir / CLEAN_SUBDIR      / sid / 'acc.npy'
@@ -61,10 +50,10 @@ def export_subject(subject: int, model_path: Path, datasets_dir: Path, out_path:
 
     ppg_win  = window_raw(bvp, BVP_WINDOW, count)             # (count, 512) f32
     acc_win  = window_raw(acc, ACC_WINDOW, count)             # (count, 256) f32
-    feat_q   = quantize_features(features[:count], model_path)  # (count, 17) int8
+    feat_win = features[:count].astype(np.float32)            # (count, 17) f32
     score    = labels[:count].astype(np.int8).reshape(count, 1)  # (count, 1) int8
 
-    feat_len  = feat_q.shape[1]
+    feat_len  = feat_win.shape[1] * 4
     score_len = score.shape[1]
     ppg_bytes = BVP_WINDOW * 4
     acc_bytes = ACC_WINDOW * 4
@@ -77,7 +66,7 @@ def export_subject(subject: int, model_path: Path, datasets_dir: Path, out_path:
         for i in range(count):
             f.write(ppg_win[i].tobytes())
             f.write(acc_win[i].tobytes())
-            f.write(feat_q[i].tobytes())
+            f.write(feat_win[i].tobytes())
             f.write(score[i].tobytes())
 
     anomalous = int(score.sum())
@@ -88,7 +77,6 @@ def export_subject(subject: int, model_path: Path, datasets_dir: Path, out_path:
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('subject', type=int, help="Subject id to export (e.g. 1)")
-    parser.add_argument('model', type=Path, help="Path to the int8 quantized .tflite")
     parser.add_argument('--datasets-dir', type=Path, default=DATASETS_DIR,
                         help=f"Datasets directory (default: {DATASETS_DIR})")
     parser.add_argument('-o', '--output', type=Path, default=None,
@@ -96,4 +84,4 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     out = args.output or Path(f'S{args.subject}.ssds')
-    export_subject(args.subject, args.model, args.datasets_dir, out)
+    export_subject(args.subject, args.datasets_dir, out)
