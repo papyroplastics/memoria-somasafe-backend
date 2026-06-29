@@ -1,65 +1,58 @@
 import tensorflow as tf
 
-from ..layers import Conv1D, Dense, GRUCell, sinusoidal_encoding
+from ..layers import Dense, GRUCell
 from ..data import N_COND
 from .common import TrainableAutoencoder, AutoencoderTrainer
 
 
 class GRUAutoencoder(TrainableAutoencoder):
-    """Conditional GRU autoencoder for reconstruction-based anomaly detection. Same
-    decimating conv front-end + positional-encoding decoder and cond-fused latent as
-    ``LSTMAutoencoder`` but with single-state GRU cells, so it is lighter (fewer
-    gates / parameters) — a candidate if the LSTM is too heavy for on-device training."""
+    """Conditional GRU autoencoder for reconstruction-based anomaly detection.
+
+    Two stacked GRUCells encode the full-length signal to a latent vector,
+    which is fused with the embedded condition and then fed at every decoder
+    step to drive two stacked GRUCells back to the original length. Lighter
+    than LSTMAutoencoder (single state, fewer gates)."""
 
     def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int = 2,
-                 n_cond: int = N_COND, hidden_dim: int = 64, latent_dim: int = 16,
-                 learning_rate: float = 1e-3, cond_embed_dim: int = 16, down_factor: int = 8, 
-                 pe_dim: int = 16, kernel_size: int = 7, n_outputs: int = 1, 
+                 n_cond: int = N_COND, hidden_dim: int = 64, latent_dim: int = 32,
+                 learning_rate: float = 1e-3, cond_embed_dim: int = 16, n_outputs: int = 1,
                  diff_weight: float = 1.0, latent_dropout: float = 0.1,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
-
         super().__init__(name=name, batch_size=batch_size, seq_len=seq_len,
                          n_signals=n_signals, n_cond=n_cond, cond_embed_dim=cond_embed_dim,
                          n_outputs=n_outputs, diff_weight=diff_weight,
                          latent_dropout=latent_dropout)
-        assert seq_len % down_factor == 0, 'seq_len must be divisible by down_factor'
-        self.down_factor = down_factor
-        self.reduced_len = seq_len // down_factor
-        self.hidden_dim = hidden_dim
 
-        self.enc_conv1 = Conv1D(n_signals, hidden_dim, kernel_size, stride=2, activation=tf.nn.relu)
-        self.enc_conv2 = Conv1D(hidden_dim, hidden_dim, kernel_size, stride=2, activation=tf.nn.relu)
-        self.enc_conv3 = Conv1D(hidden_dim, hidden_dim, kernel_size, stride=2, activation=tf.nn.relu)
-        self.encoder_gru = GRUCell(hidden_dim, hidden_dim)
-        self.to_latent = Dense(hidden_dim + cond_embed_dim, latent_dim)
+        self.enc_gru1 = GRUCell(n_signals, hidden_dim)
+        self.enc_gru2 = GRUCell(hidden_dim, latent_dim)
+        self.to_latent = Dense(latent_dim + cond_embed_dim, latent_dim)
 
-        self.latent_to_hidden = Dense(latent_dim, hidden_dim, activation=tf.nn.tanh)
-        self.pe = sinusoidal_encoding(self.reduced_len, pe_dim)
-        self.decoder_gru = GRUCell(pe_dim, hidden_dim)
-        self.dec_out = Dense(hidden_dim, hidden_dim, activation=tf.nn.relu)
-        self.smooth = Conv1D(hidden_dim, n_outputs, kernel_size, activation=None)
+        self.dec_gru1 = GRUCell(latent_dim, hidden_dim)
+        self.dec_gru2 = GRUCell(hidden_dim, hidden_dim)
+        self.out_dense = Dense(hidden_dim, n_outputs)
 
         self._bind(learning_rate, beta1, beta2, epsilon)
 
     def _forward(self, signal, cond, training=False):
         emb = self._embed_cond(cond)
-        x = self.enc_conv3(self.enc_conv2(self.enc_conv1(signal)))
-        h = self.encoder_gru.zero_state(self.batch_size)
-        for t in range(self.reduced_len):
-            h = self.encoder_gru.step(h, x[:, t, :])
-        z = self._drop_latent(self.to_latent(tf.concat([h, emb], axis=1)), training)
 
-        dh = self.latent_to_hidden(z)
-        pe_dim = self.pe.shape[-1]
+        h1 = self.enc_gru1.zero_state(self.batch_size)
+        h2 = self.enc_gru2.zero_state(self.batch_size)
+        for t in range(self.seq_len):
+            h1 = self.enc_gru1.step(h1, signal[:, t, :])
+            h2 = self.enc_gru2.step(h2, h1)
+
+        z = self._drop_latent(self.to_latent(tf.concat([h2, emb], axis=1)), training)
+
+        dh1 = self.dec_gru1.zero_state(self.batch_size)
+        dh2 = self.dec_gru2.zero_state(self.batch_size)
         outputs = []
-        for t in range(self.reduced_len):
-            step_in = tf.broadcast_to(self.pe[t], (self.batch_size, pe_dim))
-            dh = self.decoder_gru.step(dh, step_in)
-            outputs.append(self.dec_out(dh))
+        for t in range(self.seq_len):
+            dh1 = self.dec_gru1.step(dh1, z)
+            dh2 = self.dec_gru2.step(dh2, dh1)
+            outputs.append(self.out_dense(dh2))
 
-        seq = tf.stack(outputs, axis=1)
-        up = tf.repeat(seq, self.down_factor, axis=1)
-        return self.smooth(up)
+        return tf.stack(outputs, axis=1)
 
 
 def get_trainer(batch_size: int | None = None) -> AutoencoderTrainer:
@@ -70,4 +63,3 @@ def get_trainer(batch_size: int | None = None) -> AutoencoderTrainer:
         seq_len=AutoencoderTrainer.default_window_size,
     )
     return AutoencoderTrainer(model, batch_size=batch_size)
-
