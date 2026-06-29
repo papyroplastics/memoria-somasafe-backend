@@ -44,6 +44,3 @@ MODELS: dict[str, ModelSpec] = {
     ),
 }
 
-def build_fingerprinted(key: str) -> tuple[Trainer, str]:
-    trainer = MODELS[key].build_trainer()
-    return trainer, trainer.model.arch_fingerprint()

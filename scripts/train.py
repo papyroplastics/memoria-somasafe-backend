@@ -1,3 +1,8 @@
+"""
+Train a SomaSafe model with a chosen training loop and export
+SavedModel + TFLite artifacts into results/<model>.
+"""
+
 import argparse
 from pathlib import Path
 import tensorflow as tf
@@ -28,9 +33,7 @@ def run_loop(trainer: Trainer, data_dir: Path, loop: str, split: float,
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description='Train a SomaSafe model with a chosen training loop and export '
-                    'SavedModel + TFLite artifacts into results/<model>.')
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Model to train')
     parser.add_argument('--loop', choices=LOOP_OPTIONS, default='normal', help='Training loop (default: normal)')
     parser.add_argument('--split', type=float, default=0.9, help='Train/eval data split')

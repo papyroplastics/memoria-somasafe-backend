@@ -2,6 +2,7 @@ from abc import ABC, abstractmethod
 from typing import Protocol
 from pathlib import Path
 import hashlib
+import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 
@@ -10,7 +11,8 @@ from ..layers import Dense
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
 from ..data import (
     DatasetUnavailibleError, CLEAN_SUBDIR, BVP_RATE,
-    windowed_conditional, get_sorted_paths, combine_datasets
+    windowed_conditional, get_sorted_paths, combine_datasets,
+    stacked_signal, normalize, norm_stats, window_cond_vectors,
 )
 
 class UnboundError(NotImplementedError):
@@ -169,8 +171,8 @@ class Trainer(ABC):
         """Returns the data for a single subject"""
 
     @abstractmethod
-    def representative_dataset(self, dataset: tf.data.Dataset) -> tf.data.Dataset:
-        """Feed-dict stream for the int8 TFLite converter."""
+    def representative_dataset(self, dataset: tf.data.Dataset | None = None, *, data_root: Path | None = None) -> tf.data.Dataset:
+        """Feed-dict stream for the int8 TFLite converter. Loads from data_root when dataset is None."""
 
     @abstractmethod
     def evaluate(self, dataset: tf.data.Dataset, prefix: str = '') -> dict[str, float]:
@@ -186,7 +188,7 @@ class Trainer(ABC):
         return total / batches if batches else 0.0
 
     def report(self, result_dir: Path, eval_dataset: tf.data.Dataset) -> None:
-        """Optional model-specific artifact (e.g. an AE reconstruction plot)."""
+        """Optional model-specific artifact."""
         pass
 
     def subject_datasets(
@@ -258,8 +260,28 @@ class AutoencoderTrainer(Trainer):
     def subject_dataset(self, subject_dir):
         return windowed_conditional(subject_dir.parent, subject_dir.name, self.window_size, self.shift)
 
-    def representative_dataset(self, dataset):
-        return dataset.take(10).map(lambda s, c: {'signal': s, 'cond': c})
+    def representative_dataset(self, dataset=None, *, data_root=None):
+        if dataset is None:
+            rng = np.random.default_rng()
+            data_dir = data_root / self.data_subdir
+            all_signals, all_conds = [], []
+            for subject_dir in get_sorted_paths(data_dir):
+                sid = subject_dir.name
+                norm = normalize(stacked_signal(data_dir, sid), *norm_stats(data_dir))
+                count = max(0, (len(norm) - self.window_size) // self.shift + 1)
+                if count == 0:
+                    continue
+                cond = window_cond_vectors(data_dir, sid, norm, self.window_size, self.shift, count)
+                idx = rng.choice(count, size=min(10, count), replace=False)
+                all_signals.append(np.stack([norm[i * self.shift : i * self.shift + self.window_size] for i in idx]))
+                all_conds.append(cond[idx])
+            dataset = tf.data.Dataset.from_tensor_slices((
+                np.concatenate(all_signals).astype(np.float32),
+                np.concatenate(all_conds).astype(np.float32),
+            ))
+        else:
+            dataset = dataset.take(150)
+        return dataset.map(lambda s, c: {'signal': s, 'cond': c})
 
     def evaluate(self, dataset, prefix=''):
         errors = [self.model.eval(*batch)['error']

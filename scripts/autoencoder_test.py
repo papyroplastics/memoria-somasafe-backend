@@ -1,3 +1,15 @@
+"""
+Evaluate a trained autoencoder as an anomaly detector. Thresholds 
+each score (reconstruction error + spectral / beat-interval rhythm 
+indices) at the --target-fpr quantile of its clean-window distribution, 
+then reports the OR-combined metrics, each score on its own, per-anomaly-
+kind recall (scored on the per-type anomalous-signals/, broken down 
+by score) and the clean-signal false-positive rate. Writes the 
+thresholds + metrics to results/<model>/reports/; distill_labels.py 
+reads the thresholds from there.
+"""
+
+
 import argparse
 import json
 from pathlib import Path
@@ -62,15 +74,7 @@ def score_dir(trainer: AutoencoderTrainer, data_dir: Path,
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description='Evaluate a trained autoencoder as an anomaly detector. Thresholds '
-                    'each score (reconstruction error + spectral / beat-interval rhythm '
-                    'indices) at the --target-fpr quantile of its clean-window distribution, '
-                    'then reports the OR-combined metrics, each score on its own, per-anomaly-'
-                    'kind recall (scored on the per-type anomalous-signals/, broken down '
-                    'by score) and the clean-signal false-positive rate. Writes the '
-                    'thresholds + metrics to results/<model>/reports/; distill_labels.py '
-                    'reads the thresholds from there.')
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to test')
     parser.add_argument('--target-fpr', type=float, default=0.02,
                         help='Per-score clean-window false-positive rate the thresholds '

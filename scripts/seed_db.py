@@ -15,7 +15,7 @@ from pathlib import Path
 from sqlmodel import Session, select
 
 from api.routes.auth import hash_password
-from common.config import DATASETS_DIR, RESULTS_DIR, SEED, SEED_EMAIL, SEED_PASSWORD, SEED_USER
+from common.config import RESULTS_DIR, SEED_EMAIL, SEED_PASSWORD, SEED_USER
 from common.db import (
     Device,
     GlobalWeights,
@@ -25,7 +25,7 @@ from common.db import (
     engine,
     init_db,
 )
-from ml.model_list import MODELS, build_fingerprinted
+from ml.model_list import MODELS
 from ml.saving import load_trainable_weights
 
 
@@ -39,7 +39,8 @@ def seed_models(session: Session) -> None:
             print(f"  - model '{key}' skipped (no {tflite})")
             continue
 
-        trainer, fingerprint = build_fingerprinted(key, DATASETS_DIR, SEED)
+        trainer = MODELS[key].build_trainer()
+        fingerprint = trainer.model.arch_fingerprint()
         param_count = trainer.model.total_parameter_size
 
         if session.get(ModelFingerprint, fingerprint) is None:

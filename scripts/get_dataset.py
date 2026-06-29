@@ -1,3 +1,19 @@
+"""
+Download + sequence the (idempotent) preprocessing stages in ml/data.py:
+
+Stage 1 → datasets/clean-signals/S*/    raw BVP (64 Hz) + ACC mag (32 Hz),
+z-scored demographics (static.npy); global BVP/ACC mean/std
+(norm-params.npy) + demographics mean/std (static_norm_params.npy)
+Stage 2 → datasets/anomalous-signals/<kind>/S*/  per-type fully-anomalous BVP (one kind
+applied to every window) — for isolated per-kind testing in autoencoder_test.py
+Stage 3 → datasets/mixed-signals/S*/      raw BVP with a window-aligned ~50% mix of anomaly
+kinds + per-window binary label bitmap (labels.npy) — the realistic training/distill set
+Stage 4 → datasets/mixed-features/S*/     per-subject non-overlapping 8 s windowed feature
+vectors + labels (from mixed-signals), global standardization stats at the top level
+Signals are stored raw; z-score normalization happens at load time (no
+normalized copy on disk), so signal windows align 1:1 with the feature windows.
+"""
+
 import argparse
 import tempfile
 import urllib.request

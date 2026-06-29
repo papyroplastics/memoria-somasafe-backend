@@ -1,3 +1,9 @@
+"""
+Transfer-learn a default-batch model from a model trained at a
+larger batch size: copy the compatible trainable weights over,
+then fine-tune with the normal loop and export into results/<model>.
+"""
+
 import argparse
 from pathlib import Path
 import tensorflow as tf
@@ -5,14 +11,11 @@ import tensorflow as tf
 from common.config import DATASETS_DIR, RESULTS_DIR, SEED
 from ml.training import normal_loop
 from ml.saving import load_trainable_weights
-from ml.model_list import MODELS, build_trainer
+from ml.model_list import MODELS
 from .common.post_train import save_artifacts, plot_history, get_report_dir
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description='Transfer-learn a default-batch model from a model trained at a '
-                    'larger batch size: copy the compatible trainable weights over, '
-                    'then fine-tune with the normal loop and export into results/<model>.')
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Model to transfer')
     parser.add_argument('source_batch_size', type=int,
                         help='Batch size of the already-trained source artifact '
@@ -26,15 +29,14 @@ if __name__ == "__main__":
     report_dir = get_report_dir(result_dir)
 
     # Target: a fresh model at the default batch size — the one we fine-tune and export.
-    target_trainer = build_trainer(args.model, data_dir, SEED)
+    target_trainer = MODELS[args.model].build_trainer()
     if args.source_batch_size < target_trainer.batch_size:
         raise SystemExit(
             f"source batch size ({args.source_batch_size}) must be >= the default "
             f"batch size ({target_trainer.batch_size}) of '{args.model}'")
 
     # Source: rebuilt at its batch size, weights restored from its saved trainable .tflite.
-    source_trainer = build_trainer(args.model, data_dir, SEED,
-                                   batch_size=args.source_batch_size)
+    source_trainer = MODELS[args.model].build_trainer(batch_size=args.source_batch_size)
     source_path = result_dir / f'trainable_{args.source_batch_size}.tflite'
     if not source_path.exists():
         raise SystemExit(
@@ -46,9 +48,7 @@ if __name__ == "__main__":
     print(f"Transferred weights from {source_path} into a batch-size "
           f"{target_trainer.batch_size} {args.model}")
 
-    subject_train, subject_eval = target_trainer.subject_datasets(data_dir, SEED)
-    train_dataset = target_trainer.combine(subject_train)
-    eval_dataset = target_trainer.combine(subject_eval)
+    train_dataset, eval_dataset = target_trainer.combined_datasets(data_dir, 0.9)
     history = normal_loop(target_trainer, train_dataset, eval_dataset, args.epochs)
 
     save_artifacts(target_trainer, result_dir, eval_dataset)

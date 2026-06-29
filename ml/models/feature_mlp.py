@@ -4,7 +4,7 @@ from tqdm import tqdm
 
 from ..layers import Dense
 from .common import TrainableModel, Trainer
-from ..data import MIXED_FEATURE_SUBDIR, N_FEATURES
+from ..data import MIXED_FEATURE_SUBDIR, N_FEATURES, get_sorted_paths
 from ..optimizers import Adam
 
 
@@ -87,8 +87,54 @@ class FeatureMLPTrainer(Trainer):
 
         return tf.data.Dataset.from_tensor_slices((x, y))
 
-    def representative_dataset(self, dataset):
-        return dataset.take(10).map(lambda x, y: {'features': x})
+    def representative_dataset(self, dataset=None, *, data_root=None):
+        if dataset is None:
+            rng = np.random.default_rng()
+            data_dir = data_root / self.data_subdir
+            all_x, all_y = [], []
+            for subject_dir in get_sorted_paths(data_dir):
+                x = np.load(subject_dir / 'features.npy')
+                y = np.load(subject_dir / 'labels.npy')
+                idx = rng.choice(len(x), size=min(10, len(x)), replace=False)
+                all_x.append(x[idx])
+                all_y.append(y[idx])
+            dataset = tf.data.Dataset.from_tensor_slices((
+                np.concatenate(all_x).astype(np.float32),
+                np.concatenate(all_y).astype(np.float32),
+            ))
+        else:
+            dataset = dataset.take(150)
+        return dataset.map(lambda x, y: {'features': x})
+
+    def report(self, result_dir, eval_dataset):
+        import matplotlib.pyplot as plt
+
+        tp, fp, tn, fn = 0, 0, 0, 0
+        for x, y in eval_dataset:
+            pred = tf.cast(self.model.eval(x)['logits'] > 0.0, tf.float32)
+            tp += int(tf.reduce_sum(pred * y))
+            fp += int(tf.reduce_sum(pred * (1 - y)))
+            tn += int(tf.reduce_sum((1 - pred) * (1 - y)))
+            fn += int(tf.reduce_sum((1 - pred) * y))
+
+        matrix = [[tn, fp], [fn, tp]]
+        labels = ['Normal', 'Anomaly']
+
+        fig, ax = plt.subplots()
+        im = ax.imshow(matrix, cmap='Blues')
+        ax.set_xticks([0, 1])
+        ax.set_yticks([0, 1])
+        ax.set_xticklabels([f'Pred {l}' for l in labels])
+        ax.set_yticklabels([f'True {l}' for l in labels])
+        for i in range(2):
+            for j in range(2):
+                ax.text(j, i, matrix[i][j], ha='center', va='center', fontsize=12)
+        fig.colorbar(im)
+        fig.tight_layout()
+        path = result_dir / 'confusion_matrix.png'
+        fig.savefig(path)
+        plt.close(fig)
+        print(f"saved confusion matrix to {path}")
 
     def evaluate(self, dataset, prefix=''):
         correct, total = 0.0, 0.0

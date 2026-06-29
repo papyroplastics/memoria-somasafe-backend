@@ -1,3 +1,14 @@
+"""
+Distill window labels from a trained autoencoder: score the 
+mixed-anomaly windows (reconstruction error + spectral / beat-
+interval rhythm indices), label a window anomalous when any score 
+crosses the threshold picked by autoencoder_test.py, and write a 
+datasets-shaped tree (mixed-features/S*/ with distilled labels.npy 
++ symlinked features) into results/<model>/ that train.py can 
+consume via --dataset-dir.
+"""
+
+
 import argparse
 import json
 from pathlib import Path
@@ -38,14 +49,7 @@ def load_thresholds(model_name: str) -> dict[str, float]:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description='Distill window labels from a trained autoencoder: score the '
-                    'mixed-anomaly windows (reconstruction error + spectral / beat-'
-                    'interval rhythm indices), label a window anomalous when any score '
-                    'crosses the threshold picked by autoencoder_test.py, and write a '
-                    'datasets-shaped tree (mixed-features/S*/ with distilled labels.npy '
-                    '+ symlinked features) into results/<model>/ that train.py can '
-                    'consume via --dataset-dir.')
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to distill from')
     parser.add_argument('--out-subdir', default='distilled-labels',
                         help='Subdirectory of results/<model>/ for the labels (default: distilled-labels)')

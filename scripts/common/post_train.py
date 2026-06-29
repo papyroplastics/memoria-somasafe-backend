@@ -1,15 +1,15 @@
 from pathlib import Path
 import matplotlib.pyplot as plt
+import tensorflow as tf
 
 from ml.training import History
 from ml.models.common import Trainer
 from ml.saving import save_tainable_model, save_optimized_model
 
-# Autoencoder evaluation report (per-score thresholds + metrics), written by
-# autoencoder_test.py into results/<model>/reports/ and read back by distill_labels.py.
 AE_TEST_REPORT = 'autoencoder_test.json'
 
-def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset, postfix: str = ''):
+def save_artifacts(trainer: Trainer, result_dir: Path, 
+                   eval_dataset: tf.data.Dataset | None, postfix: str = ''):
     saved_model, sm_path = save_tainable_model(result_dir, trainer.model, postfix)
     print(f"Saved trainable model to {sm_path}")
     try:

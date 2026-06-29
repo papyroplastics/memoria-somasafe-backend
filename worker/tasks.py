@@ -8,7 +8,7 @@ from sqlmodel import Session, select
 
 from worker.celery_app import app
 
-from common.config import DATASETS_DIR, RESULT_TTL_SECONDS, SEED, SERVE_GRACE_SECONDS
+from common.config import DATASETS_DIR, RESULT_TTL_SECONDS, SERVE_GRACE_SECONDS
 from common.db import (
     JobStatus,
     QuantizationJob,
@@ -17,7 +17,7 @@ from common.db import (
     utcnow,
 )
 
-from ml.model_list import MODELS, build_fingerprinted
+from ml.model_list import MODELS
 from ml.saving import get_optimized_model
 
 # Per-process cache of (model, representative_dataset, fingerprint), built once
@@ -30,9 +30,9 @@ _models: dict[str, tuple] = {}
 def _init_models() -> None:
     for key in MODELS:
         try:
-            trainer, fingerprint = build_fingerprinted(key, DATASETS_DIR, SEED)
-            eval_ds = trainer.combine(trainer.subject_datasets(DATASETS_DIR, SEED)[1])
-            rep = trainer.representative_dataset(eval_ds)
+            trainer = MODELS[key].build_trainer()
+            fingerprint = trainer.model.arch_fingerprint()
+            rep = trainer.representative_dataset(data_root=DATASETS_DIR)
             _models[key] = (trainer.model, rep, fingerprint)
         except Exception as exc:  # missing dataset / build error — skip, don't crash boot
             print(f"[worker] model '{key}' unavailable, skipping: {exc}")

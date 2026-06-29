@@ -1,3 +1,9 @@
+"""
+Plot one random 8-second window from a random subject for the
+clean signal and every anomaly kind, then a second figure with
+those same windows reconstructed by a trained autoencoder.
+"""
+
 import argparse
 
 import matplotlib.pyplot as plt
@@ -31,10 +37,7 @@ def window_views(data_dir, sid, window, index):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description='Plot one random 8-second window from a random subject for the '
-                    'clean signal and every anomaly kind, then a second figure with '
-                    'those same windows reconstructed by a trained autoencoder.')
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to use')
     parser.add_argument('--seed', type=int, default=None, help='RNG seed for the subject/window pick')
     args = parser.parse_args()
