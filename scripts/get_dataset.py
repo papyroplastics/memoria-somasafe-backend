@@ -3,7 +3,9 @@ Download + sequence the (idempotent) preprocessing stages in ml/data.py:
 
 Stage 1 → datasets/clean-signals/S*/    raw BVP (64 Hz) + ACC mag (32 Hz),
 z-scored demographics (static.npy); global BVP/ACC mean/std
-(norm-params.npy) + demographics mean/std (static_norm_params.npy)
+(norm-params.npy) + demographics mean/std (static_norm_params.npy) +
+activity-context norm params (context_norm_params.npy). A follow-up pass writes
+each subject's raw per-window activity context (context.npy, no-overlap 8 s grid).
 Stage 2 → datasets/anomalous-signals/<kind>/S*/  per-type fully-anomalous BVP (one kind
 applied to every window) — for isolated per-kind testing in autoencoder_test.py
 Stage 3 → datasets/mixed-signals/S*/      raw BVP with a window-aligned ~50% mix of anomaly
@@ -23,8 +25,8 @@ from common.config import DATASETS_DIR
 
 from ml.data import (
     RAW_SUBDIR, CLEAN_SUBDIR, ANOMALOUS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
-    extract_subject_signals, create_anomalous_signals, create_mixed_signals,
-    build_feature_dataset, get_sorted_paths
+    CONTEXT_FILE, extract_subject_signals, create_anomalous_signals, create_mixed_signals,
+    build_feature_dataset, build_context_pass, get_sorted_paths
 )
 
 DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'
@@ -74,6 +76,13 @@ if __name__ == '__main__':
         print(f"\nStage 1: Extracting raw signals into {subjects_dir}/ ...")
         written = extract_subject_signals(raw_dir, subjects_dir)
         print(f"Processed {len(written)} subjects")
+
+    subject_dirs = get_sorted_paths(subjects_dir)
+    if subject_dirs and all((d / CONTEXT_FILE).exists() for d in subject_dirs):
+        print(f"Context pass already present in {subjects_dir}")
+    else:
+        print(f"\nBuilding per-window context pass in {subjects_dir}/ ...")
+        build_context_pass(subjects_dir)
 
     if anomalous_dir.is_dir() and any(anomalous_dir.glob('*/S*')):
         print(f"{ANOMALOUS_SUBDIR} already present at {anomalous_dir}")

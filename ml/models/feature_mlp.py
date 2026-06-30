@@ -4,7 +4,7 @@ from tqdm import tqdm
 
 from ..layers import Dense
 from .common import TrainableModel, Trainer
-from ..data import MIXED_FEATURE_SUBDIR, N_FEATURES, get_sorted_paths
+from ..data import MIXED_FEATURE_SUBDIR, N_FEATURES, get_sorted_paths, load_feature_stats
 from ..optimizers import Adam
 
 
@@ -82,8 +82,10 @@ class FeatureMLPTrainer(Trainer):
         self.data_subdir = MIXED_FEATURE_SUBDIR
 
     def subject_dataset(self, subject_dir):
-        x = np.load(subject_dir / 'features.npy')
+        x = np.load(subject_dir / 'features.npy')          # raw, un-normalized on disk
         y = np.load(subject_dir / 'labels.npy')
+        mean, std = load_feature_stats(subject_dir.parent)
+        x = ((x - mean) / std).astype(np.float32)
 
         return tf.data.Dataset.from_tensor_slices((x, y))
 
@@ -91,12 +93,13 @@ class FeatureMLPTrainer(Trainer):
         if dataset is None:
             rng = np.random.default_rng()
             data_dir = data_root / self.data_subdir
+            mean, std = load_feature_stats(data_dir)
             all_x, all_y = [], []
             for subject_dir in get_sorted_paths(data_dir):
                 x = np.load(subject_dir / 'features.npy')
                 y = np.load(subject_dir / 'labels.npy')
                 idx = rng.choice(len(x), size=min(10, len(x)), replace=False)
-                all_x.append(x[idx])
+                all_x.append(((x[idx] - mean) / std).astype(np.float32))
                 all_y.append(y[idx])
             dataset = tf.data.Dataset.from_tensor_slices((
                 np.concatenate(all_x).astype(np.float32),

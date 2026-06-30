@@ -267,11 +267,12 @@ class AutoencoderTrainer(Trainer):
             all_signals, all_conds = [], []
             for subject_dir in get_sorted_paths(data_dir):
                 sid = subject_dir.name
-                norm = normalize(stacked_signal(data_dir, sid), *norm_stats(data_dir))
+                raw = stacked_signal(data_dir, sid)
+                norm = normalize(raw, *norm_stats(data_dir))
                 count = max(0, (len(norm) - self.window_size) // self.shift + 1)
                 if count == 0:
                     continue
-                cond = window_cond_vectors(data_dir, sid, norm, self.window_size, self.shift, count)
+                cond = window_cond_vectors(data_dir, sid, raw[:, 1], self.window_size, self.shift, count)
                 idx = rng.choice(count, size=min(10, count), replace=False)
                 all_signals.append(np.stack([norm[i * self.shift : i * self.shift + self.window_size] for i in idx]))
                 all_conds.append(cond[idx])
