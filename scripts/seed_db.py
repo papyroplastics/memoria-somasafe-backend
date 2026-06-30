@@ -4,8 +4,8 @@ and optionally a device from a factory NVS partition definition.
 Idempotent — run it after the services are up to bootstrap a fresh database:
 
     uv run -m scripts.db_seed                          # models + user
-    uv run -m scripts.db_seed firmware/factory_nvs.csv # also seed that device
-    uv run -m scripts.db_seed firmware/factory_nvs.csv --device-only
+    uv run -m scripts.db_seed ../firmware/factory_nvs.csv # also seed that device
+    uv run -m scripts.db_seed ../firmware/factory_nvs.csv --device-only
 """
 
 import argparse

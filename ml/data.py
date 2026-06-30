@@ -376,10 +376,7 @@ def create_mixed_signals(subjects_dir: Path, mixed_dir: Path):
 # ---------------------------------------------------------------------------
 
 def extract_features(bvp_window: np.ndarray, acc_window: np.ndarray) -> np.ndarray:
-    """17-feature vector from an 8-second BVP window (512 samples) and ACC window (256 samples).
-
-    Must stay in sync with firmware/main/ml/features.c.
-    """
+    """17-feature vector from an 8-second BVP window (512 samples) and ACC window (256 samples)"""
     feats: list[float] = []
 
     for ch in (bvp_window, acc_window):

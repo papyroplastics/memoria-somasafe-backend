@@ -1,5 +1,8 @@
 nvs_csv := ../firmware/factory_nvs.csv
 
+proto:
+	protoc --proto_path=shared --python_out=scripts/common shared/dataset.proto
+
 get-data:
 	uv run -m scripts.get_dataset
 seed-db:
