@@ -8,7 +8,7 @@ import argparse
 from pathlib import Path
 import tensorflow as tf
 
-from common.config import DATASETS_DIR, RESULTS_DIR, SEED
+from common.config import DATASETS_DIR, MODELS_DIR, SEED
 from ml.training import normal_loop
 from ml.saving import load_trainable_weights
 from ml.model_list import MODELS
@@ -25,7 +25,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     data_dir = DATASETS_DIR
-    result_dir = RESULTS_DIR / args.model
+    result_dir = MODELS_DIR / args.model
     report_dir = get_report_dir(result_dir)
 
     # Target: a fresh model at the default batch size — the one we fine-tune and export.

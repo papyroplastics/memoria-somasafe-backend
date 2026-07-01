@@ -10,7 +10,7 @@ import tensorflow as tf
 from ml.models.common import Trainer
 from ml.training import normal_loop, federated_loop, History
 from ml.model_list import MODELS
-from common.config import RESULTS_DIR, DATASETS_DIR, SEED
+from common.config import MODELS_DIR, DATASETS_DIR, SEED
 from .common.post_train import save_artifacts, plot_history, get_report_dir
 
 LOOP_OPTIONS = ['normal', 'federated']
@@ -51,7 +51,7 @@ if __name__ == "__main__":
 
     data_dir = args.dataset_dir
 
-    result_dir = RESULTS_DIR / args.model
+    result_dir = MODELS_DIR / args.model
     report_dir = get_report_dir(result_dir)
 
     trainer = MODELS[args.model].build_trainer(batch_size=args.batch_size)

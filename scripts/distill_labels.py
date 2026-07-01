@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from common.config import RESULTS_DIR, DATASETS_DIR
+from common.config import MODELS_DIR, DATASETS_DIR
 from ml.data import (
     CLEAN_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR, FEATURE_STATS_FILE,
     BVP_WINDOW, WINDOW_SECONDS, conditional_windows, get_sorted_paths
@@ -39,7 +39,7 @@ def relink(link: Path, target: Path):
 
 def load_thresholds(model_name: str) -> dict[str, float]:
     """Read the per-score thresholds picked by autoencoder_test.py."""
-    report_path = get_report_dir(RESULTS_DIR / model_name) / AE_TEST_REPORT
+    report_path = get_report_dir(MODELS_DIR / model_name) / AE_TEST_REPORT
     if not report_path.exists():
         raise SystemExit(
             f"no evaluation report at {report_path}. Run autoencoder_test '{model_name}' "
@@ -56,7 +56,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     data_dir = DATASETS_DIR
-    result_dir = RESULTS_DIR / args.model
+    result_dir = MODELS_DIR / args.model
 
     thresholds = load_thresholds(args.model)
     # batch_size=1 so every window is scored, no batch remainder dropped — the distilled

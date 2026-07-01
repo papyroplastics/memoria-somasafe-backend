@@ -9,7 +9,7 @@ import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 
-from common.config import DATASETS_DIR, RESULTS_DIR
+from common.config import DATASETS_DIR, MODELS_DIR
 from ml.model_list import MODELS
 from ml.data import (
     CLEAN_SUBDIR, ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_RATE,
@@ -87,7 +87,7 @@ if __name__ == "__main__":
     axs_rec[-1].set_xlabel('seconds')
     axs_rec[0].legend(loc='upper right')
 
-    report_dir = get_report_dir(RESULTS_DIR / args.model)
+    report_dir = get_report_dir(MODELS_DIR / args.model)
     in_path = report_dir / 'signals.png'
     rec_path = report_dir / 'signals_reconstructed.png'
     fig_in.savefig(in_path)

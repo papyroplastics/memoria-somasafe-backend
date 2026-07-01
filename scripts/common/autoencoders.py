@@ -2,7 +2,7 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 
-from common.config import RESULTS_DIR
+from common.config import MODELS_DIR
 from ml.saving import load_trainable_weights
 from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
@@ -37,7 +37,7 @@ def load_autoencoder(model_name: str, batch_size: int | None = None) -> Autoenco
         raise SystemExit(
             f"'{model_name}' is not an autoencoder; testing needs one (lstm-ae, gru-ae, cnn-ae).")
 
-    weights_path = RESULTS_DIR / model_name / 'trainable.tflite'
+    weights_path = MODELS_DIR / model_name / 'trainable.tflite'
     if not weights_path.exists():
         raise SystemExit(f"trained model not found at {weights_path}. Train '{model_name}' first.")
     trainer.model.restore(tf.constant(load_trainable_weights(weights_path)))

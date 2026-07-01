@@ -14,7 +14,7 @@ from common.config import (
     DOWNLOAD_COOLDOWN_SECONDS,
     QUANTIZE_DAILY_LIMIT,
     QUANTIZE_DAILY_WINDOW_SECONDS,
-    RESULTS_DIR,
+    MODELS_DIR,
 )
 from common.db import (
     GlobalWeights,
@@ -212,7 +212,7 @@ def download_model(artifact: Artifact, key: str,
     enforce_cooldown("download", user.id, key, DOWNLOAD_COOLDOWN_SECONDS)
     meta = require_model(session, key)
     return FileResponse(
-        path=RESULTS_DIR / key / f"{artifact.value}.tflite",
+        path=MODELS_DIR / key / f"{artifact.value}.tflite",
         filename=f"{key}-{artifact.value}.tflite",
         headers={FINGERPRINT_HEADER: meta.fingerprint},
     )

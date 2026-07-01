@@ -1,11 +1,11 @@
-"""Seed the database with default rows: the model registry and a default user,
-and optionally a device from a factory NVS partition definition.
+"""Seed the database with default rows: the model registry, a default user,
+and a device from a factory NVS partition definition.
 
 Idempotent — run it after the services are up to bootstrap a fresh database:
 
-    uv run -m scripts.db_seed                          # models + user
-    uv run -m scripts.db_seed ../firmware/factory_nvs.csv # also seed that device
-    uv run -m scripts.db_seed ../firmware/factory_nvs.csv --device-only
+    uv run -m scripts.db_seed # use default nvs path
+    uv run -m scripts.db_seed <nvs definition csv> # use specific device
+    uv run -m scripts.db_seed <nvs definition csv> --device-only
 """
 
 import argparse
@@ -15,7 +15,7 @@ from pathlib import Path
 from sqlmodel import Session, select
 
 from api.routes.auth import hash_password
-from common.config import RESULTS_DIR, SEED_EMAIL, SEED_PASSWORD, SEED_USER
+from common.config import MODELS_DIR, SEED_EMAIL, SEED_PASSWORD, SEED_USER
 from common.db import (
     Device,
     GlobalWeights,
@@ -28,13 +28,14 @@ from common.db import (
 from ml.model_list import MODELS
 from ml.saving import load_trainable_weights
 
+default_nvs = "shared/gen/factory_nvs.csv"
 
 def seed_models(session: Session) -> None:
     """Seed each model that has a trained artifact on disk. Building the model
     yields its architecture fingerprint; the trainable .tflite seeds the initial
     GlobalWeights. Untrained models are skipped — rerun once they're trained."""
     for key, spec in MODELS.items():
-        tflite = RESULTS_DIR / key / "trainable.tflite"
+        tflite = MODELS_DIR / key / "trainable.tflite"
         if not tflite.exists():
             print(f"  - model '{key}' skipped (no {tflite})")
             continue
@@ -118,14 +119,14 @@ def seed_device(session: Session, path: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("factory_nvs", type=Path, nargs="?",
+    parser.add_argument("factory_nvs", nargs='?', type=Path, default=Path(default_nvs),
                         help="factory NVS partition CSV to seed as a device")
     parser.add_argument("--device-only", action="store_true",
                         help="seed only the device, skipping the model registry and user")
     args = parser.parse_args()
 
-    if args.device_only and args.factory_nvs is None:
-        parser.error("--device-only requires a factory NVS CSV argument")
+    if not args.factory_nvs.exists():
+        parser.error(f"{args.factory_nvs} does not exist.")
 
     init_db()
     with Session(engine) as session:

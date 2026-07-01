@@ -15,7 +15,7 @@ import json
 from pathlib import Path
 import numpy as np
 
-from common.config import RESULTS_DIR, DATASETS_DIR
+from common.config import MODELS_DIR, DATASETS_DIR
 from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
 from ml.data import (
@@ -159,7 +159,7 @@ if __name__ == "__main__":
         'per_kind': per_kind,
     }
 
-    report_dir = get_report_dir(RESULTS_DIR / args.model)
+    report_dir = get_report_dir(MODELS_DIR / args.model)
     report_path = report_dir / AE_TEST_REPORT
     report_path.write_text(json.dumps(results, indent=2))
     print(f"\nWrote evaluation report to {report_path}")

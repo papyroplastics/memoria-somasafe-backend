@@ -2,8 +2,8 @@ import os
 from pathlib import Path
 
 # Storage of the trained artifacts served as-is (the train.py outputs).
-RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
-DATASETS_DIR = Path(os.environ.get("DATASETS_DIR", "datasets"))
+MODELS_DIR = Path(os.environ.get("MODELS_DIR", "shared/gen/models"))
+DATASETS_DIR = Path(os.environ.get("DATASETS_DIR", "shared/gen/datasets"))
 
 # PostgreSQL (SQLModel/SQLAlchemy URL) and the Celery broker.
 DATABASE_URL = os.environ.get(
