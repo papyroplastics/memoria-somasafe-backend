@@ -10,9 +10,9 @@ import tensorflow as tf
 
 from common.config import DATASETS_DIR, MODELS_DIR, SEED
 from ml.training import normal_loop
-from ml.saving import load_trainable_weights
+from ml.saving import load_trainable_weights, save_artifacts
 from ml.model_list import MODELS
-from .common.post_train import save_artifacts, plot_history, get_report_dir
+from .common.post_train import plot_history, get_report_dir
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
@@ -51,6 +51,6 @@ if __name__ == "__main__":
     train_dataset, eval_dataset = target_trainer.combined_datasets(data_dir, 0.9)
     history = normal_loop(target_trainer, train_dataset, eval_dataset, args.epochs)
 
-    save_artifacts(target_trainer, result_dir, eval_dataset)
+    save_artifacts(target_trainer, result_dir, eval_dataset, data_dir)
     plot_history(history, target_trainer.primary_metric, report_dir)
     target_trainer.report(report_dir, eval_dataset)

@@ -1,8 +1,10 @@
+import json
 import tempfile
 from pathlib import Path
 import numpy as np
 import tensorflow as tf
-from .models.common import TrainableModel
+from common.config import NORM_PARAMS_FILE
+from .models.common import TrainableModel, Trainer
 
 def optimize_saved_model(rep_dataset: tf.data.Dataset, saved_dir: Path) -> bytes:
     def rep_iter():
@@ -58,6 +60,26 @@ def load_trainable_weights(tflite_path: Path) -> np.ndarray:
     interpreter = tf.lite.Interpreter(model_path=str(tflite_path))
     save = interpreter.get_signature_runner('save')
     return np.asarray(save()['parameters'], dtype=np.float32)
+
+
+def save_norm_params(result_dir: Path, trainer: Trainer, data_root: Path):
+    """Serialize the trainer's model-specific normalization params to norm.json, so the
+    gateway can serve them per model over /model/norm and the device applies them at load."""
+    path = result_dir / NORM_PARAMS_FILE
+    path.write_text(json.dumps(trainer.norm_params(data_root)))
+    print(f"saved norm params to {path}")
+
+
+def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset: tf.data.Dataset | None,
+                   data_root: Path, postfix: str = ''):
+    saved_model, sm_path = save_tainable_model(result_dir, trainer.model, postfix)
+    print(f"Saved trainable model to {sm_path}")
+    try:
+        rep_dataset = trainer.representative_dataset(eval_dataset)
+        save_optimized_model(result_dir, trainer.model, rep_dataset, postfix)
+    except Exception as e:
+        print(f"Skipped int8 export (conversion failed): {e}")
+    save_norm_params(result_dir, trainer, data_root)
 
 
 def get_optimized_model(model: TrainableModel, rep_dataset: tf.data.Dataset) -> bytes:

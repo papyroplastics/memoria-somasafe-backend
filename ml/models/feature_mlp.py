@@ -148,6 +148,12 @@ class FeatureMLPTrainer(Trainer):
             total += float(y.shape[0])
         return {'accuracy': correct / total if total else 0.0}
 
+    def norm_params(self, data_root):
+        mean, std = load_feature_stats(data_root / self.data_subdir)   # per feature
+        features = {'mean': mean.tolist(), 'std': std.tolist()}
+        # labels (train's second input) are never normalized.
+        return {'eval': {'features': features}, 'train': {'features': features}}
+
 
 def get_trainer(batch_size: int | None = None) -> FeatureMLPTrainer:
     batch_size = batch_size or FeatureMLPTrainer.default_batch_size

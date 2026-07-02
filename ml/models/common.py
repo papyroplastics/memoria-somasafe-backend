@@ -13,6 +13,7 @@ from ..data import (
     DatasetUnavailibleError, CLEAN_SUBDIR, BVP_RATE,
     windowed_conditional, get_sorted_paths, combine_datasets,
     stacked_signal, normalize, norm_stats, window_cond_vectors,
+    load_context_norm_params, load_static_norm_params,
 )
 
 class UnboundError(NotImplementedError):
@@ -179,6 +180,16 @@ class Trainer(ABC):
         """Metrics relevant to this model type (accuracy, recon error, ...).
         ``prefix`` labels the progress bar (e.g. ``epoch=3/20``)."""
 
+    @abstractmethod
+    def norm_params(self, data_root: Path) -> dict:
+        """Normalization params this model's inputs are z-scored with, shipped to the
+        device (``/model/norm``) and applied there as ``(x - mean) / std``.
+
+        Model-specific because only some inputs need normalizing and their params come
+        from different stats. Shape: one entry per signature that consumes normalized
+        inputs, each mapping an input name to its ``{'mean': [...], 'std': [...]}`` — one
+        pair per channel of that input's non-batch dimension, broadcast over the rest."""
+
     def train_epoch(self, dataset: tf.data.Dataset, prefix: str = '') -> float:
         """One pass over ``dataset``; returns mean training loss. """
         batches = len(dataset)
@@ -289,6 +300,20 @@ class AutoencoderTrainer(Trainer):
                   for batch in tqdm(dataset, total=len(dataset),
                                     desc=f'{prefix} eval'.strip(), leave=False)]
         return {'recon_error': float(tf.reduce_mean(tf.concat(errors, axis=0)))}
+
+    def norm_params(self, data_root):
+        subjects_dir = data_root / self.data_subdir
+        sig_mean, sig_std = norm_stats(subjects_dir)                 # per signal channel
+        stat_mean, stat_std = load_static_norm_params(subjects_dir)  # 6-d demographics
+        ctx_mean, ctx_std = load_context_norm_params(subjects_dir)   # 2-d activity context
+        signal = {'mean': sig_mean.tolist(), 'std': sig_std.tolist()}
+        # cond = [static(6), context(2)], matching window_cond_vectors.
+        cond = {
+            'mean': np.concatenate([stat_mean, ctx_mean]).tolist(),
+            'std': np.concatenate([stat_std, ctx_std]).tolist(),
+        }
+        params = {'signal': signal, 'cond': cond}
+        return {'eval': params, 'train': params}
 
     def report(self, result_dir, eval_dataset):
         import matplotlib.pyplot as plt

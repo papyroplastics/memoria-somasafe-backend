@@ -8,10 +8,11 @@ from pathlib import Path
 import tensorflow as tf
 
 from ml.models.common import Trainer
+from ml.saving import save_artifacts
 from ml.training import normal_loop, federated_loop, History
 from ml.model_list import MODELS
 from common.config import MODELS_DIR, DATASETS_DIR, SEED
-from .common.post_train import save_artifacts, plot_history, get_report_dir, stage_norm_params
+from .common.post_train import plot_history, get_report_dir
 
 LOOP_OPTIONS = ['normal', 'federated']
 
@@ -58,7 +59,6 @@ if __name__ == "__main__":
     history, eval_dataset = run_loop(trainer, data_dir, args.loop, args.split, args.epochs, args.local_epochs)
 
     postfix = '' if trainer.batch_size == trainer.default_batch_size else f'_{trainer.batch_size}'
-    save_artifacts(trainer, result_dir, eval_dataset, postfix)
-    stage_norm_params(result_dir, data_dir)
+    save_artifacts(trainer, result_dir, eval_dataset, data_dir, postfix)
     plot_history(history, trainer.primary_metric, report_dir)
     trainer.report(report_dir, eval_dataset)
