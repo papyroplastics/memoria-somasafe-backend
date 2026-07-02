@@ -11,7 +11,7 @@ from ml.models.common import Trainer
 from ml.training import normal_loop, federated_loop, History
 from ml.model_list import MODELS
 from common.config import MODELS_DIR, DATASETS_DIR, SEED
-from .common.post_train import save_artifacts, plot_history, get_report_dir
+from .common.post_train import save_artifacts, plot_history, get_report_dir, stage_norm_params
 
 LOOP_OPTIONS = ['normal', 'federated']
 
@@ -59,5 +59,6 @@ if __name__ == "__main__":
 
     postfix = '' if trainer.batch_size == trainer.default_batch_size else f'_{trainer.batch_size}'
     save_artifacts(trainer, result_dir, eval_dataset, postfix)
+    stage_norm_params(result_dir, data_dir)
     plot_history(history, trainer.primary_metric, report_dir)
     trainer.report(report_dir, eval_dataset)

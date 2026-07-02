@@ -44,11 +44,11 @@ import numpy as np
 from common.config import DATASETS_DIR
 from ml.data import (
     MIXED_SUBDIR, CLEAN_SUBDIR, MIXED_FEATURE_SUBDIR, CONTEXT_FILE,
-    BVP_WINDOW, ACC_WINDOW, WINDOW_SECONDS,
+    BVP_WINDOW, ACC_WINDOW, WINDOW_SECONDS, load_static_norm_params,
 )
 from .common import dataset_pb2 as pb
 
-FORMAT_VERSION = 3
+FORMAT_VERSION = 4
 
 
 def window_raw(signal: np.ndarray, window: int, count: int) -> np.ndarray:
@@ -75,7 +75,8 @@ def export_subject(subject: int, datasets_dir: Path, out_path: Path,
     feat_path  = datasets_dir / MIXED_FEATURE_SUBDIR / sid / 'features.npy'
     label_path = datasets_dir / MIXED_FEATURE_SUBDIR / sid / 'labels.npy'
     ctx_path   = datasets_dir / CLEAN_SUBDIR       / sid / CONTEXT_FILE
-    required = [bvp_path, acc_path, feat_path, label_path]
+    static_path = datasets_dir / CLEAN_SUBDIR      / sid / 'static.npy'
+    required = [bvp_path, acc_path, feat_path, label_path, static_path]
     if include_context:
         required.append(ctx_path)
     for path in required:
@@ -87,6 +88,13 @@ def export_subject(subject: int, datasets_dir: Path, out_path: Path,
     features = np.load(feat_path).astype(np.float32)          # (N, 17) raw
     labels   = np.load(label_path).astype(np.float32).reshape(-1)
     context  = np.load(ctx_path).astype(np.float32) if include_context else None  # (N, 2) raw
+
+    # Recover the subject's raw 6-d demographics by de-normalizing the stored static
+    # vector: static.npy is z-scored, so raw = norm * std + mean. Ships raw so the phone
+    # re-normalizes with the same static_norm_params it pulls from /model/norm.
+    stat_mean, stat_std = load_static_norm_params(datasets_dir / CLEAN_SUBDIR)
+    static_norm = np.load(static_path).astype(np.float32)     # (6,) z-scored
+    static_raw = (static_norm * stat_std + stat_mean).astype(np.float32)
 
     # Align to the windows every source agrees on (same indexing as build_feature_dataset).
     lengths = [len(features), len(labels), len(bvp) // BVP_WINDOW, len(acc) // ACC_WINDOW]
@@ -126,7 +134,8 @@ def export_subject(subject: int, datasets_dir: Path, out_path: Path,
         data_present = present_mask(count, missing_samples, rng)
         feat_present = present_mask(count, missing_features, rng)
 
-    dataset = pb.CaptureDataset(format_version=FORMAT_VERSION, subject=subject)
+    dataset = pb.CaptureDataset(format_version=FORMAT_VERSION, subject=subject,
+                                static=static_raw.tobytes())
     for i in range(count):
         if not (data_present[i] or feat_present[i]):
             continue                                # neither half survived: real seq gap

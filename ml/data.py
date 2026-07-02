@@ -522,6 +522,13 @@ def load_context_norm_params(subjects_dir: Path) -> tuple[np.ndarray, np.ndarray
     return params[0].astype(np.float32), params[1].astype(np.float32)
 
 
+def load_static_norm_params(subjects_dir: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Per-demographic ``(mean, std)`` saved by Stage 1, applied to the raw 6-d
+    static vector at load time (and shipped to the device via ``/model/norm``)."""
+    params = np.load(subjects_dir / STATIC_NORM_PARAMS_FILE)
+    return params[0].astype(np.float32), params[1].astype(np.float32)
+
+
 def normalize_context(subjects_dir: Path, ctx_raw: np.ndarray) -> np.ndarray:
     mean, std = load_context_norm_params(subjects_dir)
     return ((ctx_raw - mean) / std).astype(np.float32)
