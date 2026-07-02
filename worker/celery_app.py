@@ -1,6 +1,6 @@
 from celery import Celery
 
-from common.config import BROKER_URL, CLEANUP_INTERVAL_SECONDS
+from common.config import BROKER_URL, CLEANUP_INTERVAL_SECONDS, FED_AGG_INTERVAL_SECONDS
 
 app = Celery("somasafe", broker=BROKER_URL)
 
@@ -12,6 +12,10 @@ app.conf.update(
         "cleanup-results": {
             "task": "worker.tasks.cleanup_results",
             "schedule": float(CLEANUP_INTERVAL_SECONDS),
+        },
+        "federated-aggregation": {
+            "task": "worker.tasks.federated_aggregation",
+            "schedule": float(FED_AGG_INTERVAL_SECONDS),
         },
     },
 )

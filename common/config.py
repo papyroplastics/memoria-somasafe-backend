@@ -24,6 +24,11 @@ CLEANUP_INTERVAL_SECONDS = int(os.environ.get("CLEANUP_INTERVAL_SECONDS", 120))
 # Seed used to rebuild the representative dataset for int8 calibration.
 SEED = int(os.environ.get("SEED", 1234))
 
+# --- Federated aggregation (see worker.tasks.federated_aggregation) ---
+FED_AGG_INTERVAL_SECONDS = int(os.environ.get("FED_AGG_INTERVAL_SECONDS", 86400))
+# Minimum valid submissions a model needs in the window for a round to run.
+FED_MIN_SUBMISSIONS = int(os.environ.get("FED_MIN_SUBMISSIONS", 1))
+
 # --- Auth (stateful opaque tokens, see api.routes.auth) ---
 ACCESS_TOKEN_TTL_SECONDS = int(os.environ.get("ACCESS_TOKEN_TTL_SECONDS", 1800))      # 30 min
 REFRESH_TOKEN_TTL_SECONDS = int(os.environ.get("REFRESH_TOKEN_TTL_SECONDS", 2592000))  # 30 days

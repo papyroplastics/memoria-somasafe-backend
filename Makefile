@@ -12,7 +12,7 @@ shared:
 proto: shared
 	protoc --proto_path=shared --python_out=scripts/common shared/dataset.proto
 
-get-data:
+get-data: shared
 	uv run -m scripts.get_dataset
 seed-db:
 	uv run -m scripts.seed_db

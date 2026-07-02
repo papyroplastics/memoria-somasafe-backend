@@ -1,3 +1,6 @@
+from collections.abc import Sequence
+
+import numpy as np
 import tensorflow as tf
 
 from .models.common import Trainer
@@ -5,14 +8,15 @@ from .models.common import Trainer
 History = list[tuple[int, float, dict[str, float]]]
 
 
-def fed_avg(vectors: list[tf.Tensor], sizes: list[int]) -> tf.Tensor:
-    total = sum(sizes)
-    avg = tf.zeros(vectors[0].shape)
-
-    for vector, size in zip(vectors, sizes):
-        avg += vector * (size / total)
-
-    return avg
+def fed_avg(vectors: Sequence[tf.Tensor | np.ndarray],
+            sizes: Sequence[int] | None = None) -> np.ndarray:
+    """FedAvg of flat parameter vectors, weighted by client dataset size
+    (uniform when ``sizes`` is None, as in the backend where submissions carry
+    no sample counts). Shared by the simulated ``federated_loop`` and the
+    backend aggregation task so simulation matches deployment."""
+    stacked = np.stack([np.asarray(vector) for vector in vectors])
+    weights = None if sizes is None else np.asarray(sizes, dtype=stacked.dtype)
+    return np.average(stacked, axis=0, weights=weights)
 
 
 def _format(metrics: dict[str, float]) -> str:

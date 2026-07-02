@@ -99,24 +99,33 @@ class ModelDefinition(SQLModel, table=True):
 class GlobalWeights(SQLModel, table=True):
     """A snapshot of a model's global parameters. Seeded from the trained tflite
     and appended to by aggregation. The active weights of a model are the latest
-    row matching its current ``fingerprint``; ``created_at`` is the weight
-    version clients compare against to decide when to re-pull weights."""
+    **valid** row matching its current ``fingerprint``; ``created_at`` is the
+    weight version clients compare against to decide when to re-pull weights.
+    ``valid`` is a hand-operated kill switch: set it to false to roll back an
+    aggregation round that made the model worse. ``mse_threshold`` is the
+    allowed submission error computed by that round (None on seeded rows, which
+    skips the check in weight validation)."""
 
     id: int | None = Field(default=None, primary_key=True)
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     fingerprint: str = Field(foreign_key="modelfingerprint.fingerprint", index=True)
     parameters: bytes          # packed float32 (np.float32 .tobytes())
     param_count: int
+    valid: bool = True
+    mse_threshold: float | None = None
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
 class WeightSubmission(SQLModel, table=True):
     """A client-uploaded weight update. Persisted indefinitely: besides feeding
-    quantization, these rows are the substrate for the future aggregation step,
-    so the worker only ever reads them. ``base_weights_id`` is the GlobalWeights
-    snapshot the client trained from; ``fingerprint`` (its architecture) is
-    denormalized off it so aggregation can filter without a join and never mixes
-    incompatible updates."""
+    quantization, these rows are the substrate for federated aggregation
+    (worker.tasks.federated_aggregation). ``base_weights_id`` is the
+    GlobalWeights snapshot the client trained from; ``fingerprint`` (its
+    architecture) is denormalized off it so aggregation can filter without a
+    join and never mixes incompatible updates. ``valid`` is the cached
+    weight-validation verdict — None until validated; normally set by
+    quantize_submission, and by aggregation for rows that never went through
+    a quantization job."""
 
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
@@ -125,6 +134,7 @@ class WeightSubmission(SQLModel, table=True):
     fingerprint: str = Field(foreign_key="modelfingerprint.fingerprint", index=True)
     parameters: bytes          # packed float32 (np.float32 .tobytes())
     param_count: int
+    valid: bool | None = None
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -166,16 +176,18 @@ def get_model_def(session: Session, key: str) -> ModelDefinition | None:
 
 
 def get_latest_weights(session: Session, key: str) -> GlobalWeights | None:
-    """The model's active weights: the newest GlobalWeights row matching its
-    current architecture fingerprint. ``None`` if the model is unknown or has no
-    compatible weights yet (e.g. right after an architecture change)."""
+    """The model's active weights: the newest **valid** GlobalWeights row
+    matching its current architecture fingerprint. ``None`` if the model is
+    unknown or has no compatible weights yet (e.g. right after an architecture
+    change, or every compatible row was invalidated by hand)."""
     meta = session.get(ModelDefinition, key)
     if meta is None:
         return None
     return session.exec(
         select(GlobalWeights)
         .where(GlobalWeights.model_key == key,
-               GlobalWeights.fingerprint == meta.fingerprint)
+               GlobalWeights.fingerprint == meta.fingerprint,
+               GlobalWeights.valid == True)  # noqa: E712 — SQL expression
         .order_by(GlobalWeights.created_at.desc())  # type: ignore[attr-defined]
     ).first()
 

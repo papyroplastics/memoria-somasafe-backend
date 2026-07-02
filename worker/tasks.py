@@ -7,18 +7,32 @@ from sqlalchemy import and_, or_
 from sqlmodel import Session, select
 
 from worker.celery_app import app
+from worker.utils.weight_validation import (
+    compute_mse_threshold,
+    filter_outliers,
+    mse,
+    validate_submission,
+)
 
-from common.config import DATASETS_DIR, RESULT_TTL_SECONDS, SERVE_GRACE_SECONDS
+from common.config import (
+    DATASETS_DIR,
+    FED_MIN_SUBMISSIONS,
+    RESULT_TTL_SECONDS,
+    SERVE_GRACE_SECONDS,
+)
 from common.db import (
+    GlobalWeights,
     JobStatus,
     QuantizationJob,
     WeightSubmission,
     engine,
+    get_latest_weights,
     utcnow,
 )
 
 from ml.model_list import MODELS
 from ml.saving import get_optimized_model
+from ml.training import fed_avg
 
 # Per-process cache of (model, representative_dataset, fingerprint), built once
 # at startup so TensorFlow and the calibration data load once per worker, not
@@ -64,6 +78,13 @@ def quantize_submission(job_id: str) -> None:
                 raise ValueError(
                     f"submission fingerprint {submission.fingerprint} != "
                     f"current {fingerprint} for '{job.model_key}'")
+            reason = validate_submission(
+                submission, model.total_parameter_size,
+                get_latest_weights(session, job.model_key))
+            submission.valid = reason is None
+            session.add(submission)
+            if reason is not None:
+                raise ValueError(f"invalid submission: {reason}")
             params = np.frombuffer(submission.parameters, dtype=np.float32).copy()
             model.restore(tf.constant(params, dtype=tf.float32))
             job.result = bytes(get_optimized_model(model, rep_dataset))
@@ -75,6 +96,84 @@ def quantize_submission(job_id: str) -> None:
             job.finished_at = utcnow()
             session.add(job)
             session.commit()
+
+
+def _aggregate_model(session: Session, key: str) -> str:
+    if key not in _models:
+        return "skipped: model not initialized"
+    model, _, fingerprint = _models[key]
+
+    reference = get_latest_weights(session, key)
+    if reference is None:
+        return "skipped: no active global weights"
+
+    # Window since the newest snapshot regardless of validity: submissions
+    # consumed by a later-invalidated round are not re-aggregated.
+    cutoff = session.exec(
+        select(GlobalWeights.created_at)
+        .where(GlobalWeights.model_key == key,
+               GlobalWeights.fingerprint == fingerprint)
+        .order_by(GlobalWeights.created_at.desc())  # type: ignore[attr-defined]
+    ).first()
+
+    submissions = list(session.exec(
+        select(WeightSubmission)
+        .where(WeightSubmission.model_key == key,
+               WeightSubmission.fingerprint == fingerprint,
+               WeightSubmission.created_at > cutoff)
+        .order_by(WeightSubmission.created_at.asc())  # type: ignore[attr-defined]
+    ))
+    latest_per_user = {sub.user_id: sub for sub in submissions}
+
+    valid: list[WeightSubmission] = []
+    for sub in latest_per_user.values():
+        if sub.valid is None:  # never went through quantization's validation
+            reason = validate_submission(sub, model.total_parameter_size, reference)
+            sub.valid = reason is None
+            session.add(sub)
+            if reason is not None:
+                print(f"[aggregation] {key}: submission {sub.id} rejected: {reason}")
+        if sub.valid:
+            valid.append(sub)
+    session.commit()
+
+    if len(valid) < FED_MIN_SUBMISSIONS:
+        return (f"skipped: {len(valid)} valid submissions "
+                f"(min {FED_MIN_SUBMISSIONS}, {len(submissions)} in window)")
+
+    vectors = np.stack([np.frombuffer(sub.parameters, dtype=np.float32)
+                        for sub in valid])
+    kept = vectors[filter_outliers(vectors)]
+
+    reference_params = np.frombuffer(reference.parameters, dtype=np.float32)
+    averaged = fed_avg(kept).astype(np.float32)
+
+    session.add(GlobalWeights(
+        model_key=key, fingerprint=fingerprint,
+        parameters=averaged.tobytes(),
+        param_count=model.total_parameter_size,
+        mse_threshold=compute_mse_threshold(
+            [mse(vector, reference_params) for vector in kept]),
+    ))
+    session.commit()
+    return (f"aggregated {len(kept)} submissions "
+            f"({len(submissions)} in window, {len(latest_per_user)} users, "
+            f"{len(valid) - len(kept)} outliers dropped)")
+
+
+@app.task(name="worker.tasks.federated_aggregation")
+def federated_aggregation(model_key: str | None = None) -> dict[str, str]:
+    """One FedAvg round per model over the submissions accumulated since its
+    last GlobalWeights snapshot, keeping only each user's latest. Runs for every
+    initialized model unless ``model_key`` narrows it; a model is skipped when
+    fewer than FED_MIN_SUBMISSIONS submissions survive validation."""
+    keys = [model_key] if model_key is not None else list(_models)
+    summary: dict[str, str] = {}
+    with Session(engine) as session:
+        for key in keys:
+            summary[key] = _aggregate_model(session, key)
+            print(f"[aggregation] {key}: {summary[key]}")
+    return summary
 
 
 @app.task(name="worker.tasks.cleanup_results")
