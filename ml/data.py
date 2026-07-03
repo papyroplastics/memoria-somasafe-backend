@@ -20,6 +20,7 @@ CLEAN_SUBDIR = 'clean-signals'
 ANOMALOUS_SUBDIR = 'anomalous-signals'      # per-type fully-anomalous BVP: <kind>/S*/
 MIXED_SUBDIR = 'mixed-signals'              # realistic ~50% mix: S*/ (bvp + binary labels)
 MIXED_FEATURE_SUBDIR = 'mixed-features'     # features windowed from mixed-signals
+CLEAN_FEATURE_SUBDIR = 'clean-features'     # features windowed from clean-signals (all-normal)
 NORM_PARAMS_FILE = 'norm-params.npy'
 STATIC_NORM_PARAMS_FILE = 'static_norm_params.npy'
 CONTEXT_NORM_PARAMS_FILE = 'context_norm_params.npy'
@@ -408,16 +409,16 @@ def extract_features(bvp_window: np.ndarray, acc_window: np.ndarray) -> np.ndarr
     return np.asarray(feats, dtype=np.float32)
 
 
-def build_feature_dataset(mixed_dir: Path, subjects_dir: Path, feature_dir: Path):
-    """Window mixed-anomaly BVP and raw ACC into non-overlapping 8-second windows and
-    extract features.
+def build_feature_dataset(signal_dir: Path, subjects_dir: Path, feature_dir: Path):
+    """Window BVP and raw ACC into non-overlapping 8-second windows and extract features.
 
-    BVP comes from mixed-signals (raw with the anomaly mix, un-normalized).
-    ACC comes from clean-signals (raw magnitude, 32 Hz).
-    Per-window labels are taken straight from mixed-signals (anomalies are
-    window-aligned, so each window is fully clean or fully anomalous).
-    Features are stored per subject under S*/ raw (un-normalized), mirroring what
-    the device echoes; the global z-score stats are saved at the top level
+    BVP comes from ``signal_dir`` (raw, un-normalized): mixed-signals for the training
+    set, or clean-signals for the anomaly-free export set. ACC comes from clean-signals
+    (raw magnitude, 32 Hz). Per-window labels are read from ``signal_dir/S*/labels.npy``
+    when present (mixed anomalies are window-aligned, so each window is fully clean or
+    fully anomalous); the clean signals carry no labels file, so every window is normal
+    (label 0). Features are stored per subject under S*/ raw (un-normalized), mirroring
+    what the device echoes; the global z-score stats are saved at the top level
     (feature_stats.npy) and applied at load time (see FeatureMLPTrainer.subject_dataset).
     """
     feature_dir.mkdir(parents=True, exist_ok=True)
@@ -425,16 +426,19 @@ def build_feature_dataset(mixed_dir: Path, subjects_dir: Path, feature_dir: Path
     per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
 
     print("Building feature dataset from:", end="")
-    for subject_dir in get_sorted_paths(mixed_dir):
+    for subject_dir in get_sorted_paths(signal_dir):
         subject_id = subject_dir.name
-        bvp = np.load(subject_dir / 'bvp.npy')          # mixed-anomaly BVP
-        win_lbl = np.load(subject_dir / 'labels.npy')   # per-window labels
+        bvp = np.load(subject_dir / 'bvp.npy')          # mixed-anomaly or clean BVP
         acc = np.load(subjects_dir / subject_id / 'acc.npy')
 
         n_windows = min(
-            len(win_lbl),
+            len(bvp) // BVP_WINDOW,
             (len(acc) - ACC_WINDOW) // ACC_WINDOW + 1,
         )
+
+        label_path = subject_dir / 'labels.npy'
+        win_lbl = (np.load(label_path) if label_path.exists()
+                   else np.zeros(max(0, n_windows), dtype=np.float32))
 
         features: list[np.ndarray] = []
         labels:   list[float]      = []

@@ -12,6 +12,9 @@ Stage 3 → datasets/mixed-signals/S*/      raw BVP with a window-aligned ~50% m
 kinds + per-window binary label bitmap (labels.npy) — the realistic training/distill set
 Stage 4 → datasets/mixed-features/S*/     per-subject non-overlapping 8 s windowed feature
 vectors + labels (from mixed-signals), global standardization stats at the top level
+Stage 5 → datasets/clean-features/S*/     the same feature/label windows built from the
+clean signals (every window normal, label 0); lets scripts/export_subject_data.py ship
+precomputed features for --clean exports (on-device feature extraction is too slow).
 Signals are stored raw; z-score normalization happens at load time (no
 normalized copy on disk), so signal windows align 1:1 with the feature windows.
 """
@@ -25,8 +28,8 @@ from common.config import DATASETS_DIR
 
 from ml.data import (
     RAW_SUBDIR, CLEAN_SUBDIR, ANOMALOUS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
-    CONTEXT_FILE, extract_subject_signals, create_anomalous_signals, create_mixed_signals,
-    build_feature_dataset, build_context_pass, get_sorted_paths
+    CLEAN_FEATURE_SUBDIR, CONTEXT_FILE, extract_subject_signals, create_anomalous_signals,
+    create_mixed_signals, build_feature_dataset, build_context_pass, get_sorted_paths
 )
 
 DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'
@@ -64,6 +67,7 @@ if __name__ == '__main__':
     anomalous_dir = datasets_dir / ANOMALOUS_SUBDIR
     mixed_dir     = datasets_dir / MIXED_SUBDIR
     feature_dir   = datasets_dir / MIXED_FEATURE_SUBDIR
+    clean_feature_dir = datasets_dir / CLEAN_FEATURE_SUBDIR
 
     if raw_dir.is_dir():
         print(f"Raw dataset already present at {raw_dir}")
@@ -101,3 +105,9 @@ if __name__ == '__main__':
     else:
         print(f"\nStage 4: Building feature dataset in {feature_dir}/ ...")
         build_feature_dataset(mixed_dir, subjects_dir, feature_dir)
+
+    if clean_feature_dir.is_dir():
+        print(f"{CLEAN_FEATURE_SUBDIR} already present at {clean_feature_dir}")
+    else:
+        print(f"\nStage 5: Building clean feature dataset in {clean_feature_dir}/ ...")
+        build_feature_dataset(subjects_dir, subjects_dir, clean_feature_dir)
