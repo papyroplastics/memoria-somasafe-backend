@@ -11,7 +11,7 @@ from ml.models.common import Trainer
 from ml.saving import save_artifacts
 from ml.training import normal_loop, federated_loop, History
 from ml.model_list import MODELS
-from common.config import MODELS_DIR, DATASETS_DIR, SEED
+from common.config import MODELS_DIR, DATASETS_DIR
 from .common.post_train import plot_history, get_report_dir
 
 LOOP_OPTIONS = ['normal', 'federated']
@@ -24,7 +24,7 @@ def run_loop(trainer: Trainer, data_dir: Path, loop: str, split: float,
         history = normal_loop(trainer, train_dataset, eval_dataset, epochs)
 
     elif loop == 'federated':
-        train_datasets, eval_dataset  = trainer.subject_datasets(data_dir, SEED)
+        train_datasets, eval_dataset  = trainer.subject_datasets(data_dir, split)
         history = federated_loop(trainer, train_datasets, eval_dataset, local_epochs, epochs)
 
     else:
@@ -38,8 +38,8 @@ if __name__ == "__main__":
     parser.add_argument('model', choices=sorted(MODELS), help='Model to train')
     parser.add_argument('--loop', choices=LOOP_OPTIONS, default='normal', help='Training loop (default: normal)')
     parser.add_argument('--split', type=float, default=0.9, help='Train/eval data split')
-    parser.add_argument('--epochs', type=int, default=20, help='Epochs for the normal loop')
-    parser.add_argument('--local-epochs', type=int, default=5, help='Local epochs per round (federated)')
+    parser.add_argument('--epochs', type=int, default=5, help='Epochs for the normal loop')
+    parser.add_argument('--local-epochs', type=int, default=2, help='Local epochs per round (federated)')
     parser.add_argument('--batch-size', type=int, default=None,
                         help='Override the model default batch size. Artifacts from a '
                              'non-default batch size are suffixed (e.g. trainable_32.tflite).')

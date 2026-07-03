@@ -218,10 +218,10 @@ class Trainer(ABC):
             ds = ds.shuffle(len(ds)).batch(self.batch_size, drop_remainder=True)
 
             n_train = int(len(ds) * train_split)
-            subj_train.append(ds.take(n_train))
-            subj_eval.append(ds.skip(n_train))
+            subj_train.append(ds.take(n_train).cache())
+            subj_eval.append(ds.skip(n_train).cache())
 
-        return subj_train, combine_datasets(subj_eval)
+        return subj_train, combine_datasets(subj_eval).cache()
 
     def combined_datasets(
             self, data_root: Path, train_split: float
