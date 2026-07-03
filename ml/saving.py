@@ -75,7 +75,7 @@ def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset: tf.data.Dat
     saved_model, sm_path = save_tainable_model(result_dir, trainer.model, postfix)
     print(f"Saved trainable model to {sm_path}")
     try:
-        rep_dataset = trainer.representative_dataset(eval_dataset)
+        rep_dataset = trainer.representative_dataset(dataset=eval_dataset)
         save_optimized_model(result_dir, trainer.model, rep_dataset, postfix)
     except Exception as e:
         print(f"Skipped int8 export (conversion failed): {e}")

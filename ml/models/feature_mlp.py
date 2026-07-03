@@ -2,7 +2,7 @@ import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 
-from ..layers import Dense
+from ..layers import Dense, relu
 from .common import TrainableModel, Trainer
 from ..data import MIXED_FEATURE_SUBDIR, N_FEATURES, get_sorted_paths, load_feature_stats
 from ..optimizers import Adam
@@ -28,10 +28,10 @@ class FeatureMLP(TrainableModel):
         self.in_shape = (batch_size, n_features)
         self.label_shape = (batch_size, 1)
 
-        self.in_layer = Dense(n_features, hidden_dim, activation=tf.nn.relu)
+        self.in_layer = Dense(n_features, hidden_dim, activation=relu)
         self.out_layer = Dense(hidden_dim, 1)
         self.hidden_layers = [
-            Dense(hidden_dim, hidden_dim, activation=tf.nn.relu) for _ in range(hidden_layers)
+            Dense(hidden_dim, hidden_dim, activation=relu) for _ in range(hidden_layers)
         ]
 
         self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
@@ -89,7 +89,7 @@ class FeatureMLPTrainer(Trainer):
 
         return tf.data.Dataset.from_tensor_slices((x, y))
 
-    def representative_dataset(self, dataset=None, *, data_root=None):
+    def representative_dataset(self, dataset=None, data_root=None):
         if dataset is None:
             rng = np.random.default_rng()
             data_dir = data_root / self.data_subdir
@@ -104,7 +104,7 @@ class FeatureMLPTrainer(Trainer):
             dataset = tf.data.Dataset.from_tensor_slices((
                 np.concatenate(all_x).astype(np.float32),
                 np.concatenate(all_y).astype(np.float32),
-            ))
+            )).batch(self.batch_size, drop_remainder=True)
         else:
             dataset = dataset.take(150)
         return dataset.map(lambda x, y: {'features': x})

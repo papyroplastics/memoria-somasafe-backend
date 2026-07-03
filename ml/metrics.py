@@ -9,9 +9,15 @@ def mse_loss(x: tf.Tensor, y: tf.Tensor) -> tf.Tensor:
 
 @tf.function
 def first_difference_loss(reconstruction: tf.Tensor, signal: tf.Tensor) -> tf.Tensor:
-    d_recon = reconstruction[:, 1:, :] - reconstruction[:, :-1, :]
-    d_signal = signal[:, 1:, :] - signal[:, :-1, :]
-    return tf.reduce_mean((d_recon - d_signal) ** 2)
+    # Sliced with tf.slice rather than [:, 1:, :]: the gradient of StridedSlice is
+    # the Flex-only StridedSliceGrad op, which the on-device LiteRT runtime cannot
+    # run, while Slice's gradient is the builtin Pad.
+    def diff(x: tf.Tensor) -> tf.Tensor:
+        n = x.shape[1] - 1
+        return (tf.slice(x, [0, 1, 0], [-1, n, -1])
+                - tf.slice(x, [0, 0, 0], [-1, n, -1]))
+
+    return tf.reduce_mean((diff(reconstruction) - diff(signal)) ** 2)
 
 
 def reconstruction_error(reconstruction: tf.Tensor, signal: tf.Tensor) -> tf.Tensor:

@@ -7,7 +7,7 @@ import tensorflow as tf
 from tqdm import tqdm
 
 from ..optimizers import Adam
-from ..layers import Dense
+from ..layers import Dense, relu
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
 from ..data import (
     DatasetUnavailibleError, CLEAN_SUBDIR, BVP_RATE,
@@ -118,8 +118,8 @@ class TrainableAutoencoder(TrainableModel):
         self.signal_shape = (batch_size, seq_len, n_signals)
         self.cond_shape = (batch_size, n_cond)
 
-        self.cond_dense1 = Dense(n_cond, 32, activation=tf.nn.relu)
-        self.cond_dense2 = Dense(32, cond_embed_dim, activation=tf.nn.relu)
+        self.cond_dense1 = Dense(n_cond, 32, activation=relu)
+        self.cond_dense2 = Dense(32, cond_embed_dim, activation=relu)
 
     def _embed_cond(self, cond: tf.Tensor) -> tf.Tensor:
         return self.cond_dense2(self.cond_dense1(cond))
@@ -172,7 +172,7 @@ class Trainer(ABC):
         """Returns the data for a single subject"""
 
     @abstractmethod
-    def representative_dataset(self, dataset: tf.data.Dataset | None = None, *, data_root: Path | None = None) -> tf.data.Dataset:
+    def representative_dataset(self, dataset: tf.data.Dataset | None = None, data_root: Path | None = None) -> tf.data.Dataset:
         """Feed-dict stream for the int8 TFLite converter. Loads from data_root when dataset is None."""
 
     @abstractmethod
@@ -271,7 +271,7 @@ class AutoencoderTrainer(Trainer):
     def subject_dataset(self, subject_dir):
         return windowed_conditional(subject_dir.parent, subject_dir.name, self.window_size, self.shift)
 
-    def representative_dataset(self, dataset=None, *, data_root=None):
+    def representative_dataset(self, dataset=None, data_root=None):
         if dataset is None:
             rng = np.random.default_rng()
             data_dir = data_root / self.data_subdir
@@ -290,7 +290,7 @@ class AutoencoderTrainer(Trainer):
             dataset = tf.data.Dataset.from_tensor_slices((
                 np.concatenate(all_signals).astype(np.float32),
                 np.concatenate(all_conds).astype(np.float32),
-            ))
+            )).batch(self.batch_size, drop_remainder=True)
         else:
             dataset = dataset.take(150)
         return dataset.map(lambda s, c: {'signal': s, 'cond': c})

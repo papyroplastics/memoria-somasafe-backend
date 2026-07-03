@@ -5,6 +5,62 @@ import numpy as np
 import tensorflow as tf
 
 
+# The gradients TF registers for Relu and Conv (ReluGrad, Conv2DBackpropFilter) only
+# exist as Flex ops, which the on-device LiteRT runtime cannot execute, so any model
+# whose train signature must run on-device has to use these custom-gradient versions:
+# they keep the stock forward op (conversion and quantization are unchanged) but spell
+# the backward pass in TFLite-builtin ops.
+
+@tf.custom_gradient
+def relu(x: tf.Tensor):
+    y = tf.nn.relu(x)
+
+    def grad(dy: tf.Tensor):
+        return dy * tf.cast(y > 0.0, dy.dtype)
+
+    return y, grad
+
+
+def upsample2(x: tf.Tensor) -> tf.Tensor:
+    """Nearest-neighbour x2 upsampling along time. Equivalent to
+    ``tf.repeat(x, 2, axis=1)``, but repeat's gradient is a SUM reduction that
+    XNNPACK fails to prepare inside the train signature; stack/reshape
+    differentiate to Unpack/Add instead. The batch dim is inferred (-1) so the
+    graph stays batch-polymorphic for the int8 calibrator."""
+    _, seq_len, channels = (int(d) for d in x.shape)
+    return tf.reshape(tf.stack([x, x], axis=2), [-1, 2 * seq_len, channels])
+
+
+def conv1d_same(x: tf.Tensor, kernel: tf.Tensor, stride: int) -> tf.Tensor:
+    batch, seq_len, in_ch = (int(d) for d in x.shape)
+    kernel_size, _, out_ch = (int(d) for d in kernel.shape)
+    out_len = -(-seq_len // stride)
+    pad_total = max((out_len - 1) * stride + kernel_size - seq_len, 0)
+    pad_left = pad_total // 2
+
+    @tf.custom_gradient
+    def call(x: tf.Tensor, kernel: tf.Tensor):
+        y = tf.nn.conv1d(x, kernel, stride=stride, padding='SAME')
+
+        def grad(dy: tf.Tensor):
+            dx = tf.nn.conv1d_transpose(dy, kernel, output_shape=[batch, seq_len, in_ch],
+                                        strides=stride, padding='SAME')
+            x_pad = tf.pad(x, [[0, 0], [pad_left, pad_total - pad_left], [0, 0]])
+            dy_flat = tf.reshape(dy, [batch * out_len, out_ch])
+            span = (out_len - 1) * stride + 1
+            dk = tf.stack([
+                tf.matmul(tf.reshape(x_pad[:, tap : tap + span : stride, :],
+                                     [batch * out_len, in_ch]),
+                          dy_flat, transpose_a=True)
+                for tap in range(kernel_size)
+            ])
+            return dx, dk
+
+        return y, grad
+
+    return call(x, kernel)
+
+
 class Dense(tf.Module):
     def __init__(self, in_dim: int, out_dim: int, activation: Callable | None =None):
         limit = math.sqrt(6.0 / (in_dim + out_dim))
@@ -91,7 +147,7 @@ class Conv1D(tf.Module):
         self.activation = activation if activation else (lambda x: x)
 
     def __call__(self, x):
-        out = tf.nn.conv1d(x, self.kernel, stride=self.stride, padding='SAME') + self.bias
+        out = conv1d_same(x, self.kernel, self.stride) + self.bias
         return self.activation(out)
 
 
@@ -101,9 +157,14 @@ class FiLM(tf.Module):
         self.to_beta = Dense(cond_dim, n_channels)
 
     def __call__(self, x, cond):
+        # Broadcast via reshape instead of [:, None, :]: its gradient is the builtin
+        # Reshape, while a strided slice's is the Flex-only StridedSliceGrad. The
+        # batch dim is inferred (-1) to stay batch-polymorphic for the int8 calibrator.
+        channels = int(x.shape[-1])
         gamma = 1.0 + self.to_gamma(cond)          # (B, C)
         beta = self.to_beta(cond)                  # (B, C)
-        return x * gamma[:, None, :] + beta[:, None, :]
+        return (x * tf.reshape(gamma, [-1, 1, channels])
+                + tf.reshape(beta, [-1, 1, channels]))
 
 
 def sinusoidal_encoding(length: int, dim: int) -> tf.Tensor:

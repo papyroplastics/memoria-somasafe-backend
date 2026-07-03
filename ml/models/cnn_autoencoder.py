@@ -1,6 +1,6 @@
 import tensorflow as tf
 
-from ..layers import Conv1D, FiLM
+from ..layers import Conv1D, FiLM, relu, upsample2
 from ..data import N_COND
 from .common import TrainableAutoencoder, AutoencoderTrainer
 
@@ -27,13 +27,13 @@ class CNNAutoencoder(TrainableAutoencoder):
                          n_outputs=n_outputs, diff_weight=diff_weight,
                          latent_dropout=latent_dropout)
 
-        self.enc1 = Conv1D(n_signals, hidden_dim, kernel_size, stride=2, activation=tf.nn.relu)
-        self.enc2 = Conv1D(hidden_dim, hidden_dim, kernel_size, stride=2, activation=tf.nn.relu)
-        self.enc3 = Conv1D(hidden_dim, latent_dim, kernel_size, stride=2, activation=tf.nn.relu)
+        self.enc1 = Conv1D(n_signals, hidden_dim, kernel_size, stride=2, activation=relu)
+        self.enc2 = Conv1D(hidden_dim, hidden_dim, kernel_size, stride=2, activation=relu)
+        self.enc3 = Conv1D(hidden_dim, latent_dim, kernel_size, stride=2, activation=relu)
 
-        self.dec1 = Conv1D(latent_dim, hidden_dim, kernel_size, activation=tf.nn.relu)
+        self.dec1 = Conv1D(latent_dim, hidden_dim, kernel_size, activation=relu)
         self.film1 = FiLM(cond_embed_dim, hidden_dim)
-        self.dec2 = Conv1D(hidden_dim, hidden_dim, kernel_size, activation=tf.nn.relu)
+        self.dec2 = Conv1D(hidden_dim, hidden_dim, kernel_size, activation=relu)
         self.film2 = FiLM(cond_embed_dim, hidden_dim)
         self.dec3 = Conv1D(hidden_dim, n_outputs, kernel_size, activation=None)
 
@@ -43,9 +43,9 @@ class CNNAutoencoder(TrainableAutoencoder):
         emb = self._embed_cond(cond)
         x = self.enc3(self.enc2(self.enc1(signal)))
         x = self._drop_latent(x, training)
-        x = self.film1(self.dec1(tf.repeat(x, 2, axis=1)), emb)
-        x = self.film2(self.dec2(tf.repeat(x, 2, axis=1)), emb)
-        x = self.dec3(tf.repeat(x, 2, axis=1))
+        x = self.film1(self.dec1(upsample2(x)), emb)
+        x = self.film2(self.dec2(upsample2(x)), emb)
+        x = self.dec3(upsample2(x))
         return x
 
 
