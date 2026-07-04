@@ -15,7 +15,7 @@ from pathlib import Path
 from sqlmodel import Session, select
 
 from api.routes.auth import hash_password
-from common.config import MODELS_DIR, SEED_EMAIL, SEED_PASSWORD, SEED_USER
+from common.config import DATASETS_DIR, MODELS_DIR, SEED_EMAIL, SEED_PASSWORD, SEED_USER
 from common.db import (
     Device,
     GlobalWeights,
@@ -40,7 +40,7 @@ def seed_models(session: Session) -> None:
             print(f"  - model '{key}' skipped (no {tflite})")
             continue
 
-        trainer = MODELS[key].build_trainer()
+        trainer = MODELS[key].build_trainer(DATASETS_DIR)
         fingerprint = trainer.model.arch_fingerprint()
         param_count = trainer.model.total_parameter_size
 

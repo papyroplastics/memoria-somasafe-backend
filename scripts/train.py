@@ -55,10 +55,10 @@ if __name__ == "__main__":
     result_dir = MODELS_DIR / args.model
     report_dir = get_report_dir(result_dir)
 
-    trainer = MODELS[args.model].build_trainer(batch_size=args.batch_size)
+    trainer = MODELS[args.model].build_trainer(data_dir, batch_size=args.batch_size)
     history, eval_dataset = run_loop(trainer, data_dir, args.loop, args.split, args.epochs, args.local_epochs)
 
     postfix = '' if trainer.batch_size == trainer.default_batch_size else f'_{trainer.batch_size}'
-    save_artifacts(trainer, result_dir, eval_dataset, data_dir, postfix)
+    save_artifacts(trainer, result_dir, eval_dataset, postfix)
     plot_history(history, trainer.primary_metric, report_dir)
     trainer.report(report_dir, eval_dataset)

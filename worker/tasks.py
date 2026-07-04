@@ -19,6 +19,7 @@ from common.config import (
     FED_MIN_SUBMISSIONS,
     RESULT_TTL_SECONDS,
     SERVE_GRACE_SECONDS,
+    SERVER_PRIVATE_KEY_FILE,
 )
 from common.db import (
     GlobalWeights,
@@ -31,23 +32,25 @@ from common.db import (
 )
 
 from ml.model_list import MODELS
+from ml.payload import build_payload
 from ml.saving import get_optimized_model
 from ml.training import fed_avg
 
-# Per-process cache of (model, representative_dataset, fingerprint), built once
-# at startup so TensorFlow and the calibration data load once per worker, not
-# once per job. Models whose dataset is absent (not trained yet) are skipped —
-# the worker only ever quantizes models that scripts.db_seed put in the DB.
+# Per-process cache of (model, representative_dataset, fingerprint, signature_version,
+# norm_bytes), built once at startup so TensorFlow and the calibration data load once
+# per worker, not once per job. Models whose dataset is absent (not trained yet) are
+# skipped — the worker only ever quantizes models that scripts.db_seed put in the DB.
 _models: dict[str, tuple] = {}
 
 
 def _init_models() -> None:
     for key in MODELS:
         try:
-            trainer = MODELS[key].build_trainer()
+            trainer = MODELS[key].build_trainer(DATASETS_DIR)
             fingerprint = trainer.model.arch_fingerprint()
             rep = trainer.representative_dataset(data_root=DATASETS_DIR)
-            _models[key] = (trainer.model, rep, fingerprint)
+            _models[key] = (trainer.model, rep, fingerprint,
+                            trainer.signature_version, trainer.norm_param_bytes())
         except Exception as exc:  # missing dataset / build error — skip, don't crash boot
             print(f"[worker] model '{key}' unavailable, skipping: {exc}")
 
@@ -73,7 +76,7 @@ def quantize_submission(job_id: str) -> None:
                 raise ValueError(f"submission {job.submission_id} not found")
             if job.model_key not in _models:
                 raise ValueError(f"model '{job.model_key}' not initialized")
-            model, rep_dataset, fingerprint = _models[job.model_key]
+            model, rep_dataset, fingerprint, signature_version, norm_bytes = _models[job.model_key]
             if submission.fingerprint != fingerprint:
                 raise ValueError(
                     f"submission fingerprint {submission.fingerprint} != "
@@ -87,7 +90,9 @@ def quantize_submission(job_id: str) -> None:
                 raise ValueError(f"invalid submission: {reason}")
             params = np.frombuffer(submission.parameters, dtype=np.float32).copy()
             model.restore(tf.constant(params, dtype=tf.float32))
-            job.result = bytes(get_optimized_model(model, rep_dataset))
+            tflite = bytes(get_optimized_model(model, rep_dataset))
+            job.result = build_payload(tflite, signature_version, norm_bytes,
+                                       SERVER_PRIVATE_KEY_FILE)
             job.status = JobStatus.done
         except Exception as exc:  # surfaced to the client via the result endpoint
             job.status = JobStatus.failed
@@ -101,7 +106,7 @@ def quantize_submission(job_id: str) -> None:
 def _aggregate_model(session: Session, key: str) -> str:
     if key not in _models:
         return "skipped: model not initialized"
-    model, _, fingerprint = _models[key]
+    model, _, fingerprint, _, _ = _models[key]
 
     reference = get_latest_weights(session, key)
     if reference is None:

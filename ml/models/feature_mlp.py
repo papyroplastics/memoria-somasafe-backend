@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
@@ -19,7 +21,8 @@ class FeatureMLP(TrainableModel):
     and FedAvg weight transfer.
     """
 
-    def __init__(self, name: str, batch_size: int, n_features: int = N_FEATURES,
+    def __init__(self, name: str, batch_size: int, feat_mean, feat_std,
+                 n_features: int = N_FEATURES,
                  hidden_dim: int = 32, hidden_layers: int = 3, learning_rate: float = 1e-3,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
         super().__init__(name=name)
@@ -27,6 +30,11 @@ class FeatureMLP(TrainableModel):
         self.batch_size = batch_size
         self.in_shape = (batch_size, n_features)
         self.label_shape = (batch_size, 1)
+
+        # Raw features come in; the model z-scores them, so nothing ships or applies
+        # normalization params off-model (firmware/app feed raw).
+        self.feat_mean = tf.constant(feat_mean, dtype=tf.float32)
+        self.feat_std = tf.constant(feat_std, dtype=tf.float32)
 
         self.in_layer = Dense(n_features, hidden_dim, activation=relu)
         self.out_layer = Dense(hidden_dim, 1)
@@ -36,9 +44,12 @@ class FeatureMLP(TrainableModel):
 
         self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
 
-        self.eval = tf.function(self.eval_eager, input_signature=[
-            tf.TensorSpec(shape=self.in_shape, dtype=tf.float32)
-        ])
+        signature = [tf.TensorSpec(shape=self.in_shape, dtype=tf.float32)]
+        # eval/train z-score raw inputs; infer takes already-normalized inputs and is the
+        # only signature exported to the int8 model, so its int8 input calibrates on
+        # normalized values (see saving.optimize_saved_model).
+        self.eval = tf.function(self.eval_eager, input_signature=signature)
+        self.infer = tf.function(self.infer_eager, input_signature=signature)
         self.train = tf.function(self.train_eager, input_signature=[
             tf.TensorSpec(shape=self.in_shape, dtype=tf.float32),
             tf.TensorSpec(shape=self.label_shape, dtype=tf.float32),
@@ -52,12 +63,15 @@ class FeatureMLP(TrainableModel):
             activation = layer(activation)
         return self.out_layer(activation)
 
-    def eval_eager(self, features: tf.Tensor):
+    def infer_eager(self, features: tf.Tensor):
         return {'logits': self._logits(features)}
+
+    def eval_eager(self, features: tf.Tensor):
+        return {'logits': self._logits((features - self.feat_mean) / self.feat_std)}
 
     def train_eager(self, features: tf.Tensor, labels: tf.Tensor):
         with tf.GradientTape() as tape:
-            logits = self._logits(features)
+            logits = self._logits((features - self.feat_mean) / self.feat_std)
             loss = tf.reduce_mean(
                 tf.nn.sigmoid_cross_entropy_with_logits(labels=labels, logits=logits))
         grads = tape.gradient(loss, self.trainable_variables)
@@ -73,6 +87,7 @@ class FeatureMLPTrainer(Trainer):
 
     primary_metric = 'accuracy'
     default_batch_size = 1
+    signature_version = 1   # payload norm layout: mean[17] then std[17], LE float32
 
     def __init__(self, model: FeatureMLP, batch_size: int = 1,
                  train_split: float = 0.8):
@@ -81,25 +96,30 @@ class FeatureMLPTrainer(Trainer):
         self.train_split = train_split
         self.data_subdir = MIXED_FEATURE_SUBDIR
 
+    def norm_param_bytes(self):
+        return np.concatenate([self.model.feat_mean.numpy(),
+                               self.model.feat_std.numpy()]).astype('<f4').tobytes()
+
     def subject_dataset(self, subject_dir):
-        x = np.load(subject_dir / 'features.npy')          # raw, un-normalized on disk
+        x = np.load(subject_dir / 'features.npy').astype(np.float32)   # raw; model normalizes
         y = np.load(subject_dir / 'labels.npy')
-        mean, std = load_feature_stats(subject_dir.parent)
-        x = ((x - mean) / std).astype(np.float32)
 
         return tf.data.Dataset.from_tensor_slices((x, y))
 
     def representative_dataset(self, dataset=None, data_root=None):
+        # Calibrates the `infer` graph, which takes already-normalized inputs, so yield
+        # z-scored features (matching what the device feeds after normalizing).
+        mean = tf.constant(self.model.feat_mean)
+        std = tf.constant(self.model.feat_std)
         if dataset is None:
             rng = np.random.default_rng()
             data_dir = data_root / self.data_subdir
-            mean, std = load_feature_stats(data_dir)
             all_x, all_y = [], []
             for subject_dir in get_sorted_paths(data_dir):
-                x = np.load(subject_dir / 'features.npy')
+                x = np.load(subject_dir / 'features.npy').astype(np.float32)
                 y = np.load(subject_dir / 'labels.npy')
                 idx = rng.choice(len(x), size=min(10, len(x)), replace=False)
-                all_x.append(((x[idx] - mean) / std).astype(np.float32))
+                all_x.append(x[idx])
                 all_y.append(y[idx])
             dataset = tf.data.Dataset.from_tensor_slices((
                 np.concatenate(all_x).astype(np.float32),
@@ -107,7 +127,7 @@ class FeatureMLPTrainer(Trainer):
             )).batch(self.batch_size, drop_remainder=True)
         else:
             dataset = dataset.take(150)
-        return dataset.map(lambda x, y: {'features': x})
+        return dataset.map(lambda x, y: {'features': (x - mean) / std})
 
     def report(self, result_dir, eval_dataset):
         import matplotlib.pyplot as plt
@@ -148,18 +168,13 @@ class FeatureMLPTrainer(Trainer):
             total += float(y.shape[0])
         return {'accuracy': correct / total if total else 0.0}
 
-    def norm_params(self, data_root):
-        mean, std = load_feature_stats(data_root / self.data_subdir)   # per feature
-        features = {'mean': mean.tolist(), 'std': std.tolist()}
-        # labels (train's second input) are never normalized.
-        return {'eval': {'features': features}, 'train': {'features': features}}
-
-
-def get_trainer(batch_size: int | None = None) -> FeatureMLPTrainer:
+def get_trainer(data_root: Path, batch_size: int | None = None) -> FeatureMLPTrainer:
     batch_size = batch_size or FeatureMLPTrainer.default_batch_size
 
+    mean, std = load_feature_stats(data_root / MIXED_FEATURE_SUBDIR)
     model = FeatureMLP(
         name='feature_anomaly',
         batch_size=batch_size,
+        feat_mean=mean, feat_std=std,
     )
     return FeatureMLPTrainer(model, batch_size=batch_size)

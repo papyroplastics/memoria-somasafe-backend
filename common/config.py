@@ -5,9 +5,10 @@ from pathlib import Path
 MODELS_DIR = Path(os.environ.get("MODELS_DIR", "shared/gen/models"))
 DATASETS_DIR = Path(os.environ.get("DATASETS_DIR", "shared/gen/datasets"))
 
-# Per-model normalization params written next to the artifacts and served over
-# /model/norm; its shape is model-specific (see each trainer's norm_params).
-NORM_PARAMS_FILE = "norm.json"
+# ECDSA P-256 private key the worker signs quantized-model payloads with; its public
+# half must be the srv_pub provisioned in the device's factory NVS (see shared/make_keys.sh
+# and firmware/scripts/gen_factory_nvs.py).
+SERVER_PRIVATE_KEY_FILE = Path(os.environ.get("SERVER_PRIVATE_KEY", "shared/gen/server-private-key.pem"))
 
 # PostgreSQL (SQLModel/SQLAlchemy URL) and the Celery broker.
 DATABASE_URL = os.environ.get(

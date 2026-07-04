@@ -15,7 +15,6 @@ from common.config import (
     QUANTIZE_DAILY_LIMIT,
     QUANTIZE_DAILY_WINDOW_SECONDS,
     MODELS_DIR,
-    NORM_PARAMS_FILE,
 )
 from common.db import (
     GlobalWeights,
@@ -199,28 +198,6 @@ def get_weights(key: str,
             WEIGHTS_TIMESTAMP_HEADER: weights.created_at.isoformat(),
             "Content-Disposition": f'attachment; filename="{key}-weights.bin"',
         },
-    )
-
-
-@router.get("/norm/{key}")
-def get_norm_params(key: str,
-                    session: Session = Depends(get_session),
-                    user: User = Depends(get_current_user)):
-    """Model-specific normalization params (per signature/input mean-std) the on-device
-    trainer applies at load time. Keyed to the architecture, not a weights snapshot, so
-    the fingerprint travels in a header and the client refreshes only when the model's
-    fingerprint moves. Served as the norm.json saved next to the model's artifacts at
-    export time."""
-    require_device_owner(session, user)
-    meta = require_model(session, key)
-    path = MODELS_DIR / key / NORM_PARAMS_FILE
-    if not path.exists():
-        raise HTTPException(status_code=404,
-                            detail=f"No normalization params for model '{key}'")
-    return Response(
-        content=path.read_bytes(),
-        media_type="application/json",
-        headers={FINGERPRINT_HEADER: meta.fingerprint},
     )
 
 

@@ -2,7 +2,7 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 
-from common.config import MODELS_DIR
+from common.config import DATASETS_DIR, MODELS_DIR
 from ml.saving import load_trainable_weights
 from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
@@ -29,10 +29,11 @@ def window_errors(model, signal: np.ndarray, cond: np.ndarray,
     return errors
 
 
-def load_autoencoder(model_name: str, batch_size: int | None = None) -> AutoencoderTrainer:
+def load_autoencoder(model_name: str, batch_size: int | None = None,
+                     data_root: Path = DATASETS_DIR) -> AutoencoderTrainer:
     """Build an autoencoder trainer and restore its trained
     weights from results/<model>/trainable.tflite."""
-    trainer = MODELS[model_name].build_trainer(batch_size)
+    trainer = MODELS[model_name].build_trainer(data_root, batch_size)
     if not isinstance(trainer, AutoencoderTrainer):
         raise SystemExit(
             f"'{model_name}' is not an autoencoder; testing needs one (lstm-ae, gru-ae, cnn-ae).")

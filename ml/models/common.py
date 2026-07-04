@@ -12,7 +12,7 @@ from ..metrics import mse_loss, first_difference_loss, reconstruction_error
 from ..data import (
     DatasetUnavailibleError, CLEAN_SUBDIR, BVP_RATE,
     windowed_conditional, get_sorted_paths, combine_datasets,
-    stacked_signal, normalize, norm_stats, window_cond_vectors,
+    stacked_signal, norm_stats, window_cond_vectors,
     load_context_norm_params, load_static_norm_params,
 )
 
@@ -105,7 +105,8 @@ class TrainableModel(tf.Module):
 class TrainableAutoencoder(TrainableModel):
 
     def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int, n_cond: int,
-                 cond_embed_dim, n_outputs, diff_weight, latent_dropout: float):
+                 cond_embed_dim, n_outputs, diff_weight, latent_dropout: float,
+                 signal_mean, signal_std, cond_mean, cond_std):
         super().__init__(name=name)
         self.batch_size = batch_size
         self.seq_len = seq_len
@@ -117,6 +118,13 @@ class TrainableAutoencoder(TrainableModel):
         self.latent_dropout = latent_dropout
         self.signal_shape = (batch_size, seq_len, n_signals)
         self.cond_shape = (batch_size, n_cond)
+
+        # Inputs arrive raw; the model z-scores them so the device and firmware never
+        # ship or apply normalization params. Signal params broadcast over (batch, seq).
+        self.signal_mean = tf.constant(signal_mean, dtype=tf.float32)
+        self.signal_std = tf.constant(signal_std, dtype=tf.float32)
+        self.cond_mean = tf.constant(cond_mean, dtype=tf.float32)
+        self.cond_std = tf.constant(cond_std, dtype=tf.float32)
 
         self.cond_dense1 = Dense(n_cond, 32, activation=relu)
         self.cond_dense2 = Dense(32, cond_embed_dim, activation=relu)
@@ -130,26 +138,41 @@ class TrainableAutoencoder(TrainableModel):
         return z
 
     def _bind(self, learning_rate: float, beta1: float, beta2: float, epsilon: float):
-        """Bind train/eval/save/restore. Call once all layers exist."""
+        """Bind train/eval/infer/save/restore. Call once all layers exist."""
         self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
         signature = [
             tf.TensorSpec(shape=self.signal_shape, dtype=tf.float32),
             tf.TensorSpec(shape=self.cond_shape, dtype=tf.float32),
         ]
+        # eval/train z-score raw inputs; infer takes already-normalized inputs and is the
+        # only signature exported to the int8 model, so its int8 input calibrates on
+        # normalized values (see saving.optimize_saved_model).
         self.eval = tf.function(self.eval_eager, input_signature=signature)
+        self.infer = tf.function(self.infer_eager, input_signature=signature)
         self.train = tf.function(self.train_eager, input_signature=signature)
         self._init_save_restore()
 
     def _forward(self, signal: tf.Tensor, cond: tf.Tensor, training: bool = False) -> tf.Tensor:
         raise NotImplementedError
 
-    def eval_eager(self, signal: tf.Tensor, cond: tf.Tensor):
+    def _eval_core(self, signal: tf.Tensor, cond: tf.Tensor):
+        """Reconstruction + error from already-normalized signal/cond."""
         reconstruction = self._forward(signal, cond, training=False)
         target = signal[:,:,:self.n_outputs]
         return {'reconstruction': reconstruction,
                 'error': reconstruction_error(reconstruction, target)}
 
+    def infer_eager(self, signal: tf.Tensor, cond: tf.Tensor):
+        return self._eval_core(signal, cond)
+
+    def eval_eager(self, signal: tf.Tensor, cond: tf.Tensor):
+        signal = (signal - self.signal_mean) / self.signal_std
+        cond = (cond - self.cond_mean) / self.cond_std
+        return self._eval_core(signal, cond)
+
     def train_eager(self, signal: tf.Tensor, cond: tf.Tensor):
+        signal = (signal - self.signal_mean) / self.signal_std
+        cond = (cond - self.cond_mean) / self.cond_std
         target = signal[:,:,:self.n_outputs]
         with tf.GradientTape() as tape:
             reconstruction = self._forward(signal, cond, training=True)
@@ -166,10 +189,17 @@ class Trainer(ABC):
     default_batch_size: int
     batch_size: int
     data_subdir: str
+    signature_version: int   # fixes the norm_param_bytes layout in the firmware payload
 
     @abstractmethod
     def subject_dataset(self, subject_dir: Path) -> tf.data.Dataset:
         """Returns the data for a single subject"""
+
+    @abstractmethod
+    def norm_param_bytes(self) -> bytes:
+        """The model's z-score params as LE float32, serialized for the signed firmware
+        payload (see ml.payload). Layout is fixed by ``signature_version``; the device
+        applies them as ``(x - mean) / std`` before the int8 (non-normalizing) model."""
 
     @abstractmethod
     def representative_dataset(self, dataset: tf.data.Dataset | None = None, data_root: Path | None = None) -> tf.data.Dataset:
@@ -179,16 +209,6 @@ class Trainer(ABC):
     def evaluate(self, dataset: tf.data.Dataset, prefix: str = '') -> dict[str, float]:
         """Metrics relevant to this model type (accuracy, recon error, ...).
         ``prefix`` labels the progress bar (e.g. ``epoch=3/20``)."""
-
-    @abstractmethod
-    def norm_params(self, data_root: Path) -> dict:
-        """Normalization params this model's inputs are z-scored with, shipped to the
-        device (``/model/norm``) and applied there as ``(x - mean) / std``.
-
-        Model-specific because only some inputs need normalizing and their params come
-        from different stats. Shape: one entry per signature that consumes normalized
-        inputs, each mapping an input name to its ``{'mean': [...], 'std': [...]}`` — one
-        pair per channel of that input's non-batch dimension, broadcast over the rest."""
 
     def train_epoch(self, dataset: tf.data.Dataset, prefix: str = '') -> float:
         """One pass over ``dataset``; returns mean training loss. """
@@ -248,11 +268,24 @@ class Trainer(ABC):
         return ds.take(n_train).cache(), ds.skip(n_train).cache()
 
 class TrainerBuilder(Protocol):
-    def __call__(self, batch_size: int | None = None) -> Trainer: ...
+    def __call__(self, data_root: Path, batch_size: int | None = None) -> Trainer: ...
+
+
+def autoencoder_norm_params(data_root: Path, data_subdir: str = CLEAN_SUBDIR):
+    """z-score params baked into an autoencoder so it normalizes its own raw inputs:
+    signal per ``[BVP, ACC]`` channel and cond as ``[static(6), context(2)]``."""
+    subjects_dir = data_root / data_subdir
+    sig_mean, sig_std = norm_stats(subjects_dir)
+    stat_mean, stat_std = load_static_norm_params(subjects_dir)
+    ctx_mean, ctx_std = load_context_norm_params(subjects_dir)
+    cond_mean = np.concatenate([stat_mean, ctx_mean]).astype(np.float32)
+    cond_std = np.concatenate([stat_std, ctx_std]).astype(np.float32)
+    return sig_mean, sig_std, cond_mean, cond_std
 
 class AutoencoderTrainer(Trainer):
 
     primary_metric = 'recon_error'
+    signature_version = 2   # payload norm layout: signal mean/std(2 each), cond mean/std(8 each)
 
     default_batch_size = 12
     default_sample_rate = BVP_RATE
@@ -260,7 +293,7 @@ class AutoencoderTrainer(Trainer):
     default_shift = default_sample_rate * 3
 
     def __init__(self, model: TrainableModel, window_size: int = default_window_size,
-                 shift: int = default_shift, batch_size: int = default_batch_size, 
+                 shift: int = default_shift, batch_size: int = default_batch_size,
                  data_subdir: str = CLEAN_SUBDIR):
         self.model = model
         self.window_size = window_size
@@ -268,10 +301,22 @@ class AutoencoderTrainer(Trainer):
         self.batch_size = batch_size
         self.data_subdir = data_subdir
 
+    def norm_param_bytes(self):
+        return np.concatenate([
+            self.model.signal_mean.numpy(), self.model.signal_std.numpy(),
+            self.model.cond_mean.numpy(), self.model.cond_std.numpy(),
+        ]).astype('<f4').tobytes()
+
     def subject_dataset(self, subject_dir):
         return windowed_conditional(subject_dir.parent, subject_dir.name, self.window_size, self.shift)
 
     def representative_dataset(self, dataset=None, data_root=None):
+        # Calibrates the `infer` graph, which takes already-normalized inputs, so yield
+        # z-scored signal/cond (matching what the device feeds after normalizing).
+        sig_mean = tf.constant(self.model.signal_mean)
+        sig_std = tf.constant(self.model.signal_std)
+        cond_mean = tf.constant(self.model.cond_mean)
+        cond_std = tf.constant(self.model.cond_std)
         if dataset is None:
             rng = np.random.default_rng()
             data_dir = data_root / self.data_subdir
@@ -279,13 +324,12 @@ class AutoencoderTrainer(Trainer):
             for subject_dir in get_sorted_paths(data_dir):
                 sid = subject_dir.name
                 raw = stacked_signal(data_dir, sid)
-                norm = normalize(raw, *norm_stats(data_dir))
-                count = max(0, (len(norm) - self.window_size) // self.shift + 1)
+                count = max(0, (len(raw) - self.window_size) // self.shift + 1)
                 if count == 0:
                     continue
                 cond = window_cond_vectors(data_dir, sid, raw[:, 1], self.window_size, self.shift, count)
                 idx = rng.choice(count, size=min(10, count), replace=False)
-                all_signals.append(np.stack([norm[i * self.shift : i * self.shift + self.window_size] for i in idx]))
+                all_signals.append(np.stack([raw[i * self.shift : i * self.shift + self.window_size] for i in idx]))
                 all_conds.append(cond[idx])
             dataset = tf.data.Dataset.from_tensor_slices((
                 np.concatenate(all_signals).astype(np.float32),
@@ -293,27 +337,14 @@ class AutoencoderTrainer(Trainer):
             )).batch(self.batch_size, drop_remainder=True)
         else:
             dataset = dataset.take(150)
-        return dataset.map(lambda s, c: {'signal': s, 'cond': c})
+        return dataset.map(lambda s, c: {'signal': (s - sig_mean) / sig_std,
+                                         'cond': (c - cond_mean) / cond_std})
 
     def evaluate(self, dataset, prefix=''):
         errors = [self.model.eval(*batch)['error']
                   for batch in tqdm(dataset, total=len(dataset),
                                     desc=f'{prefix} eval'.strip(), leave=False)]
         return {'recon_error': float(tf.reduce_mean(tf.concat(errors, axis=0)))}
-
-    def norm_params(self, data_root):
-        subjects_dir = data_root / self.data_subdir
-        sig_mean, sig_std = norm_stats(subjects_dir)                 # per signal channel
-        stat_mean, stat_std = load_static_norm_params(subjects_dir)  # 6-d demographics
-        ctx_mean, ctx_std = load_context_norm_params(subjects_dir)   # 2-d activity context
-        signal = {'mean': sig_mean.tolist(), 'std': sig_std.tolist()}
-        # cond = [static(6), context(2)], matching window_cond_vectors.
-        cond = {
-            'mean': np.concatenate([stat_mean, ctx_mean]).tolist(),
-            'std': np.concatenate([stat_std, ctx_std]).tolist(),
-        }
-        params = {'signal': signal, 'cond': cond}
-        return {'eval': params, 'train': params}
 
     def report(self, result_dir, eval_dataset):
         import matplotlib.pyplot as plt

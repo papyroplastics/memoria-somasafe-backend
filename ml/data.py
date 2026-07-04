@@ -527,15 +527,18 @@ def load_context_norm_params(subjects_dir: Path) -> tuple[np.ndarray, np.ndarray
 
 
 def load_static_norm_params(subjects_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Per-demographic ``(mean, std)`` saved by Stage 1, applied to the raw 6-d
-    static vector at load time (and shipped to the device via ``/model/norm``)."""
+    """Per-demographic ``(mean, std)`` saved by Stage 1, baked into the model so it
+    z-scores the raw 6-d static vector (part of the cond) in its own signatures."""
     params = np.load(subjects_dir / STATIC_NORM_PARAMS_FILE)
     return params[0].astype(np.float32), params[1].astype(np.float32)
 
 
-def normalize_context(subjects_dir: Path, ctx_raw: np.ndarray) -> np.ndarray:
-    mean, std = load_context_norm_params(subjects_dir)
-    return ((ctx_raw - mean) / std).astype(np.float32)
+def load_static_raw(subjects_dir: Path, sid: str) -> np.ndarray:
+    """Raw demographics vector. ``static.npy`` is stored z-scored (Stage 1); since the
+    model now owns cond normalization, de-normalize it back to raw for the load path."""
+    norm = np.load(subjects_dir / sid / 'static.npy').astype(np.float32)
+    mean, std = load_static_norm_params(subjects_dir)
+    return (norm * std + mean).astype(np.float32)
 
 
 def _interp_acc(acc: np.ndarray, target_len: int) -> np.ndarray:
@@ -559,10 +562,6 @@ def stacked_signal(subjects_dir: Path, sid: str,
     return np.stack([bvp, acc], axis=-1).astype(np.float32)
 
 
-def normalize(signal: np.ndarray, mean: np.ndarray, std: np.ndarray) -> np.ndarray:
-    return ((signal - mean) / std).astype(np.float32)
-
-
 def causal_rolling_mean_std(x: np.ndarray, win: int) -> tuple[np.ndarray, np.ndarray]:
     """Per-sample trailing mean/std of ``x`` over the last ``win`` samples, expanding
     over whatever history exists for the first ``win`` samples (causal, no look-ahead)."""
@@ -578,32 +577,30 @@ def causal_rolling_mean_std(x: np.ndarray, win: int) -> tuple[np.ndarray, np.nda
 
 def window_cond_vectors(subjects_dir: Path, sid: str, raw_acc: np.ndarray,
                         window_size: int, shift: int, count: int) -> np.ndarray:
-    """Per-window conditioning vectors ``(count, N_COND)``: the subject's z-scored
+    """Per-window *raw* conditioning vectors ``(count, N_COND)``: the subject's
     demographics repeated, concatenated with the causal activity context sampled at
     each window's last sample.
 
-    The context is the trailing mean/std of the *raw* ACC magnitude, normalized at
-    the end with ``context_norm_params.npy`` — same logic the on-device pipeline
-    follows (compute from the un-normalized signal, normalize on load)."""
-    static = np.load(subjects_dir / sid / 'static.npy').astype(np.float32)   # (N_STATIC,)
+    Both parts are left un-normalized — the model z-scores the whole cond vector on its
+    own. The context is the trailing mean/std of the raw ACC magnitude; the same values
+    the on-device pipeline computes and feeds raw."""
+    static = load_static_raw(subjects_dir, sid)                             # (N_STATIC,) raw
     ctx_mean, ctx_std = causal_rolling_mean_std(raw_acc, CONTEXT_SECONDS * BVP_RATE)
     ends = np.clip(np.arange(count) * shift + window_size - 1, 0, len(raw_acc) - 1)
     ctx_raw = np.stack([ctx_mean[ends], ctx_std[ends]], axis=1)              # (count, N_CONTEXT)
-    ctx = normalize_context(subjects_dir, ctx_raw)
     static_rep = np.broadcast_to(static, (count, len(static)))
-    return np.concatenate([static_rep, ctx], axis=1).astype(np.float32)
+    return np.concatenate([static_rep, ctx_raw], axis=1).astype(np.float32)
 
 
 def windowed_conditional(subjects_dir: Path, sid: str, window_size: int, shift: int,
                          anomalous_dir: Path | None = None) -> tf.data.Dataset:
-    """Windowed, z-score-normalized ``[BVP, ACC]`` frames paired with their per-window
+    """Windowed *raw* ``[BVP, ACC]`` frames paired with their per-window raw
     conditioning vector, for one subject.
 
-    Normalization happens at load time (no normalized copy on disk), mirroring the
-    on-device path. Yields ``(signal_window, cond)`` tuples."""
+    Nothing is normalized here — the model z-scores signal and cond in its own
+    signatures. Yields ``(signal_window, cond)`` tuples."""
     raw = stacked_signal(subjects_dir, sid, anomalous_dir)
-    norm = normalize(raw, *norm_stats(subjects_dir))
-    ds = window_signal(norm, window_size, shift)
+    ds = window_signal(raw, window_size, shift)
     cond = window_cond_vectors(subjects_dir, sid, raw[:, 1], window_size, shift, len(ds))
     cond_ds = tf.data.Dataset.from_tensor_slices(cond)
     return tf.data.Dataset.zip(ds, cond_ds)
@@ -619,17 +616,15 @@ def combine_datasets(datasets: list[tf.data.Dataset]) -> tf.data.Dataset:
 
 def conditional_windows(subjects_dir: Path, sid: str, window_size: int,
                         anomalous_dir: Path | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """Normalized ``(T, 2)`` signal + per-window cond ``(n_windows, N_COND)`` for
+    """Raw ``(T, 2)`` signal + per-window raw cond ``(n_windows, N_COND)`` for
     non-overlapping windows — for autoencoder_test / distill_labels, which slice windows
-    manually rather than via tf.data.
+    manually rather than via tf.data. The model normalizes both on eval.
 
-    Reads the precomputed raw context (``context.npy``, on the same no-overlap grid)
-    and normalizes it, rather than recomputing the causal roll."""
-    norm = normalize(stacked_signal(subjects_dir, sid, anomalous_dir), *norm_stats(subjects_dir))
+    Reads the precomputed raw context (``context.npy``, on the same no-overlap grid)."""
+    raw = stacked_signal(subjects_dir, sid, anomalous_dir)
     ctx_raw = np.load(subjects_dir / sid / CONTEXT_FILE).astype(np.float32)
-    count = min(len(ctx_raw), max(0, (len(norm) - window_size) // window_size + 1))
-    static = np.load(subjects_dir / sid / 'static.npy').astype(np.float32)
-    ctx = normalize_context(subjects_dir, ctx_raw[:count])
+    count = min(len(ctx_raw), max(0, (len(raw) - window_size) // window_size + 1))
+    static = load_static_raw(subjects_dir, sid)
     static_rep = np.broadcast_to(static, (count, len(static)))
-    cond = np.concatenate([static_rep, ctx], axis=1).astype(np.float32)
-    return norm, cond
+    cond = np.concatenate([static_rep, ctx_raw[:count]], axis=1).astype(np.float32)
+    return raw, cond

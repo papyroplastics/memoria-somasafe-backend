@@ -26,8 +26,7 @@ from ml.data import (
 )
 from .common import dataset_pb2 as pb
 
-FORMAT_VERSION = 4
-
+FORMAT_VERSION = 1
 
 def window_raw(signal: np.ndarray, window: int, count: int) -> np.ndarray:
     frames = signal[: count * window].reshape(count, window)
@@ -72,7 +71,7 @@ def export_subject(subject: int, datasets_dir: Path, out_path: Path,
 
     # Recover the subject's raw 6-d demographics by de-normalizing the stored static
     # vector: static.npy is z-scored, so raw = norm * std + mean. Ships raw so the phone
-    # re-normalizes with the same static_norm_params it pulls from /model/norm.
+    # feeds it straight into the model, which z-scores the cond vector itself.
     stat_mean, stat_std = load_static_norm_params(datasets_dir / CLEAN_SUBDIR)
     static_norm = np.load(static_path).astype(np.float32)     # (6,) z-scored
     static_raw = (static_norm * stat_std + stat_mean).astype(np.float32)

@@ -1,15 +1,16 @@
-import json
 import tempfile
 from pathlib import Path
 import numpy as np
 import tensorflow as tf
-from common.config import NORM_PARAMS_FILE
 from .models.common import TrainableModel, Trainer
 
 def optimize_saved_model(rep_dataset: tf.data.Dataset, saved_dir: Path) -> bytes:
+    # The int8 model is built from the non-normalizing `infer` signature and fed
+    # already-normalized inputs, so the int8 input calibrates on normalized values
+    # (heterogeneous raw features would otherwise collapse under one per-tensor scale).
     def rep_iter():
         for feed in rep_dataset:
-            yield ('eval', feed)
+            yield ('infer', feed)
 
     converter = tf.lite.TFLiteConverter.from_saved_model(str(saved_dir))  # type: ignore
     converter.optimizations = [tf.lite.Optimize.DEFAULT]  # type: ignore
@@ -49,7 +50,7 @@ def save_optimized_model(output_dir: Path, model: TrainableModel,
     compiled_model_file = output_dir / f'quantized{postfix}.tflite'
 
     tf.saved_model.save(model, str(saved_model_dir), signatures={
-        'eval': model.eval.get_concrete_function(),
+        'infer': model.infer.get_concrete_function(),
     })
 
     compiled_model_file.write_bytes(optimize_saved_model(rep_dataset, saved_model_dir))
@@ -62,16 +63,8 @@ def load_trainable_weights(tflite_path: Path) -> np.ndarray:
     return np.asarray(save()['parameters'], dtype=np.float32)
 
 
-def save_norm_params(result_dir: Path, trainer: Trainer, data_root: Path):
-    """Serialize the trainer's model-specific normalization params to norm.json, so the
-    gateway can serve them per model over /model/norm and the device applies them at load."""
-    path = result_dir / NORM_PARAMS_FILE
-    path.write_text(json.dumps(trainer.norm_params(data_root)))
-    print(f"saved norm params to {path}")
-
-
 def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset: tf.data.Dataset | None,
-                   data_root: Path, postfix: str = ''):
+                   postfix: str = ''):
     saved_model, sm_path = save_tainable_model(result_dir, trainer.model, postfix)
     print(f"Saved trainable model to {sm_path}")
     try:
@@ -79,14 +72,13 @@ def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset: tf.data.Dat
         save_optimized_model(result_dir, trainer.model, rep_dataset, postfix)
     except Exception as e:
         print(f"Skipped int8 export (conversion failed): {e}")
-    save_norm_params(result_dir, trainer, data_root)
 
 
 def get_optimized_model(model: TrainableModel, rep_dataset: tf.data.Dataset) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         saved_dir = Path(tmp) / 'model'
         tf.saved_model.save(model, str(saved_dir), signatures={
-            'eval': model.eval.get_concrete_function(),
+            'infer': model.infer.get_concrete_function(),
         })
 
         return optimize_saved_model(rep_dataset, saved_dir)
