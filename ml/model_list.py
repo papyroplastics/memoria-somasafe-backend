@@ -23,23 +23,31 @@ class ModelSpec:
 
 MODELS: dict[str, ModelSpec] = {
     "feature-mlp": ModelSpec(
-        key="feature-mlp", name="Feature-based MLP",
-        purpose=ModelPurpose.train_only, app_version="1.0.0",
+        key="feature-mlp",
+        name="Feature-based MLP",
+        purpose=ModelPurpose.train_only,
+        app_version="1.0.0",
         build_trainer=feature_mlp.get_trainer,
     ),
     "lstm-ae": ModelSpec(
-        key="lstm-ae", name="LSTM Autoencoder",
-        purpose=ModelPurpose.train_only, app_version="1.0.0",
+        key="lstm-ae",
+        name="LSTM Autoencoder",
+        purpose=ModelPurpose.train_only,
+        app_version="1.0.0",
         build_trainer=lstm_autoencoder.get_trainer,
     ),
     "gru-ae": ModelSpec(
-        key="gru-ae", name="GRU Autoencoder",
-        purpose=ModelPurpose.train_only, app_version="1.0.0",
+        key="gru-ae",
+        name="GRU Autoencoder",
+        purpose=ModelPurpose.train_only,
+        app_version="1.0.0",
         build_trainer=gru_autoencoder.get_trainer,
     ),
     "cnn-ae": ModelSpec(
-        key="cnn-ae", name="CNN Autoencoder",
-        purpose=ModelPurpose.train_only, app_version="1.0.0",
+        key="cnn-ae",
+        name="CNN Autoencoder",
+        purpose=ModelPurpose.train_only,
+        app_version="1.0.0",
         build_trainer=cnn_autoencoder.get_trainer,
     ),
 }
