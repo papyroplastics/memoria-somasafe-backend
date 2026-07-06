@@ -1,12 +1,13 @@
+import base64
 import uuid
 from datetime import datetime
 from enum import Enum
 
 import numpy as np
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
-from sqlmodel import Session
+from sqlmodel import Session, select
 
 from worker.celery_app import app as celery_app
 
@@ -14,19 +15,22 @@ from common.config import (
     DOWNLOAD_COOLDOWN_SECONDS,
     QUANTIZE_DAILY_LIMIT,
     QUANTIZE_DAILY_WINDOW_SECONDS,
-    MODELS_DIR,
+    SUBMISSION_MODE,
+    SUBMIT_DAILY_LIMIT,
+    SUBMIT_DAILY_WINDOW_SECONDS,
 )
 from common.db import (
     GlobalWeights,
     JobStatus,
     ModelDefinition,
-    ModelFingerprint,
+    ModelVersion,
     QuantizationJob,
     User,
     WeightSubmission,
-    get_latest_weights,
+    get_latest_version,
     get_model_def,
     get_session,
+    get_version_weights,
     list_model_defs,
     user_owns_device,
     utcnow,
@@ -37,11 +41,16 @@ from .auth import get_current_user
 router = APIRouter(prefix="/model")
 
 QUANTIZE_TASK = "worker.tasks.quantize_submission"
+VALIDATE_TASK = "worker.tasks.validate_submission"
 
 
 FINGERPRINT_HEADER = "X-Model-Fingerprint"
+MODEL_VERSION_HEADER = "X-Model-Version"
 WEIGHTS_ID_HEADER = "X-Weights-ID"
 WEIGHTS_TIMESTAMP_HEADER = "X-Weights-Timestamp"
+SIGNATURE_HEADER = "X-Model-Signature"
+CONTRACT_VERSION_HEADER = "X-Contract-Version"
+NORM_PARAMS_HEADER = "X-Norm-Params"
 
 
 class Artifact(str, Enum):
@@ -49,23 +58,32 @@ class Artifact(str, Enum):
     quantized = "quantized"
 
 
-class ModelWeights(BaseModel):
-    parameters: list[float]
-    weights_id: int            # the GlobalWeights snapshot the client trained from
-
-
 class ModelInfo(BaseModel):
-    """What the gateway exposes about a model. The client compares ``fingerprint``
-    (architecture) and ``weights_version`` (latest global weights) against what it
-    holds locally to decide whether to re-download the model or just its weights."""
+    """What the gateway exposes about a model's latest version. The client
+    compares ``version`` (re-download and reset the local model when it moves —
+    the only thing that invalidates a federated epoch) and ``weights_version``
+    (re-pull the artifact when it moves) against what it holds locally, and
+    checks ``min_app_version`` against its own version before using the model."""
 
     key: str
     name: str
     purpose: str
     firmware_id: int | None
-    app_version: str
+    version: int
+    min_app_version: str
     fingerprint: str
-    version: str               # display_version, human-facing label
+    contract_version: int
+    param_count: int
+    weights_version: datetime | None
+
+
+class ModelVersionInfo(BaseModel):
+    version: int
+    fingerprint: str
+    contract_version: int
+    min_app_version: str
+    param_count: int
+    created_at: datetime
     weights_version: datetime | None
 
 
@@ -82,55 +100,111 @@ def require_device_owner(session: Session, user: User) -> None:
         raise HTTPException(status_code=403, detail="No attested device for this user")
 
 
-@router.get("/list", response_model=list[ModelInfo])
-def list_models(session: Session = Depends(get_session),
-                user: User = Depends(get_current_user)):
-    out = []
-    for meta in list_model_defs(session):
-        fp = session.get(ModelFingerprint, meta.fingerprint)
-        latest = get_latest_weights(session, meta.key)
-        out.append(ModelInfo(
-            key=meta.key, name=meta.name, purpose=meta.purpose.value,
-            firmware_id=meta.firmware_id, app_version=meta.app_version,
-            fingerprint=meta.fingerprint,
-            version=fp.display_version if fp else "",
-            weights_version=latest.created_at if latest else None,
-        ))
-    return out
+def require_submission_mode(mode: str) -> None:
+    """404 (not 403) when the deployment doesn't expose this upload path."""
+    if SUBMISSION_MODE not in (mode, "both"):
+        raise HTTPException(status_code=404, detail="Not found")
 
 
-@router.post("/quantize/{key}", status_code=202)
-def quantize_model(key: str, weights: ModelWeights,
-                   session: Session = Depends(get_session),
-                   user: User = Depends(get_current_user)):
-    require_device_owner(session, user)
-    enforce_daily_quota("quantize", user.id, key, QUANTIZE_DAILY_LIMIT, QUANTIZE_DAILY_WINDOW_SECONDS)
-    meta = require_model(session, key)
+def store_submission(session: Session, key: str, weights_id: int, body: bytes,
+                     user: User) -> WeightSubmission:
+    """Persist a raw-float32 weight upload against its base GlobalWeights
+    snapshot. Only malformedness is rejected here — whether the update is
+    *usable* for aggregation is judged asynchronously and never surfaced to
+    the client."""
+    require_model(session, key)
 
-    # Resolve the base weights the client trained from; they pin the architecture.
-    base = session.get(GlobalWeights, weights.weights_id)
+    base = session.get(GlobalWeights, weights_id)
     if base is None or base.model_key != key:
         raise HTTPException(status_code=400,
                             detail=f"Unknown base weights for model '{key}'")
 
-    # Reject weights trained against an outdated architecture — the worker could
-    # not restore them, and aggregation must not mix fingerprints.
-    if base.fingerprint != meta.fingerprint:
+    latest = get_latest_version(session, key)
+    if latest is None or base.version_id != latest.id:
         raise HTTPException(
             status_code=409,
-            detail=f"Stale architecture; model '{key}' is now {meta.fingerprint}")
+            detail=f"Frozen model version; only the latest version of '{key}' "
+                   f"accepts submissions")
+
+    if len(body) != base.param_count * 4:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Expected {base.param_count} little-endian float32 parameters")
+    if not np.all(np.isfinite(np.frombuffer(body, dtype=np.float32))):
+        raise HTTPException(status_code=400,
+                            detail="Parameters contain non-finite values")
 
     submission = WeightSubmission(
         user_id=user.id,
         model_key=key,
         base_weights_id=base.id,
-        fingerprint=base.fingerprint,
-        parameters=np.asarray(weights.parameters, dtype=np.float32).tobytes(),
-        param_count=len(weights.parameters),
+        version_id=latest.id,
+        parameters=bytes(body),
+        param_count=base.param_count,
     )
     session.add(submission)
     session.commit()
     session.refresh(submission)
+    return submission
+
+
+def _version_info(session: Session, version: ModelVersion) -> ModelVersionInfo:
+    weights = get_version_weights(session, version.id)
+    return ModelVersionInfo(
+        version=version.version, fingerprint=version.fingerprint,
+        contract_version=version.contract_version,
+        min_app_version=version.min_app_version,
+        param_count=version.param_count, created_at=version.created_at,
+        weights_version=weights.created_at if weights else None,
+    )
+
+
+@router.get("/list", response_model=list[ModelInfo])
+def list_models(session: Session = Depends(get_session),
+                user: User = Depends(get_current_user)):
+    out = []
+    for meta in list_model_defs(session):
+        latest = get_latest_version(session, meta.key)
+        if latest is None:
+            continue
+        weights = get_version_weights(session, latest.id)
+        out.append(ModelInfo(
+            key=meta.key, name=meta.name, purpose=meta.purpose.value,
+            firmware_id=meta.firmware_id,
+            version=latest.version, min_app_version=latest.min_app_version,
+            fingerprint=latest.fingerprint,
+            contract_version=latest.contract_version,
+            param_count=latest.param_count,
+            weights_version=weights.created_at if weights else None,
+        ))
+    return out
+
+
+@router.get("/versions/{key}", response_model=list[ModelVersionInfo])
+def list_versions(key: str,
+                  session: Session = Depends(get_session),
+                  user: User = Depends(get_current_user)):
+    """Every published version of a model, newest first. Only the newest accepts
+    submissions; older versions are frozen but still downloadable."""
+    require_model(session, key)
+    versions = session.exec(
+        select(ModelVersion)
+        .where(ModelVersion.model_key == key)
+        .order_by(ModelVersion.version.desc())  # type: ignore[attr-defined]
+    ).all()
+    return [_version_info(session, v) for v in versions]
+
+
+@router.post("/quantize/submit/{key}/{weights_id}", status_code=202)
+async def quantize_model(key: str, weights_id: int, request: Request,
+                         session: Session = Depends(get_session),
+                         user: User = Depends(get_current_user)):
+    """Upload locally-trained weights (raw LE float32 body) and get a signed
+    int8 artifact built from them; the submission also feeds aggregation."""
+    require_submission_mode("quantize")
+    require_device_owner(session, user)
+    enforce_daily_quota("quantize", user.id, key, QUANTIZE_DAILY_LIMIT, QUANTIZE_DAILY_WINDOW_SECONDS)
+    submission = store_submission(session, key, weights_id, await request.body(), user)
 
     job = QuantizationJob(submission_id=submission.id, model_key=key)
     session.add(job)
@@ -140,6 +214,22 @@ def quantize_model(key: str, weights: ModelWeights,
     celery_app.send_task(QUANTIZE_TASK, args=[str(job.id)])
 
     return {"job_id": str(job.id), "status_url": f"/model/quantize/result/{job.id}"}
+
+
+@router.post("/submit/{key}/{weights_id}", status_code=202)
+async def submit_weights(key: str, weights_id: int, request: Request,
+                         session: Session = Depends(get_session),
+                         user: User = Depends(get_current_user)):
+    """Submit-only federated update (raw LE float32 body): persisted for
+    aggregation and validated in the background; nothing comes back."""
+    require_submission_mode("submit")
+    require_device_owner(session, user)
+    enforce_daily_quota("submit", user.id, key, SUBMIT_DAILY_LIMIT, SUBMIT_DAILY_WINDOW_SECONDS)
+    submission = store_submission(session, key, weights_id, await request.body(), user)
+
+    celery_app.send_task(VALIDATE_TASK, args=[submission.id])
+
+    return {"submission_id": submission.id}
 
 
 @router.get("/quantize/result/{job_id}")
@@ -163,56 +253,70 @@ def quantize_result(job_id: uuid.UUID,
                             content={"status": job.status.value, "error": job.error})
 
     # done: stream the int8 .tflite and mark it served (cleanup happens later).
+    # Headers carry the signed fields the app forwards to the ESP32 (ml.payload).
     payload = bytes(job.result)
     job.served_at = utcnow()
     session.add(job)
     session.commit()
 
-    return Response(
-        content=payload,
-        media_type="application/octet-stream",
-        headers={"Content-Disposition": f'attachment; filename="{job.model_key}.tflite"'},
-    )
+    version = session.get(ModelVersion, submission.version_id)
+    headers = {
+        CONTRACT_VERSION_HEADER: str(version.contract_version),
+        NORM_PARAMS_HEADER: base64.b64encode(version.norm_params).decode(),
+        "Content-Disposition": f'attachment; filename="{job.model_key}.tflite"',
+    }
+    if job.signature is not None:
+        headers[SIGNATURE_HEADER] = base64.b64encode(job.signature).decode()
+
+    return Response(content=payload, media_type="application/octet-stream",
+                    headers=headers)
 
 
-@router.get("/weights/{key}")
-def get_weights(key: str,
-                session: Session = Depends(get_session),
-                user: User = Depends(get_current_user)):
-    """Latest global weights (raw float32 buffer) for the model's current
-    architecture. Lets a client refresh weights without re-pulling the whole
-    model when the fingerprint hasn't changed. Headers carry the architecture,
-    the weights id (echoed back to /quantize) and the timestamp (which the
-    client compares against to decide when to refresh)."""
-    require_device_owner(session, user)
-    require_model(session, key)
-    weights = get_latest_weights(session, key)
-    if weights is None:
-        raise HTTPException(status_code=404, detail=f"No weights for model '{key}'")
-    return Response(
-        content=bytes(weights.parameters),
-        media_type="application/octet-stream",
-        headers={
-            FINGERPRINT_HEADER: weights.fingerprint,
-            WEIGHTS_ID_HEADER: str(weights.id),
-            WEIGHTS_TIMESTAMP_HEADER: weights.created_at.isoformat(),
-            "Content-Disposition": f'attachment; filename="{key}-weights.bin"',
-        },
-    )
-
-
-@router.get("/download/{artifact}/{key}", response_class=FileResponse)
-def download_model(artifact: Artifact, key: str,
+@router.get("/download/{artifact}/{key}")
+def download_model(artifact: Artifact, key: str, version: int | None = None,
                    session: Session = Depends(get_session),
                    user: User = Depends(get_current_user)):
-    """Serve a model's trainable or default int8 artifact from results/<key>/.
-    The current architecture fingerprint travels in a header so the client can
-    record which architecture the downloaded model belongs to."""
+    """Serve an artifact of the model's newest (or, via ``?version=``, a frozen)
+    version, baked with that version's active global weights. The quantized
+    artifact additionally carries the signed fields the app forwards to the
+    ESP32 (ml.payload)."""
     require_device_owner(session, user)
     enforce_cooldown("download", user.id, key, DOWNLOAD_COOLDOWN_SECONDS)
-    meta = require_model(session, key)
-    return FileResponse(
-        path=MODELS_DIR / key / f"{artifact.value}.tflite",
-        filename=f"{key}-{artifact.value}.tflite",
-        headers={FINGERPRINT_HEADER: meta.fingerprint},
-    )
+    require_model(session, key)
+
+    if version is None:
+        ver = get_latest_version(session, key)
+    else:
+        ver = session.exec(
+            select(ModelVersion).where(ModelVersion.model_key == key,
+                                       ModelVersion.version == version)
+        ).first()
+    if ver is None:
+        raise HTTPException(status_code=404, detail=f"No such version of '{key}'")
+
+    weights = get_version_weights(session, ver.id)
+    if weights is None:
+        raise HTTPException(status_code=404, detail=f"No weights for model '{key}'")
+
+    blob = (weights.trainable_artifact if artifact is Artifact.trainable
+            else weights.quantized_artifact)
+    if blob is None:
+        raise HTTPException(status_code=404,
+                            detail=f"No {artifact.value} artifact for model '{key}'")
+
+    headers = {
+        FINGERPRINT_HEADER: ver.fingerprint,
+        MODEL_VERSION_HEADER: str(ver.version),
+        WEIGHTS_ID_HEADER: str(weights.id),
+        WEIGHTS_TIMESTAMP_HEADER: weights.created_at.isoformat(),
+        "Content-Disposition":
+            f'attachment; filename="{key}-v{ver.version}-{artifact.value}.tflite"',
+    }
+    if artifact is Artifact.quantized:
+        headers[CONTRACT_VERSION_HEADER] = str(ver.contract_version)
+        headers[NORM_PARAMS_HEADER] = base64.b64encode(ver.norm_params).decode()
+        if weights.artifact_signature is not None:
+            headers[SIGNATURE_HEADER] = base64.b64encode(weights.artifact_signature).decode()
+
+    return Response(content=bytes(blob), media_type="application/octet-stream",
+                    headers=headers)

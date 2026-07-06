@@ -23,8 +23,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
-from api.lib import ratelimit
-from api.main import app
+from ..lib import ratelimit
+from ..main import app
 from common.config import SEED_PASSWORD, SEED_USER
 from common.db import Device, Session, User, engine, utcnow
 

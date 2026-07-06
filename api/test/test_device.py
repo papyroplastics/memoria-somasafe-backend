@@ -5,7 +5,7 @@ import base64
 from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
 
-from api.lib import challenge
+from ..lib import challenge
 from common.db import Device, Session, engine
 
 

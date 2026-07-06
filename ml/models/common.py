@@ -42,17 +42,6 @@ class TrainableModel(tf.Module):
     save: tf.types.experimental.PolymorphicFunction = unbound    # type: ignore
     restore: tf.types.experimental.PolymorphicFunction = unbound # type: ignore
 
-    def arch_fingerprint(self) -> str:
-        """Stable hash of the trainable-variable layout (ordered name/shape/dtype).
-        Two models share a fingerprint iff their flat parameter buffers are
-        interchangeable, so it is the weight-compatibility boundary. Not a
-        ``tf.function`` — it inspects the Python-side variable list directly."""
-        manifest = [
-            (var.name, tuple(int(d) for d in var.shape), var.dtype.name)
-            for var in self.trainable_variables
-        ]
-        return hashlib.sha256(repr(manifest).encode()).hexdigest()[:16]
-
     def transfer_from(self, source: 'TrainableModel') -> None:
         """Copy ``source``'s trainable variables into this model for transfer
         learning. Both models must share the architecture (same ordered variable
@@ -189,7 +178,22 @@ class Trainer(ABC):
     default_batch_size: int
     batch_size: int
     data_subdir: str
-    signature_version: int   # fixes the norm_param_bytes layout in the firmware payload
+    # Fixes how the device feeds the model: the norm_param_bytes layout and the
+    # I/O signature semantics. Part of the signed model bytes (see ml.payload).
+    contract_version: int
+
+    def arch_fingerprint(self) -> str:
+        """Stable hash of the weight-compatibility boundary: the ordered
+        trainable-variable layout (name/shape/dtype) plus the baked normalization
+        params. Two builds share a fingerprint iff their flat parameter buffers
+        are semantically interchangeable. Derived from code + data, never
+        hand-bumped — the seed script checks the registry version against it."""
+        manifest = [
+            (var.name, tuple(int(d) for d in var.shape), var.dtype.name)
+            for var in self.model.trainable_variables
+        ]
+        return hashlib.sha256(
+            repr(manifest).encode() + self.norm_param_bytes()).hexdigest()[:16]
 
     @abstractmethod
     def subject_dataset(self, subject_dir: Path) -> tf.data.Dataset:
@@ -197,8 +201,8 @@ class Trainer(ABC):
 
     @abstractmethod
     def norm_param_bytes(self) -> bytes:
-        """The model's z-score params as LE float32, serialized for the signed firmware
-        payload (see ml.payload). Layout is fixed by ``signature_version``; the device
+        """The model's z-score params as LE float32, covered by the server's model
+        signature (see ml.payload). Layout is fixed by ``contract_version``; the device
         applies them as ``(x - mean) / std`` before the int8 (non-normalizing) model."""
 
     @abstractmethod
@@ -285,7 +289,7 @@ def autoencoder_norm_params(data_root: Path, data_subdir: str = CLEAN_SUBDIR):
 class AutoencoderTrainer(Trainer):
 
     primary_metric = 'recon_error'
-    signature_version = 2   # payload norm layout: signal mean/std(2 each), cond mean/std(8 each)
+    contract_version = 2   # norm layout: signal mean/std(2 each), cond mean/std(8 each)
 
     default_batch_size = 12
     default_sample_rate = BVP_RATE

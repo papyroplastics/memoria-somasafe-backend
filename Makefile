@@ -15,7 +15,7 @@ proto: shared
 get-data: shared
 	uv run -m scripts.get_dataset
 seed-db:
-	uv run -m scripts.seed_db
+	uv run -m scripts.seed_db --assign-device
 
 api-run:
 	uv run fastapi dev api --host 0.0.0.0

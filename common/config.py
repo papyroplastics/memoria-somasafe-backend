@@ -52,6 +52,15 @@ DOWNLOAD_COOLDOWN_SECONDS = int(os.environ.get("DOWNLOAD_COOLDOWN_SECONDS", MINU
 # Per-user, per-model daily cap on quantization submissions.
 QUANTIZE_DAILY_LIMIT = int(os.environ.get("QUANTIZE_DAILY_LIMIT", 2))
 QUANTIZE_DAILY_WINDOW_SECONDS = int(os.environ.get("QUANTIZE_DAILY_WINDOW_SECONDS", DAY))
+# Per-user, per-model daily cap on submit-only weight uploads.
+SUBMIT_DAILY_LIMIT = int(os.environ.get("SUBMIT_DAILY_LIMIT", 2))
+SUBMIT_DAILY_WINDOW_SECONDS = int(os.environ.get("SUBMIT_DAILY_WINDOW_SECONDS", DAY))
+
+# --- Weight upload paths (see api.routes.model) ---
+# Which upload endpoints the gateway exposes: "quantize" (submission + int8 artifact
+# back), "submit" (submission only, nothing returned) or "both". A real deployment
+# would pick one; "both" keeps the two architectures comparable during development.
+SUBMISSION_MODE = os.environ.get("SUBMISSION_MODE", "both")
 
 # --- Device attestation (see api.routes.device) ---
 # How long an issued ownership challenge stays valid before it must be reissued.

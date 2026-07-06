@@ -10,6 +10,7 @@ from worker.celery_app import app
 from worker.utils.weight_validation import (
     compute_mse_threshold,
     filter_outliers,
+    malformed_reason,
     mse,
     validate_submission,
 )
@@ -27,19 +28,21 @@ from common.db import (
     QuantizationJob,
     WeightSubmission,
     engine,
+    get_latest_version,
     get_latest_weights,
+    get_version_weights,
     utcnow,
 )
 
 from ml.model_list import MODELS
-from ml.payload import build_payload
-from ml.saving import get_optimized_model
+from ml.payload import sign_model
+from ml.saving import get_optimized_model, get_trainable_model
 from ml.training import fed_avg
 
-# Per-process cache of (model, representative_dataset, fingerprint, signature_version,
+# Per-process cache of (model, representative_dataset, fingerprint, contract_version,
 # norm_bytes), built once at startup so TensorFlow and the calibration data load once
 # per worker, not once per job. Models whose dataset is absent (not trained yet) are
-# skipped — the worker only ever quantizes models that scripts.db_seed put in the DB.
+# skipped — the worker only ever touches models that scripts.seed_db put in the DB.
 _models: dict[str, tuple] = {}
 
 
@@ -47,10 +50,10 @@ def _init_models() -> None:
     for key in MODELS:
         try:
             trainer = MODELS[key].build_trainer(DATASETS_DIR)
-            fingerprint = trainer.model.arch_fingerprint()
+            fingerprint = trainer.arch_fingerprint()
             rep = trainer.representative_dataset(data_root=DATASETS_DIR)
             _models[key] = (trainer.model, rep, fingerprint,
-                            trainer.signature_version, trainer.norm_param_bytes())
+                            trainer.contract_version, trainer.norm_param_bytes())
         except Exception as exc:  # missing dataset / build error — skip, don't crash boot
             print(f"[worker] model '{key}' unavailable, skipping: {exc}")
 
@@ -76,22 +79,32 @@ def quantize_submission(job_id: str) -> None:
                 raise ValueError(f"submission {job.submission_id} not found")
             if job.model_key not in _models:
                 raise ValueError(f"model '{job.model_key}' not initialized")
-            model, rep_dataset, fingerprint, signature_version, norm_bytes = _models[job.model_key]
-            if submission.fingerprint != fingerprint:
-                raise ValueError(
-                    f"submission fingerprint {submission.fingerprint} != "
-                    f"current {fingerprint} for '{job.model_key}'")
-            reason = validate_submission(
-                submission, model.total_parameter_size,
-                get_latest_weights(session, job.model_key))
-            submission.valid = reason is None
-            session.add(submission)
+            model, rep_dataset, fingerprint, contract_version, norm_bytes = _models[job.model_key]
+
+            # Reject weights trained against an outdated version — the worker
+            # could not restore them, and aggregation must not mix versions.
+            latest = get_latest_version(session, job.model_key)
+            if latest is None or submission.version_id != latest.id \
+                    or latest.fingerprint != fingerprint:
+                raise ValueError(f"stale model version for '{job.model_key}'")
+
+            reason = malformed_reason(submission, model.total_parameter_size)
             if reason is not None:
+                submission.valid = False
+                session.add(submission)
                 raise ValueError(f"invalid submission: {reason}")
+
+            # Aggregation-usability is judged silently: the verdict is cached on
+            # the row and the artifact is produced either way.
+            submission.valid = validate_submission(
+                submission, model.total_parameter_size,
+                get_latest_weights(session, job.model_key)) is None
+            session.add(submission)
+
             params = np.frombuffer(submission.parameters, dtype=np.float32).copy()
             model.restore(tf.constant(params, dtype=tf.float32))
-            tflite = bytes(get_optimized_model(model, rep_dataset))
-            job.result = build_payload(tflite, signature_version, norm_bytes,
+            job.result = bytes(get_optimized_model(model, rep_dataset))
+            job.signature = sign_model(job.result, contract_version, norm_bytes,
                                        SERVER_PRIVATE_KEY_FILE)
             job.status = JobStatus.done
         except Exception as exc:  # surfaced to the client via the result endpoint
@@ -103,12 +116,35 @@ def quantize_submission(job_id: str) -> None:
             session.commit()
 
 
+@app.task(name="worker.tasks.validate_submission")
+def validate_weight_submission(submission_id: int) -> None:
+    """Background verdict for a submit-only upload. Cached on the row for
+    aggregation; never surfaced to the client."""
+    with Session(engine) as session:
+        submission = session.get(WeightSubmission, submission_id)
+        if submission is None or submission.model_key not in _models:
+            return
+        model, _, _, _, _ = _models[submission.model_key]
+        reason = validate_submission(submission, model.total_parameter_size,
+                                     get_latest_weights(session, submission.model_key))
+        submission.valid = reason is None
+        if reason is not None:
+            print(f"[validate] {submission.model_key}: "
+                  f"submission {submission.id} rejected: {reason}")
+        session.add(submission)
+        session.commit()
+
+
 def _aggregate_model(session: Session, key: str) -> str:
     if key not in _models:
         return "skipped: model not initialized"
-    model, _, fingerprint, _, _ = _models[key]
+    model, rep_dataset, fingerprint, contract_version, norm_bytes = _models[key]
 
-    reference = get_latest_weights(session, key)
+    latest = get_latest_version(session, key)
+    if latest is None or latest.fingerprint != fingerprint:
+        return "skipped: no seeded version matching the running code"
+
+    reference = get_version_weights(session, latest.id)
     if reference is None:
         return "skipped: no active global weights"
 
@@ -116,15 +152,13 @@ def _aggregate_model(session: Session, key: str) -> str:
     # consumed by a later-invalidated round are not re-aggregated.
     cutoff = session.exec(
         select(GlobalWeights.created_at)
-        .where(GlobalWeights.model_key == key,
-               GlobalWeights.fingerprint == fingerprint)
+        .where(GlobalWeights.version_id == latest.id)
         .order_by(GlobalWeights.created_at.desc())  # type: ignore[attr-defined]
     ).first()
 
     submissions = list(session.exec(
         select(WeightSubmission)
-        .where(WeightSubmission.model_key == key,
-               WeightSubmission.fingerprint == fingerprint,
+        .where(WeightSubmission.version_id == latest.id,
                WeightSubmission.created_at > cutoff)
         .order_by(WeightSubmission.created_at.asc())  # type: ignore[attr-defined]
     ))
@@ -132,7 +166,7 @@ def _aggregate_model(session: Session, key: str) -> str:
 
     valid: list[WeightSubmission] = []
     for sub in latest_per_user.values():
-        if sub.valid is None:  # never went through quantization's validation
+        if sub.valid is None:  # never validated by the quantize/submit tasks
             reason = validate_submission(sub, model.total_parameter_size, reference)
             sub.valid = reason is None
             session.add(sub)
@@ -153,14 +187,34 @@ def _aggregate_model(session: Session, key: str) -> str:
     reference_params = np.frombuffer(reference.parameters, dtype=np.float32)
     averaged = fed_avg(kept).astype(np.float32)
 
+    # Bake the averaged weights into fresh serving artifacts. A failed export
+    # invalidates the round: clients keep pulling the previous snapshot, and the
+    # window's submissions stay consumed.
+    model.restore(tf.constant(averaged, dtype=tf.float32))
+    trainable = quantized = signature = export_error = None
+    try:
+        trainable = bytes(get_trainable_model(model))
+        quantized = bytes(get_optimized_model(model, rep_dataset))
+        signature = sign_model(quantized, contract_version, norm_bytes,
+                               SERVER_PRIVATE_KEY_FILE)
+    except Exception as exc:
+        export_error = exc
+
     session.add(GlobalWeights(
-        model_key=key, fingerprint=fingerprint,
+        model_key=key, version_id=latest.id,
         parameters=averaged.tobytes(),
         param_count=model.total_parameter_size,
+        valid=export_error is None,
         mse_threshold=compute_mse_threshold(
             [mse(vector, reference_params) for vector in kept]),
+        trainable_artifact=trainable,
+        quantized_artifact=quantized,
+        artifact_signature=signature,
     ))
     session.commit()
+    if export_error is not None:
+        return (f"aggregated {len(kept)} submissions but artifact export failed "
+                f"(round invalidated): {export_error}")
     return (f"aggregated {len(kept)} submissions "
             f"({len(submissions)} in window, {len(latest_per_user)} users, "
             f"{len(valid) - len(kept)} outliers dropped)")
@@ -202,6 +256,7 @@ def cleanup_results() -> int:
         )
         for job in session.exec(stmt):
             job.result = None
+            job.signature = None
             job.status = JobStatus.expired
             session.add(job)
             cleaned += 1

@@ -15,10 +15,14 @@ class ModelSpec:
     key: str
     name: str
     purpose: ModelPurpose
-    app_version: str
+    min_app_version: str   # oldest app that can use the current version
     build_trainer: TrainerBuilder
     firmware_id: int | None = None
-    version: str = "1.0"   # human-facing label; NOT the compatibility key
+    # Hand-bumped on any change that invalidates existing weights (architecture,
+    # baked norm params, contract). The seed script errors if the fingerprint
+    # moved without a bump, and publishes a new frozen-history ModelVersion row
+    # when it did.
+    version: int = 1
 
 
 MODELS: dict[str, ModelSpec] = {
@@ -26,28 +30,28 @@ MODELS: dict[str, ModelSpec] = {
         key="feature-mlp",
         name="Feature-based MLP",
         purpose=ModelPurpose.train_only,
-        app_version="1.0.0",
+        min_app_version="1.0.0",
         build_trainer=feature_mlp.get_trainer,
     ),
     "lstm-ae": ModelSpec(
         key="lstm-ae",
         name="LSTM Autoencoder",
         purpose=ModelPurpose.train_only,
-        app_version="1.0.0",
+        min_app_version="1.0.0",
         build_trainer=lstm_autoencoder.get_trainer,
     ),
     "gru-ae": ModelSpec(
         key="gru-ae",
         name="GRU Autoencoder",
         purpose=ModelPurpose.train_only,
-        app_version="1.0.0",
+        min_app_version="1.0.0",
         build_trainer=gru_autoencoder.get_trainer,
     ),
     "cnn-ae": ModelSpec(
         key="cnn-ae",
         name="CNN Autoencoder",
         purpose=ModelPurpose.train_only,
-        app_version="1.0.0",
+        min_app_version="1.0.0",
         build_trainer=cnn_autoencoder.get_trainer,
     ),
 }

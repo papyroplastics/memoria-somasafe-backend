@@ -2,6 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
+from sqlalchemy import UniqueConstraint
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from common.config import DATABASE_URL
@@ -68,51 +69,63 @@ class Device(SQLModel, table=True):
     last_attested_at: datetime | None = None
 
 
-class ModelFingerprint(SQLModel, table=True):
-    """An architecture identity. ``fingerprint`` is derived from the model's
-    trainable-variable layout (TrainableModel.arch_fingerprint) and is the
-    weight-compatibility boundary: parameters are only interchangeable within
-    one fingerprint. ``display_version`` is the human-facing label from the code
-    registry (ml.model_list) — informational, not a source of truth."""
-
-    fingerprint: str = Field(primary_key=True)
-    display_version: str
-    param_count: int
-    created_at: datetime = Field(default_factory=utcnow)
-
-
 class ModelDefinition(SQLModel, table=True):
-    """Per-model metadata registry, served by the gateway. Seeded by
-    scripts.db_seed from ml.model_list; ``fingerprint`` is the architecture
-    currently deployed in code (clients reset their local model when it changes,
-    which is the only thing that invalidates a federated epoch)."""
+    """Per-model identity registry, served by the gateway. Seeded by
+    scripts.seed_db from ml.model_list; everything that varies over a model's
+    lifetime lives on its ModelVersion rows."""
 
     key: str = Field(primary_key=True)
     name: str
     last_updated: datetime = Field(default_factory=utcnow)
     purpose: ModelPurpose
     firmware_id: int | None = None
-    app_version: str
-    fingerprint: str = Field(foreign_key="modelfingerprint.fingerprint", index=True)
 
 
-class GlobalWeights(SQLModel, table=True):
-    """A snapshot of a model's global parameters. Seeded from the trained tflite
-    and appended to by aggregation. The active weights of a model are the latest
-    **valid** row matching its current ``fingerprint``; ``created_at`` is the
-    weight version clients compare against to decide when to re-pull weights.
-    ``valid`` is a hand-operated kill switch: set it to false to roll back an
-    aggregation round that made the model worse. ``mse_threshold`` is the
-    allowed submission error computed by that round (None on seeded rows, which
-    skips the check in weight validation)."""
+class ModelVersion(SQLModel, table=True):
+    """One published version of a model. ``version`` is the hand-bumped integer
+    from the code registry (ml.model_list); ``fingerprint`` (Trainer.arch_fingerprint,
+    a hash of the trainable-variable layout plus the baked normalization params) is
+    the tripwire the seed script checks it against — a moved fingerprint without a
+    version bump aborts the seed. Only the newest version per model accepts weight
+    submissions; older versions are frozen but still served. ``min_app_version`` is
+    the oldest app that can use the version; ``contract_version`` fixes how the
+    device feeds the model (norm_params layout + I/O signatures, see ml.payload)."""
 
     id: int | None = Field(default=None, primary_key=True)
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
-    fingerprint: str = Field(foreign_key="modelfingerprint.fingerprint", index=True)
+    version: int
+    fingerprint: str
+    param_count: int
+    contract_version: int
+    norm_params: bytes         # the version's z-score params (LE float32)
+    min_app_version: str
+    created_at: datetime = Field(default_factory=utcnow)
+
+    __table_args__ = (UniqueConstraint("model_key", "version"),)
+
+
+class GlobalWeights(SQLModel, table=True):
+    """A snapshot of a model version's global parameters, plus the serving
+    artifacts baked from them. Seeded from the trained tflite files and appended
+    to by aggregation, which re-exports both artifacts (and signs the quantized
+    one, see ml.payload) each round. The active weights of a version are its
+    latest **valid** row; ``created_at`` is the weight version clients compare
+    against to decide when to re-pull. ``valid`` doubles as a hand-operated kill
+    switch (flip it to roll back a bad round — the previous row's artifacts come
+    back with it) and is set to false by aggregation itself when an artifact
+    export fails. ``mse_threshold`` is the allowed submission error computed by
+    that round (None on seeded rows, which skips the check in weight validation)."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    model_key: str = Field(foreign_key="modeldefinition.key", index=True)
+    version_id: int = Field(foreign_key="modelversion.id", index=True)
     parameters: bytes          # packed float32 (np.float32 .tobytes())
     param_count: int
     valid: bool = True
     mse_threshold: float | None = None
+    trainable_artifact: bytes | None = None   # LiteRT-trainable .tflite with these weights
+    quantized_artifact: bytes | None = None   # int8 .tflite with these weights
+    artifact_signature: bytes | None = None   # DER ECDSA over the canonical model bytes
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
@@ -120,18 +133,18 @@ class WeightSubmission(SQLModel, table=True):
     """A client-uploaded weight update. Persisted indefinitely: besides feeding
     quantization, these rows are the substrate for federated aggregation
     (worker.tasks.federated_aggregation). ``base_weights_id`` is the
-    GlobalWeights snapshot the client trained from; ``fingerprint`` (its
-    architecture) is denormalized off it so aggregation can filter without a
-    join and never mixes incompatible updates. ``valid`` is the cached
-    weight-validation verdict — None until validated; normally set by
-    quantize_submission, and by aggregation for rows that never went through
-    a quantization job."""
+    GlobalWeights snapshot the client trained from; ``version_id`` (its model
+    version) is denormalized off it so aggregation can filter without a join and
+    never mixes incompatible updates. ``valid`` is the cached weight-validation
+    verdict — None until validated; set by the quantize/validate tasks, and by
+    aggregation for rows neither got to. The verdict is never surfaced to the
+    client (a Byzantine client should not learn its update was filtered)."""
 
     id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     model_key: str
     base_weights_id: int = Field(foreign_key="globalweights.id", index=True)
-    fingerprint: str = Field(foreign_key="modelfingerprint.fingerprint", index=True)
+    version_id: int = Field(foreign_key="modelversion.id", index=True)
     parameters: bytes          # packed float32 (np.float32 .tobytes())
     param_count: int
     valid: bool | None = None
@@ -140,19 +153,35 @@ class WeightSubmission(SQLModel, table=True):
 
 class QuantizationJob(SQLModel, table=True):
     """Tracks one quantization request end to end. ``result`` holds the int8
-    .tflite bytes and is the only ephemeral field — it is nulled by the cleanup
-    sweep once served (after a grace period) or once expired (unclaimed)."""
+    .tflite bytes and ``signature`` the server's ECDSA over its canonical model
+    bytes (ml.payload); both are ephemeral — nulled by the cleanup sweep once
+    served (after a grace period) or once expired (unclaimed)."""
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     submission_id: int = Field(foreign_key="weightsubmission.id")
     model_key: str
     status: JobStatus = Field(default=JobStatus.pending)
     result: bytes | None = None
+    signature: bytes | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
     finished_at: datetime | None = None
     served_at: datetime | None = None
+
+
+class Firmware(SQLModel, table=True):
+    """A published firmware build. Placeholder for the future OTA path:
+    ``interface_version`` is the BLE contract an app build must share to talk to
+    it; ``supported_contract_version`` is the model contract it can consume;
+    ``blob`` will hold the image once distribution exists."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    version: str
+    interface_version: int
+    supported_contract_version: int
+    blob: bytes | None = None
+    created_at: datetime = Field(default_factory=utcnow)
 
 
 engine = create_engine(DATABASE_URL)
@@ -175,21 +204,33 @@ def get_model_def(session: Session, key: str) -> ModelDefinition | None:
     return session.get(ModelDefinition, key)
 
 
-def get_latest_weights(session: Session, key: str) -> GlobalWeights | None:
-    """The model's active weights: the newest **valid** GlobalWeights row
-    matching its current architecture fingerprint. ``None`` if the model is
-    unknown or has no compatible weights yet (e.g. right after an architecture
-    change, or every compatible row was invalidated by hand)."""
-    meta = session.get(ModelDefinition, key)
-    if meta is None:
-        return None
+def get_latest_version(session: Session, key: str) -> ModelVersion | None:
+    """The model's newest published version — the only one accepting submissions."""
+    return session.exec(
+        select(ModelVersion)
+        .where(ModelVersion.model_key == key)
+        .order_by(ModelVersion.version.desc())  # type: ignore[attr-defined]
+    ).first()
+
+
+def get_version_weights(session: Session, version_id: int) -> GlobalWeights | None:
+    """A version's active weights: its newest **valid** GlobalWeights row.
+    ``None`` if every row was invalidated (by hand or by a failed export)."""
     return session.exec(
         select(GlobalWeights)
-        .where(GlobalWeights.model_key == key,
-               GlobalWeights.fingerprint == meta.fingerprint,
+        .where(GlobalWeights.version_id == version_id,
                GlobalWeights.valid == True)  # noqa: E712 — SQL expression
         .order_by(GlobalWeights.created_at.desc())  # type: ignore[attr-defined]
     ).first()
+
+
+def get_latest_weights(session: Session, key: str) -> GlobalWeights | None:
+    """The model's active weights: the newest valid row of its latest version.
+    ``None`` if the model is unknown or has no usable weights yet."""
+    latest = get_latest_version(session, key)
+    if latest is None:
+        return None
+    return get_version_weights(session, latest.id)
 
 
 def user_owns_device(session: Session, user_id: int) -> bool:

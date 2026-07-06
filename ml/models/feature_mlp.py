@@ -87,7 +87,7 @@ class FeatureMLPTrainer(Trainer):
 
     primary_metric = 'accuracy'
     default_batch_size = 1
-    signature_version = 1   # payload norm layout: mean[17] then std[17], LE float32
+    contract_version = 1   # norm layout: mean[17] then std[17], LE float32
 
     def __init__(self, model: FeatureMLP, batch_size: int = 1,
                  train_split: float = 0.8):
