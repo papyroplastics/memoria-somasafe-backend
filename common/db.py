@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import UniqueConstraint
+from sqlalchemy import JSON, Column, UniqueConstraint
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from common.config import DATABASE_URL
@@ -171,16 +171,19 @@ class QuantizationJob(SQLModel, table=True):
 
 
 class Firmware(SQLModel, table=True):
-    """A published firmware build. Placeholder for the future OTA path:
+    """A published firmware build, seeded from a `shared/gen/firmware/{version}`
+    export (`firmware/scripts/export_image.py`) and served by the /ota routes.
     ``interface_version`` is the BLE contract an app build must share to talk to
-    it; ``supported_contract_version`` is the model contract it can consume;
-    ``blob`` will hold the image once distribution exists."""
+    it; ``supported_contracts`` are the model contract versions it can consume;
+    ``signature`` is the server's ECDSA over the raw image bytes, verified by
+    the device against its factory srv_pub before booting the image."""
 
     id: int | None = Field(default=None, primary_key=True)
-    version: str
-    interface_version: int
-    supported_contract_version: int
-    blob: bytes | None = None
+    version: str = Field(unique=True, index=True)  # arbitrary <=32-byte build string
+    interface_version: int = Field(index=True)
+    supported_contracts: list[int] = Field(sa_column=Column(JSON))
+    blob: bytes
+    signature: bytes | None = None                 # DER ECDSA over the raw image
     created_at: datetime = Field(default_factory=utcnow)
 
 
@@ -231,6 +234,23 @@ def get_latest_weights(session: Session, key: str) -> GlobalWeights | None:
     if latest is None:
         return None
     return get_version_weights(session, latest.id)
+
+
+def list_firmware(session: Session, interface_version: int) -> list[Firmware]:
+    """Every published firmware build for a BLE interface version, newest first."""
+    return list(session.exec(
+        select(Firmware)
+        .where(Firmware.interface_version == interface_version)
+        .order_by(Firmware.created_at.desc())  # type: ignore[attr-defined]
+    ).all())
+
+
+def get_firmware(session: Session, interface_version: int,
+                 version: str) -> Firmware | None:
+    return session.exec(
+        select(Firmware).where(Firmware.interface_version == interface_version,
+                               Firmware.version == version)
+    ).first()
 
 
 def user_owns_device(session: Session, user_id: int) -> bool:

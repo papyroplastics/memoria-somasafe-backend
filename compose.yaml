@@ -4,20 +4,20 @@
 # since only the host-run API needs to reach them — the phone talks to the API.
 services:
   postgres:
-    image: docker.io/library/postgres:16
+    image: docker.io/library/postgres:18-alpine
     environment:
       POSTGRES_USER: somasafe
       POSTGRES_PASSWORD: somasafe
       POSTGRES_DB: somasafe
     ports:
-      - "127.0.0.1:5432:5432"
+      - 5432:5432
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      - postgres_data:/var/lib/postgresql
 
   redis:
-    image: docker.io/library/redis:7-alpine
+    image: docker.io/library/redis:8-alpine
     ports:
-      - "127.0.0.1:6379:6379"
+      - 6379:6379
     volumes:
       - redis_data:/data
 

@@ -1,5 +1,5 @@
-"""Seed the database with default rows: the model registry, a default user,
-and a device from a factory NVS partition definition.
+"""Seed the database with default rows: the model registry, exported firmware
+builds, a default user, and a device from a factory NVS partition definition.
 
 Idempotent — run it after the services are up to bootstrap a fresh database:
 
@@ -10,6 +10,8 @@ Idempotent — run it after the services are up to bootstrap a fresh database:
 
 import argparse
 import csv
+import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from sqlmodel import Session, select
@@ -36,10 +38,11 @@ from common.db import (
     utcnow,
 )
 from ml.model_list import MODELS
-from ml.payload import sign_model
+from ml.payload import sign_blob, sign_model
 from ml.saving import load_trainable_weights
 
 default_nvs = "shared/gen/factory_nvs.csv"
+default_firmware_dir = "shared/gen/firmware"
 
 def seed_models(session: Session) -> None:
     """Seed each model that has a trained artifact on disk. Building the trainer
@@ -114,12 +117,50 @@ def seed_models(session: Session) -> None:
     session.commit()
 
 
-def seed_firmware(session: Session) -> None:
-    if session.exec(select(Firmware)).first() is None:
-        session.add(Firmware(version="1.0.0", interface_version=1,
-                             supported_contract_version=1))
-        session.commit()
-        print("  + firmware '1.0.0' (interface 1, contract 1)")
+def seed_firmware(session: Session, firmware_dir: Path) -> None:
+    """Seed each firmware version exported to ``firmware_dir`` (one
+    ``{version}/`` subdirectory with ``firmware.bin`` + ``metadata.json``,
+    written by ``firmware/scripts/export_image.py``), signing the image with
+    the server key. Already-seeded versions are skipped — a re-exported build
+    under the same version needs the stored row deleted first."""
+    if not firmware_dir.is_dir():
+        print(f"  - firmware skipped (no {firmware_dir})")
+        return
+
+    for entry in sorted(firmware_dir.iterdir()):
+        metadata_file = entry / "metadata.json"
+        image_file = entry / "firmware.bin"
+        if not metadata_file.exists() or not image_file.exists():
+            continue
+
+        metadata = json.loads(metadata_file.read_text())
+        version = metadata["version"]
+        if session.exec(select(Firmware).where(Firmware.version == version)).first():
+            print(f"  = firmware '{version}' (already present)")
+            continue
+
+        blob = image_file.read_bytes()
+        signature = None
+        if SERVER_PRIVATE_KEY_FILE.exists():
+            signature = sign_blob(blob, SERVER_PRIVATE_KEY_FILE)
+        else:
+            print(f"  ! no key at {SERVER_PRIVATE_KEY_FILE}; "
+                  f"firmware '{version}' left unsigned")
+
+        created_at = datetime.fromisoformat(metadata["created_at"])
+        if created_at.tzinfo is not None:
+            created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)
+        session.add(Firmware(
+            version=version,
+            interface_version=metadata["interface_version"],
+            supported_contracts=metadata["supported_contracts"],
+            blob=blob,
+            signature=signature,
+            created_at=created_at,
+        ))
+        print(f"  + firmware '{version}' (interface {metadata['interface_version']}, "
+              f"contracts {metadata['supported_contracts']}, {len(blob)} bytes)")
+    session.commit()
 
 
 def seed_users(session: Session) -> User:
@@ -173,6 +214,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("factory_nvs", nargs='?', type=Path, default=Path(default_nvs),
                         help="factory NVS partition CSV to seed as a device")
+    parser.add_argument("--firmware-dir", type=Path, default=Path(default_firmware_dir),
+                        help="directory of exported firmware versions to seed")
     parser.add_argument("--assign-device", action="store_true",
                         help="assign the seeded device to the seed user, even if either already existed")
     args = parser.parse_args()
@@ -183,7 +226,7 @@ def main() -> None:
     init_db()
     with Session(engine) as session:
         seed_models(session)
-        seed_firmware(session)
+        seed_firmware(session, args.firmware_dir)
         user = seed_users(session)
         seed_device(session, args.factory_nvs, user if args.assign_device else None)
     print("Seed complete.")

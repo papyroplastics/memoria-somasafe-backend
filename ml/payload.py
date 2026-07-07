@@ -33,12 +33,16 @@ def canonical_model_bytes(tflite: bytes, contract_version: int, norm_params: byt
     return struct.pack('<H', contract_version) + norm_params + tflite
 
 
+def sign_blob(data: bytes, key_path: Path) -> bytes:
+    """ECDSA P-256 (SHA-256) DER signature over raw bytes (e.g. a firmware image)."""
+    return _load_private(key_path).sign(data, ec.ECDSA(hashes.SHA256()))
+
+
 def sign_model(tflite: bytes, contract_version: int, norm_params: bytes,
                key_path: Path) -> bytes:
     """ECDSA P-256 (SHA-256) DER signature over the canonical model bytes."""
-    return _load_private(key_path).sign(
-        canonical_model_bytes(tflite, contract_version, norm_params),
-        ec.ECDSA(hashes.SHA256()))
+    return sign_blob(canonical_model_bytes(tflite, contract_version, norm_params),
+                     key_path)
 
 
 def verify_model(signature: bytes, tflite: bytes, contract_version: int,

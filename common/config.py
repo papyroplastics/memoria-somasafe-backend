@@ -49,6 +49,8 @@ SEED_EMAIL = os.environ.get("SEED_EMAIL") or None
 RATELIMIT_URL = os.environ.get("RATELIMIT_URL", "redis://localhost:6379/1")
 # Per-user, per-model cooldown between artifact downloads (trainable/quantized).
 DOWNLOAD_COOLDOWN_SECONDS = int(os.environ.get("DOWNLOAD_COOLDOWN_SECONDS", MINUTE * 5))
+# Per-user, per-interface cooldown between firmware image downloads.
+OTA_DOWNLOAD_COOLDOWN_SECONDS = int(os.environ.get("OTA_DOWNLOAD_COOLDOWN_SECONDS", MINUTE * 5))
 # Per-user, per-model daily cap on quantization submissions.
 QUANTIZE_DAILY_LIMIT = int(os.environ.get("QUANTIZE_DAILY_LIMIT", 2))
 QUANTIZE_DAILY_WINDOW_SECONDS = int(os.environ.get("QUANTIZE_DAILY_WINDOW_SECONDS", DAY))
