@@ -8,14 +8,21 @@ shared:
 	else \
 		git clone ${shared_repo} shared; \
 	fi
+	$(MAKE) -C shared setup
 
 proto: shared
 	protoc --proto_path=shared --python_out=scripts/common shared/dataset.proto
 
 get-data: shared
 	uv run -m scripts.get_dataset
-seed-db:
+
+db-seed: shared
 	uv run -m scripts.seed_db --assign-device
+db-run:
+	podman compose up
+db-clean:
+	podman compose down
+	podman volume rm -a
 
 api-run:
 	uv run fastapi dev api --host 0.0.0.0
@@ -24,4 +31,5 @@ api-test:
 
 worker-run:
 	uv run -m celery -A worker.celery_app worker -B --loglevel=info
+
 

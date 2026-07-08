@@ -53,9 +53,10 @@ def test_versions_lists_latest(client, auth_headers):
     assert versions and versions[0]["version"] == model["version"]
 
 
-def test_download_requires_device_owner(client, auth_headers):
+def test_download_requires_device_owner(client, auth_headers, deviceless_auth_headers):
     model = _model_with_weights(client, auth_headers)
-    resp = client.get(f"/model/download/trainable/{model['key']}", headers=auth_headers)
+    resp = client.get(f"/model/download/trainable/{model['key']}",
+                      headers=deviceless_auth_headers)
     assert resp.status_code == 403
 
 

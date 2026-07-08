@@ -71,10 +71,10 @@ def test_download_requires_auth(client, firmwares):
     assert client.get(f"/ota/download/{interface}/{new_version}").status_code == 401
 
 
-def test_download_requires_device_owner(client, auth_headers, firmwares):
+def test_download_requires_device_owner(client, deviceless_auth_headers, firmwares):
     interface, new_version, _ = firmwares
     resp = client.get(f"/ota/download/{interface}/{new_version}",
-                      headers=auth_headers)
+                      headers=deviceless_auth_headers)
     assert resp.status_code == 403
 
 

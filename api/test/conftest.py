@@ -25,8 +25,9 @@ from sqlmodel import select
 
 from ..lib import ratelimit
 from ..main import app
+from ..routes.auth import hash_password
 from common.config import SEED_PASSWORD, SEED_USER
-from common.db import Device, Session, User, engine, utcnow
+from common.db import AuthSession, Device, Session, User, engine, utcnow
 
 
 def pub_point(priv: ec.EllipticCurvePrivateKey) -> bytes:
@@ -66,6 +67,33 @@ def auth_headers(client) -> dict:
                        data={"username": SEED_USER, "password": SEED_PASSWORD})
     assert resp.status_code == 200, resp.text
     return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+
+@pytest.fixture
+def deviceless_auth_headers(client) -> dict:
+    """Auth headers for a throwaway user guaranteed to own no device — unlike
+    SEED_USER, whose device ownership depends on whether the local DB was
+    seeded with ``--assign-device`` (see scripts.seed_db)."""
+    username = f"test-deviceless-{secrets.token_hex(4)}"
+    password = secrets.token_urlsafe(16)
+    with Session(engine) as session:
+        user = User(username=username, hashed_password=hash_password(password))
+        session.add(user)
+        session.commit()
+        user_id = user.id
+
+    resp = client.post("/auth/token", data={"username": username, "password": password})
+    assert resp.status_code == 200, resp.text
+    yield {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+    with Session(engine) as session:
+        for auth_session in session.exec(
+                select(AuthSession).where(AuthSession.user_id == user_id)):
+            session.delete(auth_session)
+        user = session.get(User, user_id)
+        if user is not None:
+            session.delete(user)
+        session.commit()
 
 
 @pytest.fixture
