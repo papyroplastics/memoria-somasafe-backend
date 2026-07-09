@@ -8,9 +8,10 @@ For each round, and for each training subject (as user ``test_N``), it:
   4. uploads the resulting parameters to the model's submission endpoint,
   5. logs out.
 
-After every client has submitted it queues one aggregation round and polls
-``GlobalWeights`` until the new snapshot appears, then scores it on the held-out
-subjects. A per-round metric series is written out for the convergence curve.
+After every client has submitted it queues one aggregation round, waits for the
+task to finish (via the Celery result backend), then scores the new snapshot on
+the held-out subjects. A per-round metric series is written out for the
+convergence curve.
 
     uv run -m scripts.fed_client
     uv run -m scripts.fed_client --model cnn-ae --rounds 5 --eval-subjects 2
@@ -21,19 +22,16 @@ with ``--test-users``, and the model is trained/seeded. There are no local epoch
 """
 
 import argparse
-import json
-import time
-from typing import cast
-from pathlib import Path
 
 import numpy as np
 import requests
 from ai_edge_litert.compiled_model import CompiledModel
-from sqlmodel import Session, select
+from sqlmodel import Session
+from tqdm import tqdm
 
-from common.config import DATASETS_DIR
+from common.config import DATASETS_DIR, MODELS_DIR
+from common.post_train import get_report_dir, plot_metric, write_metrics_csv
 from common.db import (
-    GlobalWeights,
     SubmissionType,
     engine,
     get_latest_version,
@@ -81,9 +79,9 @@ class LiteRTClient:
             out[name] = buffer.read(count, np.float32)
         return out
 
-    def train_pass(self, dataset) -> float:
+    def train_pass(self, dataset, prefix: str = "") -> float:
         total, batches = 0.0, 0
-        for batch in dataset:
+        for batch in tqdm(dataset, desc=f"{prefix} train".strip(), leave=False):
             arrays = [t.numpy() for t in batch]
             total += float(self._run("train", arrays)["loss"].reshape(-1)[0])
             batches += 1
@@ -131,30 +129,17 @@ def logout(base: str, token: str) -> None:
     requests.post(f"{base}/auth/logout", headers=_auth(token))
 
 
-def _newest_weights(session: Session, version_id: int) -> GlobalWeights | None:
-    return session.exec(
-        select(GlobalWeights)
-        .where(GlobalWeights.version_id == version_id)
-        .order_by(GlobalWeights.created_at.desc())  # type: ignore[attr-defined]
-    ).first()
+def wait_for_aggregation(result, key: str, timeout: float = 300.0) -> str:
+    """Block on the aggregation task and return its summary for ``key``, raising
+    if the round was skipped or its artifact export invalidated it."""
+    summary = result.get(timeout=timeout)
+    message = summary.get(key, "no summary returned")
+    if message.startswith("skipped") or "export failed" in message:
+        raise SystemExit(f"aggregation for {key} produced no new weights: {message}")
+    return message
 
 
-def wait_for_aggregation(version_id: int, previous_id: int | None,
-                         timeout: float = 10.0, interval: float = 0.1) -> GlobalWeights:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        with Session(engine) as session:
-            newest = _newest_weights(session, version_id)
-            if newest is not None and newest.id != previous_id:
-                if not newest.valid:
-                    raise SystemExit("aggregation produced an invalid round "
-                                     "(artifact export failed)")
-                return newest
-        time.sleep(interval)
-    raise SystemExit(f"aggregation did not produce new weights within {timeout}s")
-
-
-def run(base: str, key: str, rounds: int, eval_subjects: int, out: Path) -> None:
+def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
     spec = MODELS[key]
     trainer = spec.build_trainer(DATASETS_DIR)
     subject_datasets, _ = trainer.subject_datasets(DATASETS_DIR, train_split=1.0)
@@ -184,17 +169,17 @@ def run(base: str, key: str, rounds: int, eval_subjects: int, out: Path) -> None
         history.append({"round": round_idx, trainer.primary_metric: value})
         print(f"round={round_idx} {trainer.primary_metric}={value:.6f}")
 
-    for r in range(1, rounds + 1):
-        version_id = 0
+    for r in tqdm(range(1, rounds + 1), desc="rounds"):
+        round_prefix = f"round={r}/{rounds}"
         with Session(engine) as session:
-            version = get_latest_version(session, key)
-            if version is None:
+            if get_latest_version(session, key) is None:
                 raise SystemExit(f"model '{key}' has no seeded version")
-            version_id = cast(int, version.id)
-            previous_id = (n.id if (n := _newest_weights(session, version_id)) else None)
 
         round_global: bytes | None = None
-        for i, dataset in enumerate(client_datasets, start=1):
+        subjects = tqdm(enumerate(client_datasets, start=1),
+                        total=len(client_datasets),
+                        desc=f"{round_prefix} subjects", leave=False)
+        for i, dataset in subjects:
             user = f"test_{i}"
             token = login(base, user, user)
             artifact, weights_id = download_trainable(base, token, key)
@@ -203,14 +188,14 @@ def run(base: str, key: str, rounds: int, eval_subjects: int, out: Path) -> None
                 round_global = artifact
                 score(client, r - 1)  # global weights this round trained from
 
-            client.train_pass(dataset)
+            client.train_pass(dataset, f"{round_prefix} subject={i}/{len(client_datasets)}")
             submit(base, token, key, weights_id, client.parameters().tobytes(),
                    spec.submission_type)
             logout(base, token)
 
-        app.send_task(AGGREGATION_TASK, args=[key])
-        wait_for_aggregation(version_id, previous_id)
-        print(f"round={r} aggregated")
+        result = app.send_task(AGGREGATION_TASK, args=[key])
+        summary = wait_for_aggregation(result, key)
+        print(f"round={r} aggregated: {summary}")
 
     # Final global weights, after the last round's aggregation.
     token = login(base, "test_1", "test_1")
@@ -220,8 +205,9 @@ def run(base: str, key: str, rounds: int, eval_subjects: int, out: Path) -> None
     client = LiteRTClient(artifact, trainer.dataset_tensors)
     score(client, rounds)
 
-    out.write_text(json.dumps(history, indent=2))
-    print(f"wrote {len(history)} metrics to {out}")
+    report_dir = get_report_dir(MODELS_DIR / key, "fed_client")
+    write_metrics_csv(history, report_dir, "convergence.csv")
+    plot_metric(history, "round", trainer.primary_metric, report_dir, "convergence.png")
 
 
 def main() -> None:
@@ -234,12 +220,9 @@ def main() -> None:
                         help="subjects reserved from the end for evaluation (default: 2)")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL,
                         help=f"gateway base URL (default: {DEFAULT_BASE_URL})")
-    parser.add_argument("--out", type=Path, default=None,
-                        help="metrics JSON output path (default: <model>-fed-history.json)")
     args = parser.parse_args()
 
-    out = args.out or Path(f"{args.model}-fed-history.json")
-    run(args.base_url, args.model, args.rounds, args.eval_subjects, out)
+    run(args.base_url, args.model, args.rounds, args.eval_subjects)
 
 
 if __name__ == "__main__":

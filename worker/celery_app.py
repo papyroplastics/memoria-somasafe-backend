@@ -1,12 +1,21 @@
 from celery import Celery
 
-from common.config import REDIS_URL, CLEANUP_INTERVAL_SECONDS, FED_AGG_INTERVAL_SECONDS
+from common.config import (
+    REDIS_URL,
+    CLEANUP_INTERVAL_SECONDS,
+    FED_AGG_INTERVAL_SECONDS,
+    RESULT_TTL_SECONDS,
+)
 
-app = Celery("somasafe", broker=REDIS_URL)
+app = Celery("somasafe", broker=REDIS_URL, backend=REDIS_URL)
 
-# Job state lives in PostgreSQL (see worker.tasks), so no Celery result backend.
+# Job state lives in PostgreSQL (see worker.tasks). The Redis result backend exists
+# only so callers can await a task and read its return value (e.g. the aggregation
+# summary) instead of polling the DB; results expire quickly to avoid buildup.
 app.conf.update(
     task_serializer="json",
+    result_serializer="json",
+    result_expires=RESULT_TTL_SECONDS,
     accept_content=["json"],
     beat_schedule={
         "cleanup-results": {

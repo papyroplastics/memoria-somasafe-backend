@@ -3,6 +3,7 @@ from datetime import timedelta, datetime
 
 import numpy as np
 import tensorflow as tf
+from celery.signals import worker_process_init
 from sqlalchemy import and_, or_
 from sqlmodel import Session, select
 
@@ -43,9 +44,15 @@ from ml.saving import get_optimized_model, get_trainable_model
 from ml.training import fed_avg
 
 # Per-process cache of (model, representative_dataset, fingerprint, contract_version,
-# norm_bytes), built once at startup so TensorFlow and the calibration data load once
-# per worker, not once per job. Models whose dataset is absent (not trained yet) are
-# skipped — the worker only ever touches models that scripts.seed_db put in the DB.
+# norm_bytes), built once per forked worker child so TensorFlow and the calibration
+# data load once per worker, not once per job. Models whose dataset is absent (not
+# trained yet) are skipped — the worker only ever touches models that scripts.seed_db
+# put in the DB.
+#
+# Population is deferred to worker_process_init (post-fork): TensorFlow is not
+# fork-safe once its runtime and thread pools exist, so initializing it in the
+# parent MainProcess would leave every prefork child deadlocked on inherited-locked
+# native mutexes the first time it runs a TF op.
 _models: dict[str, tuple] = {}
 
 
@@ -61,7 +68,9 @@ def _init_models() -> None:
             print(f"[worker] model '{key}' unavailable, skipping: {exc}")
 
 
-_init_models()
+@worker_process_init.connect
+def _load_models(**_) -> None:
+    _init_models()
 
 
 @app.task(name="worker.tasks.quantize_submission")

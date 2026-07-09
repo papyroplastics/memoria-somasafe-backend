@@ -72,7 +72,9 @@ Training is split into three layers so any model can be run under any loop:
 - **Loop** (`training.py`): orchestration only — `normal_loop` and `federated_loop`
   (simulated FedAvg with an injectable `aggregate` strategy). Loops talk only to the
   `Trainer` interface, so a `(model, trainer)` pair works with either loop and they
-  can be compared. `train.py` picks the model and loop and handles export + plotting.
+  can be compared. `train.py` picks the model and loop and handles export + plotting;
+  each run writes its history plot + CSV and eval report under
+  `results/<model>/reports/<loop>/` (`normal` or `federated`).
 
 Autoencoder variants (LSTM/GRU/CNN/...) share `TrainableAutoencoder` (reconstruction
 train/eval + conditioning) and `AutoencoderTrainer` (windowing + recon-error metrics).
@@ -259,9 +261,12 @@ processes reach them; the API itself binds `0.0.0.0` so the phone can reach it o
 - **Worker (`worker/tasks.py`):** restores uploaded weights into the model, converts it to
   an int8 `.tflite` against the per-model calibration dataset
   (`ml/saving.py:get_optimized_model`) and signs it, validates submit-only uploads, and
-  runs the daily federated aggregation (see "Federated aggregation"). At startup it builds
-  every available model (skipping any whose dataset is absent) and caches each one's
-  `(model, representative dataset, fingerprint, contract_version, norm bytes)`.
+  runs the daily federated aggregation (see "Federated aggregation"). Each forked worker
+  child builds every available model (skipping any whose dataset is absent) and caches each
+  one's `(model, representative dataset, fingerprint, contract_version, norm bytes)`. This
+  build runs post-fork (via the `worker_process_init` signal), never in the parent
+  MainProcess: TensorFlow is not fork-safe once its runtime exists, so initializing it before
+  the prefork pool forks would deadlock every child on inherited-locked native mutexes.
 
 There are **two upload paths**, and which one a model accepts is a per-model property:
 each `ModelVersion` carries a `submission_type` (`raw` / `quantize`, sourced from the code
@@ -363,9 +368,10 @@ uv run -m scripts.queue_aggregation cnn-ae    # a single model
 HTTP API: for each dataset subject (as user `test_N`) it logs in, pulls the global
 trainable artifact, trains one pass through the on-device LiteRT `CompiledModel` runtime,
 uploads the update, and logs out; then it queues a round, waits for the new `GlobalWeights`,
-and scores it on the held-out subjects, repeating for `--rounds`. Seed the accounts first
-with `scripts.seed_db --test-users` (one `test_N` per subject, each owning a placeholder
-device).
+and scores it on the held-out subjects, repeating for `--rounds`. The per-round
+convergence series is written as a CSV + plot to `results/<model>/reports/fed_client/`.
+Seed the accounts first with `scripts.seed_db --test-users` (one `test_N` per subject,
+each owning a placeholder device).
 
 ```bash
 uv run -m scripts.seed_db --test-users                       # one test_N per subject
@@ -383,15 +389,17 @@ echoes `X-Model-Fingerprint`, `X-Model-Version`, `X-Weights-ID` and `X-Weights-T
 
 The registry that ties a model `key` to its metadata *and* its TensorFlow trainer builder is
 `ml/model_list.py` — the single source of truth consumed by `scripts/train.py` (one trainer),
-`worker/tasks.py` (all models + fingerprints at startup), and `scripts/seed_db.py` (publishes
+`worker/tasks.py` (all models + fingerprints, built per worker child), and `scripts/seed_db.py` (publishes
 versions + metadata, enforcing the fingerprint tripwire). The api never imports it; it
 trusts what the seed wrote to the DB.
 
 **Storage decisions (thesis scope, no production deployment):**
 
 - **PostgreSQL** (via **SQLModel**) holds weight submissions and quantization jobs. Job state
-  lives here — it is the single source of truth the poll endpoint reads, so Celery's own
-  result backend is unused.
+  lives here — it is the single source of truth the poll endpoint reads. Celery's **Redis
+  result backend** is used only so callers can await a queued task and read its return value
+  (e.g. `queue_aggregation`/`fed_client` block on the aggregation summary instead of polling
+  `GlobalWeights`); results expire after `RESULT_TTL_SECONDS`.
 - **Redis** is the Celery broker. RabbitMQ was considered but rejected: the workload is a few
   low-frequency jobs, not high-throughput routing, and Redis is a single lightweight service
   that will also host rate-limit counters later — its delivery guarantees are more than enough

@@ -12,7 +12,7 @@ from ml.saving import save_artifacts
 from ml.training import normal_loop, federated_loop, History
 from ml.model_list import MODELS
 from common.config import MODELS_DIR, DATASETS_DIR
-from .common.post_train import plot_history, get_report_dir
+from .common.post_train import plot_history, write_history_csv, get_report_dir
 
 LOOP_OPTIONS = ['normal', 'federated']
 
@@ -53,7 +53,7 @@ if __name__ == "__main__":
     data_dir = args.dataset_dir
 
     result_dir = MODELS_DIR / args.model
-    report_dir = get_report_dir(result_dir)
+    report_dir = get_report_dir(result_dir, args.loop)
 
     trainer = MODELS[args.model].build_trainer(data_dir, batch_size=args.batch_size)
     history, eval_dataset = run_loop(trainer, data_dir, args.loop, args.split, args.epochs, args.local_epochs)
@@ -61,4 +61,5 @@ if __name__ == "__main__":
     postfix = '' if trainer.batch_size == trainer.default_batch_size else f'_{trainer.batch_size}'
     save_artifacts(trainer, result_dir, eval_dataset, postfix)
     plot_history(history, trainer.primary_metric, report_dir)
+    write_history_csv(history, report_dir)
     trainer.report(report_dir, eval_dataset)

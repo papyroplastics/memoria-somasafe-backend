@@ -17,7 +17,7 @@ get-data: shared
 	uv run -m scripts.get_dataset
 
 db-seed: shared
-	uv run -m scripts.seed_db --assign-device
+	uv run -m scripts.seed_db --assign-device --test-users
 db-run:
 	podman compose up
 db-clean:
