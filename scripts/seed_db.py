@@ -37,6 +37,7 @@ from common.db import (
     init_db,
     utcnow,
 )
+from ml.data import CLEAN_SUBDIR, get_sorted_paths
 from ml.model_list import MODELS
 from ml.payload import sign_blob, sign_model
 from ml.saving import load_trainable_weights
@@ -83,6 +84,7 @@ def seed_models(session: Session) -> None:
                 model_key=key, version=spec.version, fingerprint=fingerprint,
                 param_count=trainer.model.total_parameter_size,
                 contract_version=trainer.contract_version,
+                submission_type=spec.submission_type,
                 norm_params=trainer.norm_param_bytes(),
                 min_app_version=spec.min_app_version,
             )
@@ -177,6 +179,39 @@ def seed_users(session: Session) -> User:
     return user
 
 
+def seed_test_users(session: Session) -> None:
+    """Create one ``test_N`` account (password == username) per subject in the
+    clean-signals dataset, each owning a placeholder device so it clears the
+    device-owner gate."""
+    subjects = get_sorted_paths(DATASETS_DIR / CLEAN_SUBDIR)
+    if not subjects:
+        raise SystemExit(f"no subjects under {DATASETS_DIR / CLEAN_SUBDIR}; "
+                         f"run scripts/get_dataset.py first")
+
+    # Attestation is bypassed for these fakes, so the stored key is never used;
+    # a well-formed 65-byte uncompressed P-256 point is enough.
+    placeholder_pubkey = b"\x04" + bytes(64)
+    for i in range(1, len(subjects) + 1):
+        name = f"test_{i}"
+        user = session.exec(select(User).where(User.username == name)).first()
+        if user is None:
+            user = User(username=name, hashed_password=hash_password(name))
+            session.add(user)
+            session.commit()
+            session.refresh(user)
+            print(f"  + user '{name}'")
+
+        serial = f"TEST-DEVICE-{i}"
+        device = session.get(Device, serial)
+        if device is None:
+            device = Device(serial=serial, public_key=placeholder_pubkey)
+            session.add(device)
+        device.owner_id = user.id
+        device.last_attested_at = utcnow()
+    session.commit()
+    print(f"  + {len(subjects)} test users with owned devices")
+
+
 def _parse_factory_nvs(path: Path) -> dict[str, str]:
     values: dict[str, str] = {}
     with path.open(newline="") as f:
@@ -218,6 +253,9 @@ def main() -> None:
                         help="directory of exported firmware versions to seed")
     parser.add_argument("--assign-device", action="store_true",
                         help="assign the seeded device to the seed user, even if either already existed")
+    parser.add_argument("--test-users", action="store_true",
+                        help="create a test_N user (owning a placeholder device) per "
+                             "dataset subject, for the headless federated harness")
     args = parser.parse_args()
 
     if not args.factory_nvs.exists():
@@ -229,6 +267,8 @@ def main() -> None:
         seed_firmware(session, args.firmware_dir)
         user = seed_users(session)
         seed_device(session, args.factory_nvs, user if args.assign_device else None)
+        if args.test_users:
+            seed_test_users(session)
     print("Seed complete.")
 
 

@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from common.db import ModelPurpose
+from common.db import ModelPurpose, SubmissionType
 from ml.models import (
     cnn_autoencoder,
     feature_mlp,
@@ -17,6 +17,8 @@ class ModelSpec:
     purpose: ModelPurpose
     min_app_version: str   # oldest app that can use the current version
     build_trainer: TrainerBuilder
+    # Upload path + aggregation strategy for this model's weight updates.
+    submission_type: SubmissionType = SubmissionType.raw
     firmware_id: int | None = None
     # Hand-bumped on any change that invalidates existing weights (architecture,
     # baked norm params, contract). The seed script errors if the fingerprint
@@ -32,6 +34,7 @@ MODELS: dict[str, ModelSpec] = {
         purpose=ModelPurpose.train_only,
         min_app_version="1.0.0",
         build_trainer=feature_mlp.get_trainer,
+        submission_type=SubmissionType.quantize,
     ),
     "lstm-ae": ModelSpec(
         key="lstm-ae",

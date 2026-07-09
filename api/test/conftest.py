@@ -13,7 +13,7 @@ enqueue quantization tasks but a worker is never run, so submissions stay
 
 import os
 
-os.environ.setdefault("BROKER_URL", "memory://")
+os.environ.setdefault("REDIS_URL", "memory://")
 
 import secrets
 
@@ -23,8 +23,8 @@ from cryptography.hazmat.primitives.asymmetric import ec
 from fastapi.testclient import TestClient
 from sqlmodel import select
 
-from ..lib import ratelimit
 from ..main import app
+from common import ratelimit
 from ..routes.auth import hash_password
 from common.config import SEED_PASSWORD, SEED_USER
 from common.db import AuthSession, Device, Session, User, engine, utcnow

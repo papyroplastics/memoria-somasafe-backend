@@ -1,8 +1,8 @@
 from celery import Celery
 
-from common.config import BROKER_URL, CLEANUP_INTERVAL_SECONDS, FED_AGG_INTERVAL_SECONDS
+from common.config import REDIS_URL, CLEANUP_INTERVAL_SECONDS, FED_AGG_INTERVAL_SECONDS
 
-app = Celery("somasafe", broker=BROKER_URL)
+app = Celery("somasafe", broker=REDIS_URL)
 
 # Job state lives in PostgreSQL (see worker.tasks), so no Celery result backend.
 app.conf.update(

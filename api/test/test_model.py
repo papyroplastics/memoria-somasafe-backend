@@ -16,13 +16,17 @@ WEIGHTS_ID_HEADER = "X-Weights-ID"
 OCTET_STREAM = {"Content-Type": "application/octet-stream"}
 
 
-def _model_with_weights(client, headers) -> dict:
+def _model_with_weights(client, headers, submission_type: str | None = None) -> dict:
     resp = client.get("/model/list", headers=headers)
     assert resp.status_code == 200, resp.text
     for model in resp.json():
-        if model["weights_version"] is not None:
-            return model
-    pytest.skip("no seeded model has weights; run the seed script first")
+        if model["weights_version"] is None:
+            continue
+        if submission_type is not None and model["submission_type"] != submission_type:
+            continue
+        return model
+    pytest.skip(f"no seeded {submission_type or ''} model has weights; "
+                f"run the seed script first")
 
 
 def _download_trainable(client, headers, key):
@@ -84,11 +88,11 @@ def test_download_unknown_version_404(client, auth_headers, owned_device):
 
 
 def test_quantize_enqueues_and_polls_pending(client, auth_headers, owned_device):
-    model = _model_with_weights(client, auth_headers)
+    model = _model_with_weights(client, auth_headers, "quantize")
     resp = _download_trainable(client, auth_headers, model["key"])
     weights_id = int(resp.headers[WEIGHTS_ID_HEADER])
 
-    submit = client.post(f"/model/quantize/submit/{model['key']}/{weights_id}",
+    submit = client.post(f"/model/submit/quantize/{model['key']}/{weights_id}",
                          headers=auth_headers | OCTET_STREAM,
                          content=_zero_params(model))
     assert submit.status_code == 202, submit.text
@@ -101,28 +105,28 @@ def test_quantize_enqueues_and_polls_pending(client, auth_headers, owned_device)
 
 
 def test_quantize_unknown_weights_400(client, auth_headers, owned_device):
-    model = _model_with_weights(client, auth_headers)
-    resp = client.post(f"/model/quantize/submit/{model['key']}/999999999",
+    model = _model_with_weights(client, auth_headers, "quantize")
+    resp = client.post(f"/model/submit/quantize/{model['key']}/999999999",
                        headers=auth_headers | OCTET_STREAM,
                        content=_zero_params(model))
     assert resp.status_code == 400
 
 
 def test_quantize_wrong_length_400(client, auth_headers, owned_device):
-    model = _model_with_weights(client, auth_headers)
+    model = _model_with_weights(client, auth_headers, "quantize")
     resp = _download_trainable(client, auth_headers, model["key"])
     weights_id = int(resp.headers[WEIGHTS_ID_HEADER])
-    resp = client.post(f"/model/quantize/submit/{model['key']}/{weights_id}",
+    resp = client.post(f"/model/submit/quantize/{model['key']}/{weights_id}",
                        headers=auth_headers | OCTET_STREAM,
                        content=b"\x00" * 8)
     assert resp.status_code == 400
 
 
 def test_quantize_daily_limit(client, auth_headers, owned_device):
-    model = _model_with_weights(client, auth_headers)
+    model = _model_with_weights(client, auth_headers, "quantize")
     resp = _download_trainable(client, auth_headers, model["key"])
     weights_id = int(resp.headers[WEIGHTS_ID_HEADER])
-    url = f"/model/quantize/submit/{model['key']}/{weights_id}"
+    url = f"/model/submit/quantize/{model['key']}/{weights_id}"
 
     for _ in range(QUANTIZE_DAILY_LIMIT):
         assert client.post(url, headers=auth_headers | OCTET_STREAM,
@@ -132,12 +136,23 @@ def test_quantize_daily_limit(client, auth_headers, owned_device):
                        content=_zero_params(model)).status_code == 429
 
 
+def test_quantize_rejects_raw_model(client, auth_headers, owned_device):
+    """A submit-only (raw) model has no quantize path — 404, not 403."""
+    model = _model_with_weights(client, auth_headers, "raw")
+    resp = _download_trainable(client, auth_headers, model["key"])
+    weights_id = int(resp.headers[WEIGHTS_ID_HEADER])
+    resp = client.post(f"/model/submit/quantize/{model['key']}/{weights_id}",
+                       headers=auth_headers | OCTET_STREAM,
+                       content=_zero_params(model))
+    assert resp.status_code == 404
+
+
 def test_submit_only_accepts(client, auth_headers, owned_device):
     model = _model_with_weights(client, auth_headers)
     resp = _download_trainable(client, auth_headers, model["key"])
     weights_id = int(resp.headers[WEIGHTS_ID_HEADER])
 
-    resp = client.post(f"/model/submit/{model['key']}/{weights_id}",
+    resp = client.post(f"/model/submit/raw/{model['key']}/{weights_id}",
                        headers=auth_headers | OCTET_STREAM,
                        content=_zero_params(model))
     assert resp.status_code == 202, resp.text
@@ -148,7 +163,7 @@ def test_submit_daily_limit(client, auth_headers, owned_device):
     model = _model_with_weights(client, auth_headers)
     resp = _download_trainable(client, auth_headers, model["key"])
     weights_id = int(resp.headers[WEIGHTS_ID_HEADER])
-    url = f"/model/submit/{model['key']}/{weights_id}"
+    url = f"/model/submit/raw/{model['key']}/{weights_id}"
 
     for _ in range(SUBMIT_DAILY_LIMIT):
         assert client.post(url, headers=auth_headers | OCTET_STREAM,

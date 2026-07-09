@@ -13,8 +13,8 @@ user_id(u64) ‖ serial(ascii).
 import json
 import uuid
 
-from api.lib import ratelimit
 from common.config import DEVICE_CHALLENGE_TTL_SECONDS
+from common.redis import client
 
 _PREFIX = "device:challenge:"
 
@@ -31,12 +31,11 @@ def build_payload(nonce: bytes, instance_id: str, server_time: int,
 
 
 def put(instance_id: str, data: dict) -> None:
-    # Resolve the client lazily so tests can swap in a fake (see api.lib.ratelimit).
-    ratelimit._client.set(
+    client.set(
         _PREFIX + instance_id, json.dumps(data), ex=DEVICE_CHALLENGE_TTL_SECONDS)
 
 
 def take(instance_id: str) -> dict | None:
     """Atomically fetch and delete a challenge (one-shot). None if absent/expired."""
-    raw = ratelimit._client.getdel(_PREFIX + instance_id)
+    raw = client.getdel(_PREFIX + instance_id)
     return json.loads(raw) if raw is not None else None

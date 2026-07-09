@@ -26,6 +26,7 @@ from common.db import (
     GlobalWeights,
     JobStatus,
     QuantizationJob,
+    SubmissionType,
     WeightSubmission,
     engine,
     get_latest_version,
@@ -33,6 +34,8 @@ from common.db import (
     get_version_weights,
     utcnow,
 )
+
+from common.ratelimit import clear_model_limits
 
 from ml.model_list import MODELS
 from ml.payload import sign_model
@@ -144,6 +147,12 @@ def _aggregate_model(session: Session, key: str) -> str:
     if latest is None or latest.fingerprint != fingerprint:
         return "skipped: no seeded version matching the running code"
 
+    # Aggregation strategy is chosen by the version's submission type. Today raw
+    # and quantize are byte-identical dense vectors and share the FedAvg path
+    # below; sparse/DP formats will branch here.
+    if latest.submission_type not in (SubmissionType.raw, SubmissionType.quantize):
+        return f"skipped: no aggregation strategy for '{latest.submission_type.value}'"
+
     reference = get_version_weights(session, latest.id)
     if reference is None:
         return "skipped: no active global weights"
@@ -215,6 +224,10 @@ def _aggregate_model(session: Session, key: str) -> str:
     if export_error is not None:
         return (f"aggregated {len(kept)} submissions but artifact export failed "
                 f"(round invalidated): {export_error}")
+
+    # New weights are live: let every client re-pull and submit again without
+    # waiting out the download cooldown / daily submission caps.
+    clear_model_limits(key)
     return (f"aggregated {len(kept)} submissions "
             f"({len(submissions)} in window, {len(latest_per_user)} users, "
             f"{len(valid) - len(kept)} outliers dropped)")

@@ -30,6 +30,18 @@ class JobStatus(str, Enum):
     expired = "expired"
 
 
+class SubmissionType(str, Enum):
+    """How a model version's weight updates are uploaded and aggregated. Fixes
+    both the submission endpoint a client uses and the aggregation strategy the
+    worker applies. ``quantize`` also accepts submissions on the raw path (same
+    dense LE-float32 format, less backend work); ``raw`` does not accept the
+    quantize path. Future formats (sparse, DP) carry incompatible bodies and are
+    only accepted on their own endpoint."""
+
+    raw = "raw"
+    quantize = "quantize"
+
+
 class User(SQLModel, table=True):
     """An account allowed to talk to the gateway. Created by the seed script
     (no public registration); the password is argon2-hashed (see api.routes.auth)."""
@@ -97,6 +109,7 @@ class ModelVersion(SQLModel, table=True):
     fingerprint: str
     param_count: int
     contract_version: int
+    submission_type: SubmissionType
     norm_params: bytes         # the version's z-score params (LE float32)
     min_app_version: str
     created_at: datetime = Field(default_factory=utcnow)

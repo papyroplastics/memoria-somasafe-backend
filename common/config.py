@@ -16,9 +16,9 @@ DATASETS_DIR = Path(os.environ.get("DATASETS_DIR", "shared/gen/datasets"))
 # and firmware/scripts/gen_factory_nvs.py).
 SERVER_PRIVATE_KEY_FILE = Path(os.environ.get("SERVER_PRIVATE_KEY", "shared/gen/server-private-key.pem"))
 
-# PostgreSQL (SQLModel/SQLAlchemy URL) and the Celery broker.
+# PostgreSQL (SQLModel/SQLAlchemy URL) and Redis instance.
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql+psycopg://somasafe:somasafe@localhost:5432/somasafe")
-BROKER_URL = os.environ.get("BROKER_URL", "redis://localhost:6379/0")
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 
 # Quantization-result lifetime. A served result is kept for SERVE_GRACE_SECONDS
 # so the client can retry the download; an unclaimed one is kept up to
@@ -44,9 +44,7 @@ SEED_USER = os.environ.get("SEED_USER", "somasafe")
 SEED_PASSWORD = os.environ.get("SEED_PASSWORD", "somasafe")
 SEED_EMAIL = os.environ.get("SEED_EMAIL") or None
 
-# --- Rate limiting (Redis-backed, see api.lib.ratelimit) ---
-# Separate Redis db from the Celery broker (db 0) to keep counters isolated.
-RATELIMIT_URL = os.environ.get("RATELIMIT_URL", "redis://localhost:6379/1")
+# --- Rate limiting ---
 # Per-user, per-model cooldown between artifact downloads (trainable/quantized).
 DOWNLOAD_COOLDOWN_SECONDS = int(os.environ.get("DOWNLOAD_COOLDOWN_SECONDS", MINUTE * 5))
 # Per-user, per-interface cooldown between firmware image downloads.
@@ -57,12 +55,6 @@ QUANTIZE_DAILY_WINDOW_SECONDS = int(os.environ.get("QUANTIZE_DAILY_WINDOW_SECOND
 # Per-user, per-model daily cap on submit-only weight uploads.
 SUBMIT_DAILY_LIMIT = int(os.environ.get("SUBMIT_DAILY_LIMIT", 2))
 SUBMIT_DAILY_WINDOW_SECONDS = int(os.environ.get("SUBMIT_DAILY_WINDOW_SECONDS", DAY))
-
-# --- Weight upload paths (see api.routes.model) ---
-# Which upload endpoints the gateway exposes: "quantize" (submission + int8 artifact
-# back), "submit" (submission only, nothing returned) or "both". A real deployment
-# would pick one; "both" keeps the two architectures comparable during development.
-SUBMISSION_MODE = os.environ.get("SUBMISSION_MODE", "both")
 
 # --- Device attestation (see api.routes.device) ---
 # How long an issued ownership challenge stays valid before it must be reissued.

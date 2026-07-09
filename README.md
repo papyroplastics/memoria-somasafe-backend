@@ -263,18 +263,23 @@ processes reach them; the API itself binds `0.0.0.0` so the phone can reach it o
   every available model (skipping any whose dataset is absent) and caches each one's
   `(model, representative dataset, fingerprint, contract_version, norm bytes)`.
 
-There are **two upload paths**, selectable via `SUBMISSION_MODE` (`quantize` / `submit` /
-`both`, default `both` — a real deployment would pick one; keeping both makes the two
-architectures comparable). Both persist a `WeightSubmission` that feeds aggregation; both
-take the raw little-endian float32 parameter buffer as the request body and the
-`weights_id` of the `GlobalWeights` snapshot the client trained from (echoed by the
+There are **two upload paths**, and which one a model accepts is a per-model property:
+each `ModelVersion` carries a `submission_type` (`raw` / `quantize`, sourced from the code
+registry `ml/model_list.py` and seeded into the DB). The `quantize` path accepts only
+`quantize`-typed models; the `raw` (submit-only) path accepts both (`quantize`'s dense body
+is compatible and submit-only is the least work). A model uploaded on a path it doesn't
+accept gets `404` (not `403`, so the path stays unguessable). The type also selects the
+aggregation strategy (see "Federated aggregation"); future formats (sparse, DP) will add
+their own type + endpoint. Both current paths persist a `WeightSubmission` that feeds
+aggregation; both take the raw little-endian float32 parameter buffer as the request body
+and the `weights_id` of the `GlobalWeights` snapshot the client trained from (echoed by the
 download headers) in the path. Malformed bodies (wrong length, non-finite values) are
 rejected with `400`; an unknown `weights_id` is `400`; a `weights_id` belonging to a
 frozen (non-latest) model version is `409` — the client must re-download the model first.
 
-Request flow for quantization (`SUBMISSION_MODE=quantize`):
+Request flow for a `quantize`-typed model:
 
-1. `POST /model/quantize/submit/{key}/{weights_id}` stores the weights as a
+1. `POST /model/submit/quantize/{key}/{weights_id}` stores the weights as a
    `WeightSubmission` (tagged with the submitting `user_id`, the `base_weights_id` and its
    `version_id`), creates a `QuantizationJob` (`pending`), enqueues `quantize_submission`,
    and returns `202` with a `job_id` + `status_url`.
@@ -291,12 +296,12 @@ Request flow for quantization (`SUBMISSION_MODE=quantize`):
    scoped to the user who submitted it (resolved via the job's `WeightSubmission`); another
    user's `job_id` returns `404`.
 
-The submit-only path (`SUBMISSION_MODE=submit`) is `POST /model/submit/{key}/{weights_id}`:
-same checks and storage, but nothing comes back — a `validate_submission` task caches the
-verdict in the background and the client only ever sees `202`. Fully silent rejection (vs
-the quantize path, whose `422` reveals hard failures) and no full-weights artifact
-round-trip make it the natural host for future privacy-preserving submission formats
-(sampled weights, differential privacy).
+The submit-only path is `POST /model/submit/raw/{key}/{weights_id}`: same checks and
+storage, but nothing comes back — a `validate_submission` task caches the verdict in the
+background and the client only ever sees `202`. Fully silent rejection (vs the quantize
+path, whose `422` reveals hard failures) and no full-weights artifact round-trip make it
+the natural host for future privacy-preserving submission formats (sampled weights,
+differential privacy).
 
 **Weights persist indefinitely.** `WeightSubmission` rows are the substrate federated
 aggregation consumes. Only the job's quantized `result` (+ its signature) is ephemeral.
@@ -306,6 +311,9 @@ aggregation consumes. Only the job's quantized `result` (+ its signature) is eph
 A beat task (`federated_aggregation`, every `FED_AGG_INTERVAL_SECONDS`, default 24 h) runs one
 FedAvg round per initialized model:
 
+0. **Strategy:** chosen by the latest version's `submission_type`. `raw` and `quantize` are
+   byte-identical dense vectors and share the FedAvg path below; sparse/DP formats will
+   branch here. A model whose type has no strategy is skipped.
 1. **Window:** submissions created after the model's newest `GlobalWeights` snapshot
    (valid or not, so updates consumed by a later-invalidated round are never re-aggregated),
    filtered to the latest `ModelVersion` — frozen versions never aggregate. One update per
@@ -331,6 +339,11 @@ FedAvg round per initialized model:
    the signed int8 `.tflite` — so a client always pulls a file with the current global
    parameters already inside. If an export fails the row is stored with `valid = false`:
    clients keep pulling the previous snapshot and the window's submissions stay consumed.
+7. **Rate-limit reset:** on a successful round the model's download/submission counters are
+   cleared for every user (`ratelimit.clear_model_limits`), so clients can immediately
+   re-pull the new weights and submit again without waiting out the download cooldown or the
+   daily submission caps. (An invalidated round leaves the counters alone — nothing new to
+   pull.)
 
 If a round makes the model worse, flip the new row's `valid` flag to false by hand: the
 active weights and artifacts (`get_latest_weights`, `/model/download/*`, `/model/list`)
@@ -404,8 +417,8 @@ but immediate repeats on the same model are rejected with `429` (+ `Retry-After`
 |----------|-------|
 | `GET /model/list`, `GET /model/versions/{key}` | authed only |
 | `GET /model/download/{trainable,quantized}/{key}[?version=N]` | device-owner only; one download per model per `DOWNLOAD_COOLDOWN_SECONDS` (default 300 s) |
-| `POST /model/quantize/submit/{key}/{weights_id}` | device-owner only; `QUANTIZE_DAILY_LIMIT` (default 2) per model per rolling 24 h; `404` when `SUBMISSION_MODE=submit` |
-| `POST /model/submit/{key}/{weights_id}` | device-owner only; `SUBMIT_DAILY_LIMIT` (default 2) per model per rolling 24 h; `404` when `SUBMISSION_MODE=quantize` |
+| `POST /model/submit/quantize/{key}/{weights_id}` | device-owner only; `QUANTIZE_DAILY_LIMIT` (default 2) per model per rolling 24 h; `404` unless the model's `submission_type` is `quantize` |
+| `POST /model/submit/raw/{key}/{weights_id}` | device-owner only; `SUBMIT_DAILY_LIMIT` (default 2) per model per rolling 24 h; `404` unless the model's `submission_type` is `raw` or `quantize` |
 | `GET /model/quantize/result/{job_id}` | authed; only the user who submitted the job (else `404`) |
 | `GET /ota/versions/{interface}` | authed only |
 | `GET /ota/download/{interface}/{version}` | device-owner only; one firmware download per interface per `OTA_DOWNLOAD_COOLDOWN_SECONDS` (default 300 s) |

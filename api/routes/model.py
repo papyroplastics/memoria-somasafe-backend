@@ -15,7 +15,6 @@ from common.config import (
     DOWNLOAD_COOLDOWN_SECONDS,
     QUANTIZE_DAILY_LIMIT,
     QUANTIZE_DAILY_WINDOW_SECONDS,
-    SUBMISSION_MODE,
     SUBMIT_DAILY_LIMIT,
     SUBMIT_DAILY_WINDOW_SECONDS,
 )
@@ -25,6 +24,7 @@ from common.db import (
     ModelDefinition,
     ModelVersion,
     QuantizationJob,
+    SubmissionType,
     User,
     WeightSubmission,
     get_latest_version,
@@ -73,6 +73,7 @@ class ModelInfo(BaseModel):
     min_app_version: str
     fingerprint: str
     contract_version: int
+    submission_type: SubmissionType
     param_count: int
     weights_version: datetime | None
 
@@ -81,6 +82,7 @@ class ModelVersionInfo(BaseModel):
     version: int
     fingerprint: str
     contract_version: int
+    submission_type: SubmissionType
     min_app_version: str
     param_count: int
     created_at: datetime
@@ -100,9 +102,13 @@ def require_device_owner(session: Session, user: User) -> None:
         raise HTTPException(status_code=403, detail="No attested device for this user")
 
 
-def require_submission_mode(mode: str) -> None:
-    """404 (not 403) when the deployment doesn't expose this upload path."""
-    if SUBMISSION_MODE not in (mode, "both"):
+def require_submission_type(session: Session, key: str,
+                            accepted: set[SubmissionType]) -> None:
+    """404 (not 403) when the model's latest version doesn't accept uploads on
+    this endpoint. The raw endpoint accepts ``{raw, quantize}`` (quantize's dense
+    body is compatible); the quantize endpoint accepts ``{quantize}`` only."""
+    latest = get_latest_version(session, key)
+    if latest is None or latest.submission_type not in accepted:
         raise HTTPException(status_code=404, detail="Not found")
 
 
@@ -153,6 +159,7 @@ def _version_info(session: Session, version: ModelVersion) -> ModelVersionInfo:
     return ModelVersionInfo(
         version=version.version, fingerprint=version.fingerprint,
         contract_version=version.contract_version,
+        submission_type=version.submission_type,
         min_app_version=version.min_app_version,
         param_count=version.param_count, created_at=version.created_at,
         weights_version=weights.created_at if weights else None,
@@ -174,6 +181,7 @@ def list_models(session: Session = Depends(get_session),
             version=latest.version, min_app_version=latest.min_app_version,
             fingerprint=latest.fingerprint,
             contract_version=latest.contract_version,
+            submission_type=latest.submission_type,
             param_count=latest.param_count,
             weights_version=weights.created_at if weights else None,
         ))
@@ -195,13 +203,13 @@ def list_versions(key: str,
     return [_version_info(session, v) for v in versions]
 
 
-@router.post("/quantize/submit/{key}/{weights_id}", status_code=202)
+@router.post("/submit/quantize/{key}/{weights_id}", status_code=202)
 async def quantize_model(key: str, weights_id: int, request: Request,
                          session: Session = Depends(get_session),
                          user: User = Depends(get_current_user)):
     """Upload locally-trained weights (raw LE float32 body) and get a signed
     int8 artifact built from them; the submission also feeds aggregation."""
-    require_submission_mode("quantize")
+    require_submission_type(session, key, {SubmissionType.quantize})
     require_device_owner(session, user)
     enforce_daily_quota("quantize", user.id, key, QUANTIZE_DAILY_LIMIT, QUANTIZE_DAILY_WINDOW_SECONDS)
     submission = store_submission(session, key, weights_id, await request.body(), user)
@@ -216,13 +224,14 @@ async def quantize_model(key: str, weights_id: int, request: Request,
     return {"job_id": str(job.id), "status_url": f"/model/quantize/result/{job.id}"}
 
 
-@router.post("/submit/{key}/{weights_id}", status_code=202)
+@router.post("/submit/raw/{key}/{weights_id}", status_code=202)
 async def submit_weights(key: str, weights_id: int, request: Request,
                          session: Session = Depends(get_session),
                          user: User = Depends(get_current_user)):
     """Submit-only federated update (raw LE float32 body): persisted for
     aggregation and validated in the background; nothing comes back."""
-    require_submission_mode("submit")
+    require_submission_type(session, key,
+                            {SubmissionType.raw, SubmissionType.quantize})
     require_device_owner(session, user)
     enforce_daily_quota("submit", user.id, key, SUBMIT_DAILY_LIMIT, SUBMIT_DAILY_WINDOW_SECONDS)
     submission = store_submission(session, key, weights_id, await request.body(), user)
