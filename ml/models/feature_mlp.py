@@ -2,7 +2,6 @@ from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
-from tqdm import tqdm
 
 from ..layers import Dense, relu
 from .common import TrainableModel, Trainer
@@ -86,12 +85,14 @@ class FeatureMLPTrainer(Trainer):
     root at a directory with the same structure (see ``distill_labels.py``)."""
 
     primary_metric = 'accuracy'
+    dataset_tensors = ['features', 'labels']
+    n_eval_inputs = 1
     default_batch_size = 1
     contract_version = 1   # norm layout: mean[17] then std[17], LE float32
 
     def __init__(self, model: FeatureMLP, batch_size: int = 1,
                  train_split: float = 0.8):
-        self.model = model
+        self.model: FeatureMLP = model # type: ignore
         self.batch_size = batch_size
         self.train_split = train_split
         self.data_subdir = MIXED_FEATURE_SUBDIR
@@ -112,6 +113,9 @@ class FeatureMLPTrainer(Trainer):
         mean = tf.constant(self.model.feat_mean)
         std = tf.constant(self.model.feat_std)
         if dataset is None:
+            if data_root is None:
+                raise ValueError("Either dataset or data_root must be passed")
+
             rng = np.random.default_rng()
             data_dir = data_root / self.data_subdir
             all_x, all_y = [], []
@@ -151,7 +155,7 @@ class FeatureMLPTrainer(Trainer):
         ax.set_yticklabels([f'True {l}' for l in labels])
         for i in range(2):
             for j in range(2):
-                ax.text(j, i, matrix[i][j], ha='center', va='center', fontsize=12)
+                ax.text(j, i, str(matrix[i][j]), ha='center', va='center', fontsize=12)
         fig.colorbar(im)
         fig.tight_layout()
         path = result_dir / 'confusion_matrix.png'
@@ -159,13 +163,13 @@ class FeatureMLPTrainer(Trainer):
         plt.close(fig)
         print(f"saved confusion matrix to {path}")
 
-    def evaluate(self, dataset, prefix=''):
+    def eval_metrics(self, datapoints, outputs):
         correct, total = 0.0, 0.0
-        for x, y in tqdm(dataset, total=len(dataset),
-                         desc=f'{prefix} eval'.strip(), leave=False):
-            pred = tf.cast(self.model.eval(x)['logits'] > 0.0, tf.float32)
-            correct += float(tf.reduce_sum(tf.cast(tf.equal(pred, y), tf.float32)))
-            total += float(y.shape[0])
+        for (_, y), out in zip(datapoints, outputs):
+            pred = (np.asarray(out['logits']).reshape(-1) > 0.0)
+            y = np.asarray(y).reshape(-1)
+            correct += float(np.sum(pred == (y > 0.5)))
+            total += float(y.size)
         return {'accuracy': correct / total if total else 0.0}
 
 def get_trainer(data_root: Path, batch_size: int | None = None) -> FeatureMLPTrainer:

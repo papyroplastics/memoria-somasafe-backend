@@ -359,6 +359,19 @@ uv run -m scripts.queue_aggregation           # every initialized model
 uv run -m scripts.queue_aggregation cnn-ae    # a single model
 ```
 
+**Headless federated run.** `scripts/fed_client.py` drives the whole stack over the real
+HTTP API: for each dataset subject (as user `test_N`) it logs in, pulls the global
+trainable artifact, trains one pass through the on-device LiteRT `CompiledModel` runtime,
+uploads the update, and logs out; then it queues a round, waits for the new `GlobalWeights`,
+and scores it on the held-out subjects, repeating for `--rounds`. Seed the accounts first
+with `scripts.seed_db --test-users` (one `test_N` per subject, each owning a placeholder
+device).
+
+```bash
+uv run -m scripts.seed_db --test-users                       # one test_N per subject
+uv run -m scripts.fed_client --model cnn-ae --rounds 5 --eval-subjects 2
+```
+
 **Model versioning.** See [`shared/docs/versioning.md`](shared/docs/versioning.md) for
 what `version`, `contract_version`, `fingerprint` and weights (`weights_id` /
 `weights_version`) each mean and how a client reacts to each changing. Backend-specific:

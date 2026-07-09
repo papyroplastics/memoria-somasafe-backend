@@ -38,6 +38,7 @@ class TrainableModel(tf.Module):
     """
 
     eval: tf.types.experimental.PolymorphicFunction = unbound    # type: ignore
+    infer: tf.types.experimental.PolymorphicFunction = unbound   # type: ignore
     train: tf.types.experimental.PolymorphicFunction = unbound   # type: ignore
     save: tf.types.experimental.PolymorphicFunction = unbound    # type: ignore
     restore: tf.types.experimental.PolymorphicFunction = unbound # type: ignore
@@ -178,6 +179,12 @@ class Trainer(ABC):
     default_batch_size: int
     batch_size: int
     data_subdir: str
+    # Names of the tensors each dataset batch yields, in order — used to match
+    # dataset arrays to the model's signature inputs by name (see scripts/fed_client.py).
+    dataset_tensors: list[str]
+    # How many leading dataset tensors the eval signature consumes; the remaining
+    # ones are targets ``eval_metrics`` reads off the datapoints (e.g. the MLP's labels).
+    n_eval_inputs: int
     # Fixes how the device feeds the model: the norm_param_bytes layout and the
     # I/O signature semantics. Part of the signed model bytes (see ml.payload).
     contract_version: int
@@ -210,9 +217,21 @@ class Trainer(ABC):
         """Feed-dict stream for the int8 TFLite converter. Loads from data_root when dataset is None."""
 
     @abstractmethod
+    def eval_metrics(self, datapoints: list, outputs: list[dict]) -> dict[str, float]:
+        """Metrics relevant to this model type (accuracy, recon error, ...) from the
+        aligned lists of evaluated ``datapoints`` (each a full dataset batch tuple) and
+        per-datapoint eval-signature ``outputs``. Kept independent of the runtime that
+        produced the outputs so both the in-process TF path (``evaluate``) and the
+        on-device LiteRT path (``scripts/fed_client.py``) share it; output values may be
+        tf tensors or numpy arrays and target tensors are read off ``datapoints``."""
+
     def evaluate(self, dataset: tf.data.Dataset, prefix: str = '') -> dict[str, float]:
-        """Metrics relevant to this model type (accuracy, recon error, ...).
+        """Evaluate the model over ``dataset`` and reduce to metrics via ``eval_metrics``.
         ``prefix`` labels the progress bar (e.g. ``epoch=3/20``)."""
+        datapoints = list(dataset)
+        outputs = [self.model.eval(*dp[:self.n_eval_inputs])
+                   for dp in tqdm(datapoints, desc=f'{prefix} eval'.strip(), leave=False)]
+        return self.eval_metrics(datapoints, outputs)
 
     def train_epoch(self, dataset: tf.data.Dataset, prefix: str = '') -> float:
         """One pass over ``dataset``; returns mean training loss. """
@@ -289,6 +308,8 @@ def autoencoder_norm_params(data_root: Path, data_subdir: str = CLEAN_SUBDIR):
 class AutoencoderTrainer(Trainer):
 
     primary_metric = 'recon_error'
+    dataset_tensors = ['signal', 'cond']
+    n_eval_inputs = 2
     contract_version = 2   # norm layout: signal mean/std(2 each), cond mean/std(8 each)
 
     default_batch_size = 12
@@ -296,10 +317,10 @@ class AutoencoderTrainer(Trainer):
     default_window_size = default_sample_rate * 8
     default_shift = default_sample_rate * 3
 
-    def __init__(self, model: TrainableModel, window_size: int = default_window_size,
+    def __init__(self, model: TrainableAutoencoder, window_size: int = default_window_size,
                  shift: int = default_shift, batch_size: int = default_batch_size,
                  data_subdir: str = CLEAN_SUBDIR):
-        self.model = model
+        self.model: TrainableAutoencoder = model # type: ignore
         self.window_size = window_size
         self.shift = shift
         self.batch_size = batch_size
@@ -322,6 +343,9 @@ class AutoencoderTrainer(Trainer):
         cond_mean = tf.constant(self.model.cond_mean)
         cond_std = tf.constant(self.model.cond_std)
         if dataset is None:
+            if data_root is None:
+                raise ValueError("Either dataset or data_root must be passed")
+
             rng = np.random.default_rng()
             data_dir = data_root / self.data_subdir
             all_signals, all_conds = [], []
@@ -344,11 +368,9 @@ class AutoencoderTrainer(Trainer):
         return dataset.map(lambda s, c: {'signal': (s - sig_mean) / sig_std,
                                          'cond': (c - cond_mean) / cond_std})
 
-    def evaluate(self, dataset, prefix=''):
-        errors = [self.model.eval(*batch)['error']
-                  for batch in tqdm(dataset, total=len(dataset),
-                                    desc=f'{prefix} eval'.strip(), leave=False)]
-        return {'recon_error': float(tf.reduce_mean(tf.concat(errors, axis=0)))}
+    def eval_metrics(self, datapoints, outputs):
+        errors = np.concatenate([np.asarray(o['error']).reshape(-1) for o in outputs])
+        return {'recon_error': float(np.mean(errors))}
 
     def report(self, result_dir, eval_dataset):
         import matplotlib.pyplot as plt
