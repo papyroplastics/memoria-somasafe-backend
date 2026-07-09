@@ -1,5 +1,5 @@
 import uuid
-from datetime import timedelta
+from datetime import timedelta, datetime
 
 import numpy as np
 import tensorflow as tf
@@ -162,14 +162,14 @@ def _aggregate_model(session: Session, key: str) -> str:
     cutoff = session.exec(
         select(GlobalWeights.created_at)
         .where(GlobalWeights.version_id == latest.id)
-        .order_by(GlobalWeights.created_at.desc())  # type: ignore[attr-defined]
-    ).first()
+        .order_by(GlobalWeights.created_at.desc())  # type: ignore
+    ).first() or datetime.fromtimestamp(0)
 
     submissions = list(session.exec(
         select(WeightSubmission)
         .where(WeightSubmission.version_id == latest.id,
                WeightSubmission.created_at > cutoff)
-        .order_by(WeightSubmission.created_at.asc())  # type: ignore[attr-defined]
+        .order_by(WeightSubmission.created_at.asc())  # type: ignore
     ))
     latest_per_user = {sub.user_id: sub for sub in submissions}
 
@@ -258,10 +258,10 @@ def cleanup_results() -> int:
     cleaned = 0
     with Session(engine) as session:
         stmt = select(QuantizationJob).where(
-            QuantizationJob.result.is_not(None),  # type: ignore[union-attr]
+            QuantizationJob.result.is_not(None),  # type: ignore
             or_(
                 and_(
-                    QuantizationJob.served_at.is_not(None),  # type: ignore[union-attr]
+                    QuantizationJob.served_at.is_not(None),  # type: ignore
                     QuantizationJob.served_at < grace_cutoff,
                 ),
                 QuantizationJob.created_at < ttl_cutoff,

@@ -42,11 +42,19 @@ class SubmissionType(str, Enum):
     quantize = "quantize"
 
 
-class User(SQLModel, table=True):
+class IntPKModel(SQLModel):
+    """Base for tables with an autoincrement integer primary key. The default of
+    None is what SQLAlchemy fills in on flush, but a PK is never actually null
+    once persisted, so the annotation is int (not int | None) to spare callers a
+    needless narrowing at every query site."""
+
+    id: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
+
+
+class User(IntPKModel, table=True):
     """An account allowed to talk to the gateway. Created by the seed script
     (no public registration); the password is argon2-hashed (see api.routes.auth)."""
 
-    id: int | None = Field(default=None, primary_key=True)
     username: str = Field(unique=True, index=True)
     email: str | None = None
     hashed_password: str
@@ -93,7 +101,7 @@ class ModelDefinition(SQLModel, table=True):
     firmware_id: int | None = None
 
 
-class ModelVersion(SQLModel, table=True):
+class ModelVersion(IntPKModel, table=True):
     """One published version of a model. ``version`` is the hand-bumped integer
     from the code registry (ml.model_list); ``fingerprint`` (Trainer.arch_fingerprint,
     a hash of the trainable-variable layout plus the baked normalization params) is
@@ -103,7 +111,6 @@ class ModelVersion(SQLModel, table=True):
     the oldest app that can use the version; ``contract_version`` fixes how the
     device feeds the model (norm_params layout + I/O signatures, see ml.payload)."""
 
-    id: int | None = Field(default=None, primary_key=True)
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version: int
     fingerprint: str
@@ -117,7 +124,7 @@ class ModelVersion(SQLModel, table=True):
     __table_args__ = (UniqueConstraint("model_key", "version"),)
 
 
-class GlobalWeights(SQLModel, table=True):
+class GlobalWeights(IntPKModel, table=True):
     """A snapshot of a model version's global parameters, plus the serving
     artifacts baked from them. Seeded from the trained tflite files and appended
     to by aggregation, which re-exports both artifacts (and signs the quantized
@@ -129,7 +136,6 @@ class GlobalWeights(SQLModel, table=True):
     export fails. ``mse_threshold`` is the allowed submission error computed by
     that round (None on seeded rows, which skips the check in weight validation)."""
 
-    id: int | None = Field(default=None, primary_key=True)
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version_id: int = Field(foreign_key="modelversion.id", index=True)
     parameters: bytes          # packed float32 (np.float32 .tobytes())
@@ -142,7 +148,7 @@ class GlobalWeights(SQLModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
-class WeightSubmission(SQLModel, table=True):
+class WeightSubmission(IntPKModel, table=True):
     """A client-uploaded weight update. Persisted indefinitely: besides feeding
     quantization, these rows are the substrate for federated aggregation
     (worker.tasks.federated_aggregation). ``base_weights_id`` is the
@@ -153,7 +159,6 @@ class WeightSubmission(SQLModel, table=True):
     aggregation for rows neither got to. The verdict is never surfaced to the
     client (a Byzantine client should not learn its update was filtered)."""
 
-    id: int | None = Field(default=None, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
     model_key: str
     base_weights_id: int = Field(foreign_key="globalweights.id", index=True)
@@ -183,7 +188,7 @@ class QuantizationJob(SQLModel, table=True):
     served_at: datetime | None = None
 
 
-class Firmware(SQLModel, table=True):
+class Firmware(IntPKModel, table=True):
     """A published firmware build, seeded from a `shared/gen/firmware/{version}`
     export (`firmware/scripts/export_image.py`) and served by the /ota routes.
     ``interface_version`` is the BLE contract an app build must share to talk to
@@ -191,7 +196,6 @@ class Firmware(SQLModel, table=True):
     ``signature`` is the server's ECDSA over the raw image bytes, verified by
     the device against its factory srv_pub before booting the image."""
 
-    id: int | None = Field(default=None, primary_key=True)
     version: str = Field(unique=True, index=True)  # arbitrary <=32-byte build string
     interface_version: int = Field(index=True)
     supported_contracts: list[int] = Field(sa_column=Column(JSON))
