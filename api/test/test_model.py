@@ -36,7 +36,7 @@ def _download_trainable(client, headers, key):
 
 
 def _zero_params(model: dict) -> bytes:
-    return b"\x00" * (model["param_count"] * 4)
+    return b"\x00" * (model["weight_count"] * 4)
 
 
 def test_list_requires_auth(client):

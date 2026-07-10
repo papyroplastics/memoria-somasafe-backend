@@ -1,3 +1,4 @@
+from numpy import dtype
 from abc import ABC, abstractmethod
 from typing import Protocol
 from pathlib import Path
@@ -65,31 +66,31 @@ class TrainableModel(tf.Module):
             dst.assign(merged)
 
     def _init_save_restore(self):
-        self.parameter_sizes = [
+        self.weight_sizes = [
             int(var.shape.num_elements()) for var in self.trainable_variables
         ]
-        self.total_parameter_size = sum(self.parameter_sizes)
+        self.total_weight_size = sum(self.weight_sizes)
         self.save = tf.function(self.save_eager, input_signature=[])
         self.restore = tf.function(self.restore_eager, input_signature=[
-            tf.TensorSpec(shape=(self.total_parameter_size,), dtype=tf.float32),
+            tf.TensorSpec(shape=(self.total_weight_size,), dtype=tf.float32),
         ])
 
     def save_eager(self):
         return {
-            'parameters': tf.concat([
+            'weights': tf.concat([
                 tf.reshape(var, (-1,)) for var in self.trainable_variables
             ], axis=0)
         }
 
-    def restore_eager(self, parameters: tf.Tensor):
+    def restore_eager(self, weights: tf.Tensor):
         idx = 0
         for i, var in enumerate(self.trainable_variables):
-            size = self.parameter_sizes[i]
-            var.assign(tf.reshape(parameters[idx:idx + size], var.shape))
+            size = self.weight_sizes[i]
+            var.assign(tf.reshape(weights[idx:idx + size], var.shape))
             idx += size
-        return {
-            'parameter_count': tf.constant(self.total_parameter_size, dtype=tf.int32)
-        }
+
+        # signatures must have a return value for conversion
+        return { 'placeholder': tf.constant(0, dtype=tf.float32) }
 
 
 class TrainableAutoencoder(TrainableModel):

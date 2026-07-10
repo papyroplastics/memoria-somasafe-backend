@@ -5,7 +5,7 @@ For each round, and for each training subject (as user ``test_N``), it:
   2. pulls the current global trainable artifact (``GET /model/download/trainable``),
   3. trains one pass on that subject through the on-device LiteRT ``CompiledModel``
      interface (the same runtime the phone uses),
-  4. uploads the resulting parameters to the model's submission endpoint,
+  4. uploads the resulting weight delta (local − global) to the submission endpoint,
   5. logs out.
 
 After every client has submitted it queues one aggregation round, waits for the
@@ -87,8 +87,8 @@ class LiteRTClient:
             batches += 1
         return total / batches if batches else 0.0
 
-    def parameters(self) -> np.ndarray:
-        return self._run("save", [])["parameters"].astype(np.float32)
+    def weights(self) -> np.ndarray:
+        return self._run("save", [])["weights"].astype(np.float32)
 
     def eval(self, datapoint) -> dict[str, np.ndarray]:
         """Run the eval signature on one dataset batch, returning the output tensors
@@ -184,12 +184,14 @@ def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
             token = login(base, user, user)
             artifact, weights_id = download_trainable(base, token, key)
             client = LiteRTClient(artifact, trainer.dataset_tensors)
+            base_weights = client.weights()  # global snapshot the delta is relative to
             if round_global is None:
                 round_global = artifact
                 score(client, r - 1)  # global weights this round trained from
 
             client.train_pass(dataset, f"{round_prefix} subject={i}/{len(client_datasets)}")
-            submit(base, token, key, weights_id, client.parameters().tobytes(),
+            delta = client.weights() - base_weights
+            submit(base, token, key, weights_id, delta.astype(np.float32).tobytes(),
                    spec.submission_type)
             logout(base, token)
 

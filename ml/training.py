@@ -11,10 +11,6 @@ History = list[tuple[int, float, dict[str, float]]]
 
 def fed_avg(vectors: Sequence[tf.Tensor | np.ndarray],
             sizes: Sequence[int] | None = None) -> np.ndarray:
-    """FedAvg of flat parameter vectors, weighted by client dataset size
-    (uniform when ``sizes`` is None, as in the backend where submissions carry
-    no sample counts). Shared by the simulated ``federated_loop`` and the
-    backend aggregation task so simulation matches deployment."""
     stacked = np.stack([np.asarray(vector) for vector in vectors])
     weights = None if sizes is None else np.asarray(sizes, dtype=stacked.dtype)
     return np.average(stacked, axis=0, weights=weights)
@@ -41,7 +37,7 @@ def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Datase
                    global_epochs: int, aggregate=fed_avg) -> History:
     model = trainer.model
     sizes = [len(ds) for ds in subject_train_datasets]
-    global_weights = model.save()['parameters']
+    global_weights = model.save()['weights']
 
     history: History = []
     for r in tqdm(range(global_epochs), desc="rounds"):
@@ -58,7 +54,7 @@ def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Datase
                           leave=False):
                 prefix = f"{round_prefix} subject={s + 1}/{len(subject_train_datasets)} local={e + 1}/{local_epochs}"
                 loss = trainer.train_epoch(train_ds, prefix)
-            client_weights.append(model.save()['parameters'])
+            client_weights.append(model.save()['weights'])
 
         global_weights = aggregate(client_weights, sizes)
         model.restore(tf.constant(global_weights))

@@ -114,7 +114,7 @@ class ModelVersion(IntPKModel, table=True):
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version: int
     fingerprint: str
-    param_count: int
+    weight_count: int
     contract_version: int
     submission_type: SubmissionType
     norm_params: bytes         # the version's z-score params (LE float32)
@@ -125,7 +125,7 @@ class ModelVersion(IntPKModel, table=True):
 
 
 class GlobalWeights(IntPKModel, table=True):
-    """A snapshot of a model version's global parameters, plus the serving
+    """A snapshot of a model version's global weights, plus the serving
     artifacts baked from them. Seeded from the trained tflite files and appended
     to by aggregation, which re-exports both artifacts (and signs the quantized
     one, see ml.payload) each round. The active weights of a version are its
@@ -138,8 +138,8 @@ class GlobalWeights(IntPKModel, table=True):
 
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version_id: int = Field(foreign_key="modelversion.id", index=True)
-    parameters: bytes          # packed float32 (np.float32 .tobytes())
-    param_count: int
+    weights: bytes             # packed float32 (np.float32 .tobytes())
+    weight_count: int
     valid: bool = True
     mse_threshold: float | None = None
     trainable_artifact: bytes | None = None   # LiteRT-trainable .tflite with these weights
@@ -148,23 +148,26 @@ class GlobalWeights(IntPKModel, table=True):
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
-class WeightSubmission(IntPKModel, table=True):
-    """A client-uploaded weight update. Persisted indefinitely: besides feeding
-    quantization, these rows are the substrate for federated aggregation
-    (worker.tasks.federated_aggregation). ``base_weights_id`` is the
-    GlobalWeights snapshot the client trained from; ``version_id`` (its model
-    version) is denormalized off it so aggregation can filter without a join and
-    never mixes incompatible updates. ``valid`` is the cached weight-validation
-    verdict — None until validated; set by the quantize/validate tasks, and by
-    aggregation for rows neither got to. The verdict is never surfaced to the
-    client (a Byzantine client should not learn its update was filtered)."""
+class ClientDeltaSubmission(IntPKModel, table=True):
+    """A client-uploaded weight *delta* — Δ = local_weights − global_weights, the
+    change the client's local training produced against the snapshot it trained
+    from. Persisted indefinitely: besides feeding quantization, these rows are the
+    substrate for federated aggregation (worker.tasks.federated_aggregation), which
+    averages the deltas and adds the mean onto the reference global weights.
+    ``base_weights_id`` is the GlobalWeights snapshot the delta is relative to (and
+    the client trained from); ``version_id`` (its model version) is denormalized off
+    it so aggregation can filter without a join and never mixes incompatible updates.
+    ``valid`` is the cached weight-validation verdict — None until validated; set by
+    the quantize/validate tasks, and by aggregation for rows neither got to. The
+    verdict is never surfaced to the client (a Byzantine client should not learn its
+    update was filtered)."""
 
     user_id: int = Field(foreign_key="user.id", index=True)
     model_key: str
     base_weights_id: int = Field(foreign_key="globalweights.id", index=True)
     version_id: int = Field(foreign_key="modelversion.id", index=True)
-    parameters: bytes          # packed float32 (np.float32 .tobytes())
-    param_count: int
+    weights: bytes             # packed float32 delta (np.float32 .tobytes())
+    weight_count: int
     valid: bool | None = None
     created_at: datetime = Field(default_factory=utcnow)
 
@@ -176,7 +179,7 @@ class QuantizationJob(SQLModel, table=True):
     served (after a grace period) or once expired (unclaimed)."""
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
-    submission_id: int = Field(foreign_key="weightsubmission.id")
+    submission_id: int = Field(foreign_key="clientdeltasubmission.id")
     model_key: str
     status: JobStatus = Field(default=JobStatus.pending)
     result: bytes | None = None

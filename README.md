@@ -15,7 +15,7 @@ LiteRT-trainable on-device and its flattened weights can move through FedAvg.
 - Serves as the source-model path for on-device Android fine-tuning and the
   federated update flow.
 - Exposes a FastAPI gateway (`api/`) that hands models to the app and accepts
-  weight uploads, running the ML work asynchronously on a Celery worker.
+  weight-delta uploads, running the ML work asynchronously on a Celery worker.
 
 ## Generated code
 
@@ -36,7 +36,7 @@ in `common/` (config, DB tables, the model registry) imported by both api and wo
 ```txt
 common/    Shared, TensorFlow-free infra imported by api + worker: env-driven config,
            and the SQLModel tables (User, AuthSession, Device, ModelDefinition,
-           ModelVersion, GlobalWeights, WeightSubmission, QuantizationJob, Firmware).
+           ModelVersion, GlobalWeights, ClientDeltaSubmission, QuantizationJob, Firmware).
 api/       FastAPI gateway (no TensorFlow): routers for auth/device/model (routes/),
            rate-limiting + attestation-challenge helpers (lib/), and a pytest suite
            mirroring the routers (test/).
@@ -256,7 +256,7 @@ only the external services — PostgreSQL and Redis — run in containers via `c
 processes reach them; the API itself binds `0.0.0.0` so the phone can reach it over the LAN.
 
 - **Gateway (`api/`, no TensorFlow):** serves the model artifacts stored on the active
-  `GlobalWeights` rows, accepts weight uploads, persists them, enqueues worker jobs, and
+  `GlobalWeights` rows, accepts weight-delta uploads, persists them, enqueues worker jobs, and
   exposes a result endpoint the client polls. Fast to start since it never imports TF.
 - **Worker (`worker/tasks.py`):** restores uploaded weights into the model, converts it to
   an int8 `.tflite` against the per-model calibration dataset
@@ -275,17 +275,18 @@ registry `ml/model_list.py` and seeded into the DB). The `quantize` path accepts
 is compatible and submit-only is the least work). A model uploaded on a path it doesn't
 accept gets `404` (not `403`, so the path stays unguessable). The type also selects the
 aggregation strategy (see "Federated aggregation"); future formats (sparse, DP) will add
-their own type + endpoint. Both current paths persist a `WeightSubmission` that feeds
-aggregation; both take the raw little-endian float32 parameter buffer as the request body
-and the `weights_id` of the `GlobalWeights` snapshot the client trained from (echoed by the
-download headers) in the path. Malformed bodies (wrong length, non-finite values) are
+their own type + endpoint. Both current paths persist a `ClientDeltaSubmission` that feeds
+aggregation; both take the raw little-endian float32 **weight-delta** buffer (Δ = local −
+global, the change local training produced against the snapshot it trained from) as the
+request body and the `weights_id` of that `GlobalWeights` snapshot (echoed by the download
+headers) in the path. Malformed bodies (wrong length, non-finite values) are
 rejected with `400`; an unknown `weights_id` is `400`; a `weights_id` belonging to a
 frozen (non-latest) model version is `409` — the client must re-download the model first.
 
 Request flow for a `quantize`-typed model:
 
-1. `POST /model/submit/quantize/{key}/{weights_id}` stores the weights as a
-   `WeightSubmission` (tagged with the submitting `user_id`, the `base_weights_id` and its
+1. `POST /model/submit/quantize/{key}/{weights_id}` stores the delta as a
+   `ClientDeltaSubmission` (tagged with the submitting `user_id`, the `base_weights_id` and its
    `version_id`), creates a `QuantizationJob` (`pending`), enqueues `quantize_submission`,
    and returns `202` with a `job_id` + `status_url`.
 2. The worker runs the job: malformedness fails it, but the aggregation-usability verdict
@@ -298,7 +299,7 @@ Request flow for a `quantize`-typed model:
    `X-Model-Signature` / `X-Contract-Version` / `X-Norm-Params` headers once `done` — the
    app packages those fields for the ESP32 per its BLE interface version, and the firmware
    re-derives the canonical bytes and verifies the signature before loading. The result is
-   scoped to the user who submitted it (resolved via the job's `WeightSubmission`); another
+   scoped to the user who submitted it (resolved via the job's `ClientDeltaSubmission`); another
    user's `job_id` returns `404`.
 
 The submit-only path is `POST /model/submit/raw/{key}/{weights_id}`: same checks and
@@ -308,7 +309,7 @@ path, whose `422` reveals hard failures) and no full-weights artifact round-trip
 the natural host for future privacy-preserving submission formats (sampled weights,
 differential privacy).
 
-**Weights persist indefinitely.** `WeightSubmission` rows are the substrate federated
+**Weights persist indefinitely.** `ClientDeltaSubmission` rows are the substrate federated
 aggregation consumes. Only the job's quantized `result` (+ its signature) is ephemeral.
 
 ### Federated aggregation
@@ -323,21 +324,23 @@ FedAvg round per initialized model:
    (valid or not, so updates consumed by a later-invalidated round are never re-aggregated),
    filtered to the latest `ModelVersion` — frozen versions never aggregate. One update per
    client: only each user's latest submission in the window counts.
-2. **Validation** (`worker/utils/weight_validation.py`): parameter count must match the
-   model's `total_parameter_size`, the buffer must be finite, and — once a previous round
-   has set an `mse_threshold` — the submission's MSE against the active global weights must
-   stay under it. Validation runs once per submission: the quantize/validate tasks perform
-   it as uploads arrive and cache the verdict on `WeightSubmission.valid` (never surfacing
-   it to the client); aggregation trusts that verdict and validates only rows neither task
-   got to.
+2. **Validation** (`worker/utils/weight_validation.py`): weight count must match the
+   model's `total_weight_size`, the buffer must be finite, and — once a previous round
+   has set an `mse_threshold` — the delta's magnitude (mean square, which equals its MSE
+   from the active global weights) must stay under it. Validation runs once per submission:
+   the quantize/validate tasks perform it as uploads arrive and cache the verdict on
+   `ClientDeltaSubmission.valid` (never surfacing it to the client); aggregation trusts that
+   verdict and validates only rows neither task got to.
 3. **Round threshold:** fewer than `FED_MIN_SUBMISSIONS` (default 1) valid submissions skips
    the model until the next round.
 4. **Outlier filter:** each submission's L2 distance from the element-wise mean is z-scored;
    rows above the cutoff are dropped (needs ≥ 3 submissions to be meaningful, otherwise all
    are kept).
 5. **Averaging:** `ml.training.fed_avg` — the same function the simulated `federated_loop`
-   uses, so simulation matches deployment — with uniform weighting (submissions carry no
-   sample counts), stored as a new `GlobalWeights` row along with the next round's
+   uses, so simulation matches deployment — averages the accepted deltas with uniform
+   weighting (submissions carry no sample counts), and the mean is added onto the reference
+   global weights (identical to averaging absolute weights when every client shares a base).
+   The result is stored as a new `GlobalWeights` row along with the next round's
    `mse_threshold` (a margin over the worst deviation accepted this round).
 6. **Artifact baking:** the averaged weights are restored into the cached model and both
    serving artifacts are re-exported onto the new row — the LiteRT-trainable `.tflite` and

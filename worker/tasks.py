@@ -12,7 +12,7 @@ from worker.utils.weight_validation import (
     compute_mse_threshold,
     filter_outliers,
     malformed_reason,
-    mse,
+    update_magnitude,
     validate_submission,
 )
 
@@ -28,7 +28,7 @@ from common.db import (
     JobStatus,
     QuantizationJob,
     SubmissionType,
-    WeightSubmission,
+    ClientDeltaSubmission,
     engine,
     get_latest_version,
     get_latest_weights,
@@ -85,7 +85,7 @@ def quantize_submission(job_id: str) -> None:
         session.commit()
         session.refresh(job)
 
-        submission = session.get(WeightSubmission, job.submission_id)
+        submission = session.get(ClientDeltaSubmission, job.submission_id)
         try:
             if submission is None:
                 raise ValueError(f"submission {job.submission_id} not found")
@@ -100,7 +100,7 @@ def quantize_submission(job_id: str) -> None:
                     or latest.fingerprint != fingerprint:
                 raise ValueError(f"stale model version for '{job.model_key}'")
 
-            reason = malformed_reason(submission, model.total_parameter_size)
+            reason = malformed_reason(submission, model.total_weight_size)
             if reason is not None:
                 submission.valid = False
                 session.add(submission)
@@ -109,12 +109,18 @@ def quantize_submission(job_id: str) -> None:
             # Aggregation-usability is judged silently: the verdict is cached on
             # the row and the artifact is produced either way.
             submission.valid = validate_submission(
-                submission, model.total_parameter_size,
+                submission, model.total_weight_size,
                 get_latest_weights(session, job.model_key)) is None
             session.add(submission)
 
-            params = np.frombuffer(submission.parameters, dtype=np.float32).copy()
-            model.restore(tf.constant(params, dtype=tf.float32))
+            # The personalized int8 artifact is built from the client's own local
+            # weights, reconstructed as base snapshot + submitted delta.
+            base = session.get(GlobalWeights, submission.base_weights_id)
+            if base is None:
+                raise ValueError(f"base weights {submission.base_weights_id} not found")
+            delta = np.frombuffer(submission.weights, dtype=np.float32)
+            local = (np.frombuffer(base.weights, dtype=np.float32) + delta).astype(np.float32)
+            model.restore(tf.constant(local, dtype=tf.float32))
             job.result = bytes(get_optimized_model(model, rep_dataset))
             job.signature = sign_model(job.result, contract_version, norm_bytes,
                                        SERVER_PRIVATE_KEY_FILE)
@@ -133,11 +139,11 @@ def validate_weight_submission(submission_id: int) -> None:
     """Background verdict for a submit-only upload. Cached on the row for
     aggregation; never surfaced to the client."""
     with Session(engine) as session:
-        submission = session.get(WeightSubmission, submission_id)
+        submission = session.get(ClientDeltaSubmission, submission_id)
         if submission is None or submission.model_key not in _models:
             return
         model, _, _, _, _ = _models[submission.model_key]
-        reason = validate_submission(submission, model.total_parameter_size,
+        reason = validate_submission(submission, model.total_weight_size,
                                      get_latest_weights(session, submission.model_key))
         submission.valid = reason is None
         if reason is not None:
@@ -175,17 +181,17 @@ def _aggregate_model(session: Session, key: str) -> str:
     ).first() or datetime.fromtimestamp(0)
 
     submissions = list(session.exec(
-        select(WeightSubmission)
-        .where(WeightSubmission.version_id == latest.id,
-               WeightSubmission.created_at > cutoff)
-        .order_by(WeightSubmission.created_at.asc())  # type: ignore
+        select(ClientDeltaSubmission)
+        .where(ClientDeltaSubmission.version_id == latest.id,
+               ClientDeltaSubmission.created_at > cutoff)
+        .order_by(ClientDeltaSubmission.created_at.asc())  # type: ignore
     ))
     latest_per_user = {sub.user_id: sub for sub in submissions}
 
-    valid: list[WeightSubmission] = []
+    valid: list[ClientDeltaSubmission] = []
     for sub in latest_per_user.values():
         if sub.valid is None:  # never validated by the quantize/submit tasks
-            reason = validate_submission(sub, model.total_parameter_size, reference)
+            reason = validate_submission(sub, model.total_weight_size, reference)
             sub.valid = reason is None
             session.add(sub)
             if reason is not None:
@@ -198,17 +204,19 @@ def _aggregate_model(session: Session, key: str) -> str:
         return (f"skipped: {len(valid)} valid submissions "
                 f"(min {FED_MIN_SUBMISSIONS}, {len(submissions)} in window)")
 
-    vectors = np.stack([np.frombuffer(sub.parameters, dtype=np.float32)
-                        for sub in valid])
-    kept = vectors[filter_outliers(vectors)]
+    deltas = np.stack([np.frombuffer(sub.weights, dtype=np.float32)
+                       for sub in valid])
+    kept = deltas[filter_outliers(deltas)]
 
-    reference_params = np.frombuffer(reference.parameters, dtype=np.float32)
-    averaged = fed_avg(kept).astype(np.float32)
+    # FedAvg over deltas: new global = reference global + mean of the accepted
+    # updates. With a shared base this is identical to averaging absolute weights.
+    reference_weights = np.frombuffer(reference.weights, dtype=np.float32)
+    new_weights = (reference_weights + fed_avg(kept)).astype(np.float32)
 
-    # Bake the averaged weights into fresh serving artifacts. A failed export
+    # Bake the new weights into fresh serving artifacts. A failed export
     # invalidates the round: clients keep pulling the previous snapshot, and the
     # window's submissions stay consumed.
-    model.restore(tf.constant(averaged, dtype=tf.float32))
+    model.restore(tf.constant(new_weights, dtype=tf.float32))
     trainable = quantized = signature = export_error = None
     try:
         trainable = bytes(get_trainable_model(model))
@@ -220,11 +228,11 @@ def _aggregate_model(session: Session, key: str) -> str:
 
     session.add(GlobalWeights(
         model_key=key, version_id=latest.id,
-        parameters=averaged.tobytes(),
-        param_count=model.total_parameter_size,
+        weights=new_weights.tobytes(),
+        weight_count=model.total_weight_size,
         valid=export_error is None,
         mse_threshold=compute_mse_threshold(
-            [mse(vector, reference_params) for vector in kept]),
+            [update_magnitude(delta) for delta in kept]),
         trainable_artifact=trainable,
         quantized_artifact=quantized,
         artifact_signature=signature,

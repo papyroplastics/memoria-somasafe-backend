@@ -55,7 +55,7 @@ def get_optimized_model(model: TrainableModel, rep_dataset: tf.data.Dataset) -> 
 def load_trainable_weights(tflite_path: Path) -> np.ndarray:
     interpreter = tf.lite.Interpreter(model_path=str(tflite_path))
     save = interpreter.get_signature_runner('save')
-    return np.asarray(save()['parameters'], dtype=np.float32)
+    return np.asarray(save()['weights'], dtype=np.float32)
 
 
 def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset: tf.data.Dataset | None,

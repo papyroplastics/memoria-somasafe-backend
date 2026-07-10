@@ -82,7 +82,7 @@ def seed_models(session: Session) -> None:
         else:
             version = ModelVersion(
                 model_key=key, version=spec.version, fingerprint=fingerprint,
-                param_count=trainer.model.total_parameter_size,
+                weight_count=trainer.model.total_weight_size,
                 contract_version=trainer.contract_version,
                 submission_type=spec.submission_type,
                 norm_params=trainer.norm_param_bytes(),
@@ -96,7 +96,7 @@ def seed_models(session: Session) -> None:
             select(GlobalWeights).where(GlobalWeights.version_id == version.id)
         ).first()
         if has_weights is None:
-            params = load_trainable_weights(tflite)
+            weights = load_trainable_weights(tflite)
             quantized_file = MODELS_DIR / key / "quantized.tflite"
             quantized = quantized_file.read_bytes() if quantized_file.exists() else None
             signature = None
@@ -109,13 +109,13 @@ def seed_models(session: Session) -> None:
                           f"'{key}' quantized artifact left unsigned")
             session.add(GlobalWeights(
                 model_key=key, version_id=version.id,
-                parameters=params.astype("float32").tobytes(),
-                param_count=int(params.size),
+                weights=weights.astype("float32").tobytes(),
+                weight_count=int(weights.size),
                 trainable_artifact=tflite.read_bytes(),
                 quantized_artifact=quantized,
                 artifact_signature=signature,
             ))
-            print(f"  + initial weights for '{key}' v{spec.version} ({params.size} params)")
+            print(f"  + initial weights for '{key}' v{spec.version} ({weights.size} weights)")
     session.commit()
 
 

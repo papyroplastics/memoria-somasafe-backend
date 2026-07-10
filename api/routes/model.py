@@ -26,7 +26,7 @@ from common.db import (
     QuantizationJob,
     SubmissionType,
     User,
-    WeightSubmission,
+    ClientDeltaSubmission,
     get_latest_version,
     get_model_def,
     get_session,
@@ -74,7 +74,7 @@ class ModelInfo(BaseModel):
     fingerprint: str
     contract_version: int
     submission_type: SubmissionType
-    param_count: int
+    weight_count: int
     weights_version: datetime | None
 
 
@@ -84,7 +84,7 @@ class ModelVersionInfo(BaseModel):
     contract_version: int
     submission_type: SubmissionType
     min_app_version: str
-    param_count: int
+    weight_count: int
     created_at: datetime
     weights_version: datetime | None
 
@@ -113,11 +113,11 @@ def require_submission_type(session: Session, key: str,
 
 
 def store_submission(session: Session, key: str, weights_id: int, body: bytes,
-                     user: User) -> WeightSubmission:
-    """Persist a raw-float32 weight upload against its base GlobalWeights
-    snapshot. Only malformedness is rejected here — whether the update is
-    *usable* for aggregation is judged asynchronously and never surfaced to
-    the client."""
+                     user: User) -> ClientDeltaSubmission:
+    """Persist a raw-float32 weight *delta* (Δ = local − global, LE float32)
+    against the base GlobalWeights snapshot it was computed from. Only
+    malformedness is rejected here — whether the update is *usable* for
+    aggregation is judged asynchronously and never surfaced to the client."""
     require_model(session, key)
 
     base = session.get(GlobalWeights, weights_id)
@@ -132,21 +132,21 @@ def store_submission(session: Session, key: str, weights_id: int, body: bytes,
             detail=f"Frozen model version; only the latest version of '{key}' "
                    f"accepts submissions")
 
-    if len(body) != base.param_count * 4:
+    if len(body) != base.weight_count * 4:
         raise HTTPException(
             status_code=400,
-            detail=f"Expected {base.param_count} little-endian float32 parameters")
+            detail=f"Expected {base.weight_count} little-endian float32 weights")
     if not np.all(np.isfinite(np.frombuffer(body, dtype=np.float32))):
         raise HTTPException(status_code=400,
-                            detail="Parameters contain non-finite values")
+                            detail="Weights contain non-finite values")
 
-    submission = WeightSubmission(
+    submission = ClientDeltaSubmission(
         user_id=user.id,
         model_key=key,
         base_weights_id=base.id,
         version_id=latest.id,
-        parameters=bytes(body),
-        param_count=base.param_count,
+        weights=bytes(body),
+        weight_count=base.weight_count,
     )
     session.add(submission)
     session.commit()
@@ -161,7 +161,7 @@ def _version_info(session: Session, version: ModelVersion) -> ModelVersionInfo:
         contract_version=version.contract_version,
         submission_type=version.submission_type,
         min_app_version=version.min_app_version,
-        param_count=version.param_count, created_at=version.created_at,
+        weight_count=version.weight_count, created_at=version.created_at,
         weights_version=weights.created_at if weights else None,
     )
 
@@ -182,7 +182,7 @@ def list_models(session: Session = Depends(get_session),
             fingerprint=latest.fingerprint,
             contract_version=latest.contract_version,
             submission_type=latest.submission_type,
-            param_count=latest.param_count,
+            weight_count=latest.weight_count,
             weights_version=weights.created_at if weights else None,
         ))
     return out
@@ -250,7 +250,7 @@ def quantize_result(job_id: uuid.UUID,
         raise HTTPException(status_code=404, detail="Result not found or expired")
 
     # Authorize via the originating submission; 404 (not 403) to keep the id unguessable.
-    submission = session.get(WeightSubmission, job.submission_id)
+    submission = session.get(ClientDeltaSubmission, job.submission_id)
     if submission is None or submission.user_id != user.id:
         raise HTTPException(status_code=404, detail="Result not found or expired")
 
