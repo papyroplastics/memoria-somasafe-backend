@@ -109,7 +109,7 @@ serialized into the signed quantize payload for the firmware to apply. The same 
 build also runs over the clean signals into `datasets/clean-features/S*/` (every window
 normal, label 0) — unused for training, only feeds `export_subject_data.py --clean`. A
 separate per-type `anomalous-signals/<kind>/` (each kind applied to every window) lets
-`autoencoder_test.py` measure per-kind detection recall in isolation.
+`distill_calibrate.py` measure per-kind detection recall in isolation.
 
 Because injection operates on un-normalized signals, perturbations scale with the
 signal's own range/std, so they apply at any sensor output range. The five kinds are
@@ -122,24 +122,45 @@ already in the clean signal, so the AE rightly does not flag it.
 
 ### Autoencoder evaluation and distillation
 
-`autoencoder_test.py` scores the mixed-anomaly windows with **several scores**, each
-oriented higher = more anomalous and thresholded independently at a target clean-window
-false-positive-rate quantile (an F1 sweep on the balanced mixed set degenerates to "flag
-everything" for a weakly-separating score; a clean-FPR cut can't, and bounds the combined
-false-alarm rate): reconstruction MSE — strong on spike/blowup/noise but phase/rate-blind
-— OR'd with two cheap, jDSP-portable rhythm indices (in-band spectral entropy,
-beat-interval coefficient-of-variation) that catch afib, which reconstruction alone
-misses. A window is anomalous if any score crosses its threshold; the report (per-score
-thresholds, OR-combined metrics, per-kind recall, clean false-positive rate) goes to
-`results/<model>/reports/`.
+The detector is an OR of **several scores**, each oriented higher = more anomalous:
+reconstruction MSE — strong on spike/blowup/noise but phase/rate-blind — OR'd with two
+cheap, jDSP-portable rhythm indices (in-band spectral entropy, beat-interval
+coefficient-of-variation) that catch afib, which reconstruction alone misses. A window is
+anomalous if any score crosses its threshold, and the threshold is **per subject** — each
+score fires at the `1 - budget` quantile of *that subject's own* clean windows, so a
+subject-specific score scale (reconstruction error especially) gives a uniform per-subject
+false-alarm rate instead of one dominated by the noisiest subjects. The work splits into
+three scripts along **what data each is allowed to see** — mirroring deployment, where
+only the budgets are global and everything else is done per-client on unlabeled data:
 
-`distill_labels.py` reads those thresholds, labels the same windows by the same OR rule,
-and emits feature-mlp-shaped pseudo-labels — a datasets-shaped tree (`mixed-features/S*/`
-with the distilled `labels.npy`, feature arrays symlinked back to `datasets/`) — so the
-student `FeatureMLP` can train on them via `train.py --dataset-dir`: the path to
-validating an unsupervised teacher that needs no labels on-device. (Uniform-tempo
-timewarp stays below all three scores; it needs the activity-expected-HR check on the
-roadmap.)
+- **`distill_calibrate.py` (server: labeled, global)** picks the per-score **budgets** —
+  the only globally-relevant output, and the only thing that reads the synthetic labels.
+  Each budget (the quantile level a client thresholds at) is chosen *independently* as the
+  level that maximizes that score's Youden's J (recall minus clean FPR) on the labeled
+  data, capped at `--max-budget`. Independent (not a shared combined-FPR ceiling) so a
+  low-volume specialist (rr → afib/timewarp) can't be crowded out by a high-volume
+  generalist (recon); Youden's J is degeneracy-free, unlike an F1 sweep that flags
+  everything on a weakly-separating score. Writes only the budgets to `results/<model>/reports/`.
+- **`distill_labels.py` (client: unlabeled)** touches only what a real client has — its
+  own clean baseline and the mixed signal + on-device features, **never the true labels or
+  the per-anomaly sets**. Reads the budgets, derives each subject's thresholds from its
+  *own* clean windows, and emits a **soft** `[0,1]` label per window: the clean-CDF rank
+  past each score's threshold, max'd across scores (so `label > 0` reproduces the hard OR),
+  then a size-1 temporal **median filter** (real anomalies span many windows, so a lone
+  flag is a false positive and a lone gap a false negative — cleaned without tuning to the
+  injected span length). Soft targets carry the teacher's confidence — proper knowledge
+  distillation, not just pseudo-labeling.
+- **`distill_eval.py` (science: unrestricted)** replays the same budgets → per-subject
+  thresholds a client uses, then scores the OR detector against the true mixed-window
+  labels and the per-type `anomalous-signals/` sets: OR-combined + per-score
+  precision/recall/F1, per-anomaly-kind recall, clean FPR. Writes the metrics to
+  `results/<model>/reports/`.
+
+The labels land in a datasets-shaped tree (`mixed-features/S*/` with the distilled
+`labels.npy`, feature arrays symlinked back to `datasets/`), so the student `FeatureMLP`
+trains on them via `train.py --dataset-dir` — the path to validating an unsupervised
+teacher that needs no labels on-device. (Uniform-tempo timewarp stays below all three
+scores; it needs the activity-expected-HR check on the roadmap.)
 
 ## Run
 
@@ -191,14 +212,15 @@ uv run -m ml.scripts.transfer_learn feature-mlp 32 --epochs 3 # 2) transfer -> d
 The source batch size must be `>=` the default; `transfer_learn` re-exports the
 fine-tuned model under the canonical (unsuffixed) artifact names.
 
-To run the knowledge-distillation round-trip, first evaluate the autoencoder
-(`autoencoder_test.py` picks the per-score thresholds and reports per-kind recall), then
-point `feature-mlp` at its distilled labels with `--dataset-dir`. `distill_labels.py`
-emits a datasets-shaped tree (`mixed-features/S*/` with distilled `labels.npy` and
-the feature arrays symlinked back to `datasets/`), so it can be used as a drop-in dataset:
+To run the knowledge-distillation round-trip, first calibrate the autoencoder
+(`distill_calibrate.py` picks the per-score budgets), then `distill_labels.py` derives
+each subject's thresholds and emits the soft-label tree; `distill_eval.py` reports the
+detector's per-kind metrics against the ground truth. Then point `feature-mlp` at those
+labels with `--dataset-dir`:
 
 ```bash
-uv run -m scripts.autoencoder_test cnn-ae                                        # pick thresholds -> results/cnn-ae/reports/
+uv run -m scripts.distill_calibrate cnn-ae                                       # budgets -> results/cnn-ae/reports/
+uv run -m scripts.distill_eval cnn-ae                                            # metrics -> results/cnn-ae/reports/
 uv run -m scripts.distill_labels cnn-ae                                          # teacher -> results/cnn-ae/distilled-labels/
 uv run -m scripts.train feature-mlp --dataset-dir results/cnn-ae/distilled-labels  # student on pseudo-labels
 ```

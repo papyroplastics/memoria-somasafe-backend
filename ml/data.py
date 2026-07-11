@@ -617,7 +617,7 @@ def combine_datasets(datasets: list[tf.data.Dataset]) -> tf.data.Dataset:
 def conditional_windows(subjects_dir: Path, sid: str, window_size: int,
                         anomalous_dir: Path | None = None) -> tuple[np.ndarray, np.ndarray]:
     """Raw ``(T, 2)`` signal + per-window raw cond ``(n_windows, N_COND)`` for
-    non-overlapping windows — for autoencoder_test / distill_labels, which slice windows
+    non-overlapping windows — for distill_calibrate / distill_labels, which slice windows
     manually rather than via tf.data. The model normalizes both on eval.
 
     Reads the precomputed raw context (``context.npy``, on the same no-overlap grid)."""

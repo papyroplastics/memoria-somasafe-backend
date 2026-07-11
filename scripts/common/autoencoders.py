@@ -9,12 +9,6 @@ from ml.models.common import AutoencoderTrainer
 
 def window_errors(model, signal: np.ndarray, cond: np.ndarray,
                   window: int, n_windows: int) -> np.ndarray:
-    """Per-window reconstruction error for non-overlapping ``window``-sample frames.
-
-    ``n_windows`` is an upper bound (e.g. the label count); the actual count is
-    shrunk to whole windows that fit the signal and to a multiple of the batch
-    size, dropping the trailing remainder. Returns errors of that (possibly
-    smaller) length, so callers must align their labels to it."""
     bs = model.batch_size
     signal = signal.astype(np.float32)
     cond = cond.astype(np.float32)
@@ -31,8 +25,6 @@ def window_errors(model, signal: np.ndarray, cond: np.ndarray,
 
 def load_autoencoder(model_name: str, batch_size: int | None = None,
                      data_root: Path = DATASETS_DIR) -> AutoencoderTrainer:
-    """Build an autoencoder trainer and restore its trained
-    weights from results/<model>/trainable.tflite."""
     trainer = MODELS[model_name].build_trainer(data_root, batch_size)
     if not isinstance(trainer, AutoencoderTrainer):
         raise SystemExit(

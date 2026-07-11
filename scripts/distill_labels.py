@@ -1,51 +1,38 @@
 """
-Distill window labels from a trained autoencoder: score the 
-mixed-anomaly windows (reconstruction error + spectral / beat-
-interval rhythm indices), label a window anomalous when any score 
-crosses the threshold picked by autoencoder_test.py, and write a 
-datasets-shaped tree (mixed-features/S*/ with distilled labels.npy 
-+ symlinked features) into results/<model>/ that train.py can 
-consume via --dataset-dir.
+Distill window labels from a trained autoencoder — the client-facing step. Touches only
+data a real client would have: its own clean-signal baseline and the mixed signal to be
+labeled (plus the features it computes on-device), never the ground-truth labels or the
+per-anomaly datasets. Reads the global per-score budgets from distill_calibrate.py,
+derives each subject's thresholds from its own clean windows, and emits a soft [0,1]
+anomaly label per window — the clean-CDF rank past each score's threshold, max'd across
+recon / spectral / rr, then temporally median-smoothed — into a datasets-shaped tree
+(mixed-features/S*/ with distilled labels.npy + symlinked features) under results/<model>/
+that train.py consumes via --dataset-dir. For the labeled diagnostics see distill_eval.py.
 """
 
 
 import argparse
-import json
 from pathlib import Path
 
 import numpy as np
 
 from common.config import MODELS_DIR, DATASETS_DIR
-from ml.data import (
-    CLEAN_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR, FEATURE_STATS_FILE,
-    BVP_WINDOW, WINDOW_SECONDS, conditional_windows, get_sorted_paths
-)
+from ml.data import MIXED_FEATURE_SUBDIR, FEATURE_STATS_FILE, BVP_WINDOW, WINDOW_SECONDS
 from ml.model_list import MODELS
 from .common.autoencoders import load_autoencoder
-from .common.scoring import SCORE_NAMES, score_windows, predict
-from .common.post_train import get_report_dir, AE_TEST_REPORT
+from .common.scoring import (
+    SCORE_NAMES, subject_thresholds, soft_score, median3,
+    score_dir_by_subject, score_mixed_by_subject,
+)
+from .common.post_train import load_budgets
 
 
 def relink(link: Path, target: Path):
-    """Point ``link`` at ``target`` with a relative symlink, replacing any existing one
-    — mirrors the feature dataset into the distilled-label tree without copying the
-    (potentially large) feature arrays."""
     link.parent.mkdir(parents=True, exist_ok=True)
     rel = target.resolve().relative_to(link.parent.resolve(), walk_up=True)
     if link.is_symlink() or link.exists():
         link.unlink()
     link.symlink_to(rel)
-
-
-def load_thresholds(model_name: str) -> dict[str, float]:
-    """Read the per-score thresholds picked by autoencoder_test.py."""
-    report_path = get_report_dir(MODELS_DIR / model_name) / AE_TEST_REPORT
-    if not report_path.exists():
-        raise SystemExit(
-            f"no evaluation report at {report_path}. Run autoencoder_test '{model_name}' "
-            f"first to pick the thresholds.")
-    data = json.loads(report_path.read_text())
-    return {n: float(data['thresholds'][n]) for n in SCORE_NAMES}
 
 
 if __name__ == "__main__":
@@ -58,9 +45,10 @@ if __name__ == "__main__":
     data_dir = DATASETS_DIR
     result_dir = MODELS_DIR / args.model
 
-    thresholds = load_thresholds(args.model)
-    # batch_size=1 so every window is scored, no batch remainder dropped — the distilled
-    # labels then line up 1:1 with the feature windows.
+    budgets = load_budgets(args.model)
+    # batch_size=1 so every window is scored (no batch remainder dropped): distilled
+    # labels line up 1:1 with the feature windows, and each subject's thresholds are set
+    # from its full clean set — the same thing an on-device client does.
     trainer = load_autoencoder(args.model, batch_size=1)
 
     window = trainer.window_size
@@ -69,38 +57,36 @@ if __name__ == "__main__":
             f"model window ({window} samples) does not match the {WINDOW_SECONDS}s feature "
             f"window ({BVP_WINDOW} samples) used to build mixed-features; the autoencoder "
             f"would produce a mismatched number of labels. Align the model's window size.")
-    subjects_dir = data_dir / CLEAN_SUBDIR
-    mixed_dir = data_dir / MIXED_SUBDIR
-    feature_dir = data_dir / MIXED_FEATURE_SUBDIR
 
-    subject_dirs = get_sorted_paths(mixed_dir)
-    if not subject_dirs:
-        raise SystemExit(f"{mixed_dir} is empty. Run get_dataset.py first.")
+    print("Scoring mixed-anomaly windows...")
+    mixed = score_mixed_by_subject(trainer, data_dir)
+    print("Scoring clean windows (sets each subject's thresholds)...")
+    clean = score_dir_by_subject(trainer, data_dir, None)
+    missing = set(mixed) - set(clean)
+    if missing:
+        raise SystemExit(f"subjects {sorted(missing)} lack clean windows; "
+                         "cannot derive per-subject thresholds.")
 
-    per_subject: dict[str, np.ndarray] = {}
-    print("Labeling windows at thresholds "
-          + ", ".join(f"{n}={thresholds[n]:.6f}" for n in SCORE_NAMES) + ":")
-    for d in subject_dirs:
-        sid = d.name
-        signal, cond = conditional_windows(subjects_dir, sid, window, anomalous_dir=mixed_dir)
-        n_windows = len(np.load(feature_dir / sid / 'labels.npy').reshape(-1))
-        scores = score_windows(trainer.model, signal, cond, window, n_windows)
-        flags = predict(scores, thresholds)
-        per_subject[sid] = flags
-        print(f"  {sid}: {len(flags)} windows, {flags.mean():.1%} flagged")
+    thresholds = subject_thresholds(clean, budgets)
 
-    # Mirror the feature dataset's structure under out_dir so it can be passed to
-    # train.py as a --dataset-dir: only the distilled labels.npy are written; the
+    # Soft labels: clean-CDF rank past each subject's threshold, max over scores, then a
+    # size-1 temporal median filter. Mirror the feature dataset's structure under out_dir
+    # so it can be passed to train.py as --dataset-dir; only labels.npy is written, the
     # feature arrays and global stats are symlinked back to the real dataset.
     out_dir = result_dir / args.out_subdir
     out_feature_dir = out_dir / MIXED_FEATURE_SUBDIR
-    for sid, flags in per_subject.items():
-        labels = flags.astype(np.float32).reshape(-1, 1)
+    feature_dir = data_dir / MIXED_FEATURE_SUBDIR
+    print("Writing soft labels (budgets "
+          + ", ".join(f"{n}={budgets[n]:.4f}" for n in SCORE_NAMES) + "):")
+    for sid in mixed:
+        soft = median3(soft_score(mixed[sid], clean[sid], budgets))
         save_dir = out_feature_dir / sid
         save_dir.mkdir(parents=True, exist_ok=True)
-        np.save(save_dir / 'labels.npy', labels)
+        np.save(save_dir / 'labels.npy', soft.reshape(-1, 1).astype(np.float32))
         relink(save_dir / 'features.npy', feature_dir / sid / 'features.npy')
+        print(f"  {sid}: {len(soft)} windows, mean soft label {soft.mean():.3f}, "
+              f"hard rate {(soft > 0).mean():.1%}")
     relink(out_feature_dir / FEATURE_STATS_FILE, feature_dir / FEATURE_STATS_FILE)
-    np.save(out_dir / 'thresholds.npy',
-            np.array([thresholds[n] for n in SCORE_NAMES], dtype=np.float32))
-    print(f"Wrote distilled-label dataset for {len(per_subject)} subjects to {out_dir}/")
+    np.save(out_dir / 'budgets.npy',
+            np.array([budgets[n] for n in SCORE_NAMES], dtype=np.float32))
+    print(f"Wrote distilled-label dataset for {len(mixed)} subjects to {out_dir}/")

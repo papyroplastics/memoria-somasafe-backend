@@ -7,7 +7,7 @@ z-scored demographics (static.npy); global BVP/ACC mean/std
 activity-context norm params (context_norm_params.npy). A follow-up pass writes
 each subject's raw per-window activity context (context.npy, no-overlap 8 s grid).
 Stage 2 → datasets/anomalous-signals/<kind>/S*/  per-type fully-anomalous BVP (one kind
-applied to every window) — for isolated per-kind testing in autoencoder_test.py
+applied to every window) — for isolated per-kind testing in distill_calibrate.py
 Stage 3 → datasets/mixed-signals/S*/      raw BVP with a window-aligned ~50% mix of anomaly
 kinds + per-window binary label bitmap (labels.npy) — the realistic training/distill set
 Stage 4 → datasets/mixed-features/S*/     per-subject non-overlapping 8 s windowed feature

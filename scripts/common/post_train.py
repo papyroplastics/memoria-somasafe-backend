@@ -1,10 +1,23 @@
 import csv
+import json
 from pathlib import Path
 import matplotlib.pyplot as plt
 
+from common.config import MODELS_DIR
 from ml.training import History
 
-AE_TEST_REPORT = 'autoencoder_test.json'
+CALIBRATION_REPORT = 'distill_calibration.json'   # budgets, from distill_calibrate
+EVAL_REPORT = 'distill_eval.json'                 # detector metrics, from distill_eval
+
+
+def load_budgets(model_name: str) -> dict[str, float]:
+    """Read the global per-score budgets picked by distill_calibrate.py."""
+    report_path = get_report_dir(MODELS_DIR / model_name) / CALIBRATION_REPORT
+    if not report_path.exists():
+        raise SystemExit(
+            f"no calibration report at {report_path}. Run distill_calibrate '{model_name}' "
+            f"first to pick the budgets.")
+    return {k: float(v) for k, v in json.loads(report_path.read_text())['budgets'].items()}
 
 
 def plot_history(history: History, primary_metric: str, result_dir: Path):
