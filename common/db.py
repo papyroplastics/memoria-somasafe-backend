@@ -12,16 +12,6 @@ def utcnow() -> datetime:
     # Naive UTC to match the default TIMESTAMP WITHOUT TIME ZONE columns.
     return datetime.now(timezone.utc).replace(tzinfo=None)
 
-
-class ModelPurpose(str, Enum):
-    """TF-free model role, shared by the code registry (ml.model_list) and the
-    ModelDefinition table the registry is projected into by the seed script."""
-
-    train_only = "train-only"
-    embed_infer = "embed-infer"
-    app_infer = "app-infer"
-
-
 class JobStatus(str, Enum):
     pending = "pending"
     running = "running"
@@ -97,7 +87,6 @@ class ModelDefinition(SQLModel, table=True):
     key: str = Field(primary_key=True)
     name: str
     last_updated: datetime = Field(default_factory=utcnow)
-    purpose: ModelPurpose
     firmware_id: int | None = None
 
 

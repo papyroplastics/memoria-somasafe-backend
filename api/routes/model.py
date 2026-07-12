@@ -66,7 +66,6 @@ class Artifact(str, Enum):
 class ModelInfo(BaseModel):
     key: str
     name: str
-    purpose: str
     firmware_id: int | None
     version: int
     min_app_version: str
@@ -171,7 +170,7 @@ def list_models(session: Session = Depends(get_session),
             continue
         weights = get_version_weights(session, latest.id)
         out.append(ModelInfo(
-            key=meta.key, name=meta.name, purpose=meta.purpose.value,
+            key=meta.key, name=meta.name,
             firmware_id=meta.firmware_id,
             version=latest.version, min_app_version=latest.min_app_version,
             fingerprint=latest.fingerprint,
@@ -217,7 +216,7 @@ async def quantize_model(key: str, weights_id: int, request: Request,
         celery_app.send_task(QUANTIZE_TASK, args=[str(job.id)], task_id=str(job.id))
         return {"job_id": str(job.id)}
     finally:
-        record_usage(RateLimit.quantize, user.id, key, QUANTIZE_DAILY_WINDOW_SECONDS)
+        record_usage(RateLimit.weight_submit, user.id, key, QUANTIZE_DAILY_WINDOW_SECONDS)
 
 
 @router.post("/submit/raw/{key}/{weights_id}", status_code=202)
@@ -237,7 +236,7 @@ async def submit_weights(key: str, weights_id: int, request: Request,
         celery_app.send_task(VALIDATE_TASK, args=[submission.id])
         return {"submission_id": submission.id}
     finally:
-        record_usage(RateLimit.submit, user.id, key, SUBMIT_DAILY_WINDOW_SECONDS)
+        record_usage(RateLimit.weight_submit, user.id, key, SUBMIT_DAILY_WINDOW_SECONDS)
 
 
 def _settled_result(session: Session, job_id: uuid.UUID, user: User) -> Response | None:
@@ -345,4 +344,4 @@ def download_model(artifact: Artifact, key: str, version: int | None = None,
         return Response(content=blob, media_type="application/octet-stream",
                         headers=headers)
     finally:
-        record_usage(RateLimit.download, user.id, key, DOWNLOAD_COOLDOWN_SECONDS)
+        record_usage(RateLimit.model_download, user.id, key, DOWNLOAD_COOLDOWN_SECONDS)

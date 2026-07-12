@@ -63,7 +63,7 @@ def seed_models(session: Session) -> None:
 
         if session.get(ModelDefinition, key) is None:
             session.add(ModelDefinition(
-                key=key, name=spec.name, purpose=spec.purpose,
+                key=key, name=spec.name,
                 firmware_id=spec.firmware_id,
             ))
             print(f"  + model '{key}'")

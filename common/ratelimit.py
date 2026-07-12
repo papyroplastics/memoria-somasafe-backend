@@ -25,16 +25,15 @@ class RateLimit(str, Enum):
     """A rate-limited action. The value is the Redis key segment, so it is stable
     across the api (which enforces the limit) and the worker (which clears it)."""
 
-    download = "download"
-    quantize = "quantize"
-    submit = "submit"
+    model_download = "download"
+    weight_submit = "submit"
     ota_download = "ota-download"
 
 
 # Model-scoped actions, keyed by model key — the ones a federated round clears so
 # clients can immediately re-pull and re-submit. (``ota_download`` is per-interface
 # and unrelated to a model round.)
-_MODEL_ACTIONS = (RateLimit.download, RateLimit.quantize, RateLimit.submit)
+_MODEL_ACTIONS = (RateLimit.model_download, RateLimit.weight_submit)
 
 
 def _key(action: RateLimit, user_id: int, resource: str) -> str:

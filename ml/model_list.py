@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from pathlib import Path
 
-from common.db import ModelPurpose, SubmissionType
+from common.db import SubmissionType
 from ml.models import (
     cnn_autoencoder,
     feature_mlp,
@@ -14,7 +14,6 @@ from ml.models.common import Trainer, TrainerBuilder
 class ModelSpec:
     key: str
     name: str
-    purpose: ModelPurpose
     min_app_version: str   # oldest app that can use the current version
     build_trainer: TrainerBuilder
     # Upload path + aggregation strategy for this model's weight updates.
@@ -31,7 +30,6 @@ MODELS: dict[str, ModelSpec] = {
     "feature-mlp": ModelSpec(
         key="feature-mlp",
         name="Feature-based MLP",
-        purpose=ModelPurpose.train_only,
         min_app_version="1.0.0",
         build_trainer=feature_mlp.get_trainer,
         submission_type=SubmissionType.quantize,
@@ -39,21 +37,18 @@ MODELS: dict[str, ModelSpec] = {
     "lstm-ae": ModelSpec(
         key="lstm-ae",
         name="LSTM Autoencoder",
-        purpose=ModelPurpose.train_only,
         min_app_version="1.0.0",
         build_trainer=lstm_autoencoder.get_trainer,
     ),
     "gru-ae": ModelSpec(
         key="gru-ae",
         name="GRU Autoencoder",
-        purpose=ModelPurpose.train_only,
         min_app_version="1.0.0",
         build_trainer=gru_autoencoder.get_trainer,
     ),
     "cnn-ae": ModelSpec(
         key="cnn-ae",
         name="CNN Autoencoder",
-        purpose=ModelPurpose.train_only,
         min_app_version="1.0.0",
         build_trainer=cnn_autoencoder.get_trainer,
     ),
