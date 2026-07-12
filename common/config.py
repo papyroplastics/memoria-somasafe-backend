@@ -11,6 +11,11 @@ WEEK = 7 * DAY
 MODELS_DIR = Path(os.environ.get("MODELS_DIR", "shared/gen/models"))
 DATASETS_DIR = Path(os.environ.get("DATASETS_DIR", "shared/gen/datasets"))
 
+# Gitignored tree the gateway serves model/firmware blobs from, keyed by DB row
+# so a path is reconstructable from the row alone (see common/storage.py). The
+# seed script populates it; aggregation appends to it.
+SERVE_DIR = Path(os.environ.get("SERVE_DIR", "serve"))
+
 # ECDSA P-256 private key the worker signs quantized-model payloads with; its public
 # half must be the srv_pub provisioned in the device's factory NVS (see shared/make_keys.sh
 # and firmware/scripts/gen_factory_nvs.py).

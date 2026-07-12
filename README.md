@@ -277,9 +277,10 @@ only the external services — PostgreSQL and Redis — run in containers via `c
 (`make api-serv-up`, podman). Those two are bound to `127.0.0.1` since only the host-run
 processes reach them; the API itself binds `0.0.0.0` so the phone can reach it over the LAN.
 
-- **Gateway (`api/`, no TensorFlow):** serves the model artifacts stored on the active
-  `GlobalWeights` rows, accepts weight-delta uploads, persists them, enqueues worker jobs, and
-  exposes a result endpoint the client polls. Fast to start since it never imports TF.
+- **Gateway (`api/`, no TensorFlow):** serves the model artifacts (from the on-disk `serve/`
+  store, keyed by the active `GlobalWeights` row), accepts weight-delta uploads, persists them,
+  enqueues worker jobs, and exposes a result endpoint the client polls. Fast to start since it
+  never imports TF.
 - **Worker (`worker/tasks.py`):** restores uploaded weights into the model, converts it to
   an int8 `.tflite` against the per-model calibration dataset
   (`ml/saving.py:get_optimized_model`) and signs it, validates submit-only uploads, and
@@ -314,11 +315,12 @@ Request flow for a `quantize`-typed model:
 2. The worker runs the job: malformedness fails it, but the aggregation-usability verdict
    (MSE gate) is cached silently on the submission and the artifact is produced either
    way — a Byzantine client never learns its update was filtered. The int8 `.tflite` is
-   written to the job row along with an ECDSA signature over the canonical model bytes
-   (`ml/payload.py`, spec in `shared/docs/model-signing.md`).
+   written (zstd-compressed) to the job row along with an ECDSA signature over the canonical
+   model bytes (`ml/payload.py`, spec in `shared/docs/model-signing.md`; the signature covers
+   the raw model, so it is signed before compression).
 3. The client polls `GET /model/quantize/result/{job_id}`: `202` while `pending`/`running`,
-   `422` on `failed` (with the error), `200` with the int8 `.tflite` body plus the
-   `X-Model-Signature` / `X-Contract-Version` / `X-Norm-Params` headers once `done` — the
+   `422` on `failed` (with the error), `200` with the zstd-compressed int8 `.tflite` body plus
+   the `X-Model-Signature` / `X-Contract-Version` / `X-Norm-Params` headers once `done` — the
    app packages those fields for the ESP32 per its BLE interface version, and the firmware
    re-derives the canonical bytes and verifies the signature before loading. The result is
    scoped to the user who submitted it (resolved via the job's `ClientDeltaSubmission`); another
@@ -365,10 +367,11 @@ FedAvg round per initialized model:
    The result is stored as a new `GlobalWeights` row along with the next round's
    `mse_threshold` (a margin over the worst deviation accepted this round).
 6. **Artifact baking:** the averaged weights are restored into the cached model and both
-   serving artifacts are re-exported onto the new row — the LiteRT-trainable `.tflite` and
-   the signed int8 `.tflite` — so a client always pulls a file with the current global
-   parameters already inside. If an export fails the row is stored with `valid = false`:
-   clients keep pulling the previous snapshot and the window's submissions stay consumed.
+   serving artifacts are re-exported and written to the `serve/` store keyed by the new row —
+   the LiteRT-trainable `.tflite` and the signed int8 `.tflite` — so a client always pulls a
+   file with the current global parameters already inside. If an export fails the row is stored
+   with `valid = false` and no files: clients keep pulling the previous snapshot and the
+   window's submissions stay consumed.
 7. **Rate-limit reset:** on a successful round the model's download/submission counters are
    cleared for every user (`ratelimit.clear_model_limits`), so clients can immediately
    re-pull the new weights and submit again without waiting out the download cooldown or the
@@ -429,12 +432,21 @@ trusts what the seed wrote to the DB.
   low-frequency jobs, not high-throughput routing, and Redis is a single lightweight service
   that will also host rate-limit counters later — its delivery guarantees are more than enough
   here.
-- **No object store.** The `.tflite` files are tiny (hundreds of KB), so quantization
-  results live as `BYTEA` on the job row and the serving artifacts as `BYTEA` on their
-  `GlobalWeights` row — one consistent store, artifacts can't drift from the weights they
-  were baked from, and rollback is a flag flip. The `results/<model>/` files only feed the
-  seed script. This drops the planned "distribution worker" and S3/MinIO entirely (MinIO
-  remains a drop-in if real object storage is ever wanted).
+- **On-disk blob store, no object store.** The served blobs — model artifacts and firmware
+  images — live in a gitignored `serve/` tree (`SERVE_DIR`, `common/storage.py`) at paths
+  derived purely from the owning DB row (`serve/models/<key>/<version_id>/<weights_id>/{trainable,
+  quantized}.tflite`, `serve/firmware/<version>/firmware.bin`), so a handler locates a file
+  from the row it already loaded — no filename column, assuming the tree and DB stay in sync
+  (the seed script rebuilds the tree from scratch). The DB keeps only what the server itself
+  reads: the raw float32 `weights` on `GlobalWeights` (aggregation math), the artifact/firmware
+  `signature`, and firmware `size`. Quantization-job `result`s are the exception — small and
+  ephemeral, they stay as `BYTEA` on the job row. Rollback is still a `valid` flag flip; the
+  previous row's files are untouched. This drops the planned "distribution worker" and S3/MinIO
+  entirely (MinIO remains a drop-in if real object storage is ever wanted).
+- **Everything served is zstd-compressed.** Blobs are stored compressed and served as-is; the
+  client decompresses (any zstd library, a few lines). Signatures cover the *raw* bytes, so the
+  server compresses after signing and the client verifies after decompressing — compression is
+  a pure transport wrapper, invisible to the signing scheme.
 
 **Result lifecycle.** A `done` result is streamed on request and stamped `served_at`. A Celery
 beat sweep (`cleanup_results`, in-process via `celery worker -B`) nulls the result bytes (and
@@ -470,11 +482,12 @@ but immediate repeats on the same model are rejected with `429` (+ `Retry-After`
 | `GET /ota/download/{interface}/{version}` | device-owner only; one firmware download per interface per `OTA_DOWNLOAD_COOLDOWN_SECONDS` (default 300 s) |
 
 The model-artifact download is a single route with an `Artifact` enum path parameter
-(`trainable` / `quantized`), serving the artifact bytes stored on the version's active
+(`trainable` / `quantized`), serving the artifact file keyed by the version's active
 `GlobalWeights` row (`?version=` selects a frozen version; default is the latest). It
 echoes `X-Model-Fingerprint`, `X-Model-Version`, `X-Weights-ID` and
 `X-Weights-Timestamp`; the quantized artifact additionally carries `X-Model-Signature`,
-`X-Contract-Version` and `X-Norm-Params` (see `shared/docs/model-signing.md`).
+`X-Contract-Version` and `X-Norm-Params` (see `shared/docs/model-signing.md`). The body is
+zstd-compressed — the client decompresses before verifying/using it.
 
 ## Firmware distribution (OTA)
 
@@ -486,13 +499,15 @@ interface yields `[]`); `GET /ota/download/{interface}/{version}` streams the ra
 with the server's ECDSA signature over it in `X-Firmware-Signature`, which the app
 forwards to the device for verification against its factory `srv_pub`.
 
-Images are stored as `BYTEA` on the `Firmware` row, like the model artifacts (they are
-hard-capped at 1 MB by the OTA partition size, so no object store is warranted).
+Images live in the `serve/` store (zstd-compressed, keyed by version), like the model
+artifacts; the `Firmware` row keeps only the raw `size` and the mandatory `signature`.
 `scripts/seed_db.py` publishes them: it scans a directory of exports (`--firmware-dir`,
 default `shared/gen/firmware/`, populated by `make export-image` in `firmware/`), signs
-each image with `SERVER_PRIVATE_KEY_FILE` and inserts any version not already present.
-Re-publishing a changed build under an existing version means deleting its row and
-re-seeding (no production environment, no migrations).
+each image with `SERVER_PRIVATE_KEY_FILE` (a build it can't sign is skipped — the signature
+is not optional) and inserts any version not already present. Re-publishing a changed build
+under an existing version means deleting its row and re-seeding (no production environment,
+no migrations). The download body is zstd-compressed; the client decompresses, then verifies
+the signature (over the raw image) before forwarding it to the device.
 
 ## Device attestation
 

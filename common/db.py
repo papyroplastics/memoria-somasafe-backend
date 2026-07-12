@@ -125,16 +125,18 @@ class ModelVersion(IntPKModel, table=True):
 
 
 class GlobalWeights(IntPKModel, table=True):
-    """A snapshot of a model version's global weights, plus the serving
-    artifacts baked from them. Seeded from the trained tflite files and appended
-    to by aggregation, which re-exports both artifacts (and signs the quantized
-    one, see ml.payload) each round. The active weights of a version are its
-    latest **valid** row; ``created_at`` is the weight version clients compare
-    against to decide when to re-pull. ``valid`` doubles as a hand-operated kill
-    switch (flip it to roll back a bad round — the previous row's artifacts come
-    back with it) and is set to false by aggregation itself when an artifact
-    export fails. ``mse_threshold`` is the allowed submission error computed by
-    that round (None on seeded rows, which skips the check in weight validation)."""
+    """A snapshot of a model version's global weights. The trainable/quantized
+    serving artifacts baked from these weights live on disk under SERVE_DIR,
+    keyed by this row (common.storage), not in the DB; only their signature is
+    kept here. Seeded from the trained tflite files and appended to by
+    aggregation, which re-exports both artifacts (and signs the quantized one,
+    see ml.payload) each round. The active weights of a version are its latest
+    **valid** row; ``created_at`` is the weight version clients compare against
+    to decide when to re-pull. ``valid`` doubles as a hand-operated kill switch
+    (flip it to roll back a bad round — the previous row's artifacts come back
+    with it) and is set to false by aggregation itself when an artifact export
+    fails. ``mse_threshold`` is the allowed submission error computed by that
+    round (None on seeded rows, which skips the check in weight validation)."""
 
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version_id: int = Field(foreign_key="modelversion.id", index=True)
@@ -142,8 +144,6 @@ class GlobalWeights(IntPKModel, table=True):
     weight_count: int
     valid: bool = True
     mse_threshold: float | None = None
-    trainable_artifact: bytes | None = None   # LiteRT-trainable .tflite with these weights
-    quantized_artifact: bytes | None = None   # int8 .tflite with these weights
     artifact_signature: bytes | None = None   # DER ECDSA over the canonical model bytes
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
@@ -194,16 +194,19 @@ class QuantizationJob(SQLModel, table=True):
 class Firmware(IntPKModel, table=True):
     """A published firmware build, seeded from a `shared/gen/firmware/{version}`
     export (`firmware/scripts/export_image.py`) and served by the /ota routes.
-    ``interface_version`` is the BLE contract an app build must share to talk to
-    it; ``supported_contracts`` are the model contract versions it can consume;
-    ``signature`` is the server's ECDSA over the raw image bytes, verified by
-    the device against its factory srv_pub before booting the image."""
+    The image itself lives on disk under SERVE_DIR, keyed by ``version``
+    (common.storage); only its ``size`` (raw image bytes) and ``signature`` are
+    kept here. ``interface_version`` is the BLE contract an app build must share
+    to talk to it; ``supported_contracts`` are the model contract versions it
+    can consume; ``signature`` (never null — an unverifiable image is useless to
+    the device) is the server's ECDSA over the raw image bytes, verified by the
+    device against its factory srv_pub before booting the image."""
 
     version: str = Field(unique=True, index=True)  # arbitrary <=32-byte build string
     interface_version: int = Field(index=True)
     supported_contracts: list[int] = Field(sa_column=Column(JSON))
-    blob: bytes
-    signature: bytes | None = None                 # DER ECDSA over the raw image
+    size: int                                      # raw (uncompressed) image size
+    signature: bytes                               # DER ECDSA over the raw image
     created_at: datetime = Field(default_factory=utcnow)
 
 

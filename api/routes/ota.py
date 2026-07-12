@@ -8,6 +8,7 @@ from sqlmodel import Session
 
 from common.config import OTA_DOWNLOAD_COOLDOWN_SECONDS
 from common.db import User, get_firmware, get_session, list_firmware
+from common.storage import firmware_path
 from api.lib.ratelimit import enforce_cooldown
 from .auth import get_current_user
 from .model import require_device_owner
@@ -38,7 +39,7 @@ def list_versions(interface: int,
     first. An interface with no published builds yields an empty list."""
     return [FirmwareInfo(
         version=fw.version, interface_version=fw.interface_version,
-        supported_contracts=fw.supported_contracts, size=len(fw.blob),
+        supported_contracts=fw.supported_contracts, size=fw.size,
         created_at=fw.created_at,
     ) for fw in list_firmware(session, interface)]
 
@@ -60,11 +61,11 @@ def download_firmware(interface: int, version: str,
                             detail=f"No firmware '{version}' for interface {interface}")
 
     headers = {
+        FIRMWARE_SIGNATURE_HEADER: base64.b64encode(firmware.signature).decode(),
         "Content-Disposition":
             f'attachment; filename="somasafe-firmware-{version}.bin"',
     }
-    if firmware.signature is not None:
-        headers[FIRMWARE_SIGNATURE_HEADER] = base64.b64encode(firmware.signature).decode()
-
-    return Response(content=bytes(firmware.blob),
+    # zstd-compressed on disk; the client decompresses, then verifies the
+    # signature (which covers the raw image) before forwarding it to the device.
+    return Response(content=firmware_path(firmware.version).read_bytes(),
                     media_type="application/octet-stream", headers=headers)

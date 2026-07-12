@@ -35,6 +35,7 @@ from common.db import (
     user_owns_device,
     utcnow,
 )
+from common.storage import weights_artifact_path
 from api.lib.ratelimit import enforce_cooldown, enforce_daily_quota
 from .auth import get_current_user
 
@@ -307,11 +308,12 @@ def download_model(artifact: Artifact, key: str, version: int | None = None,
     if weights is None:
         raise HTTPException(status_code=404, detail=f"No weights for model '{key}'")
 
-    blob = (weights.trainable_artifact if artifact is Artifact.trainable
-            else weights.quantized_artifact)
-    if blob is None:
+    path = weights_artifact_path(weights.model_key, weights.version_id,
+                                 weights.id, artifact.value)
+    if not path.exists():
         raise HTTPException(status_code=404,
                             detail=f"No {artifact.value} artifact for model '{key}'")
+    blob = path.read_bytes()  # zstd-compressed; the client decompresses
 
     headers = {
         FINGERPRINT_HEADER: ver.fingerprint,
@@ -327,5 +329,5 @@ def download_model(artifact: Artifact, key: str, version: int | None = None,
         if weights.artifact_signature is not None:
             headers[SIGNATURE_HEADER] = base64.b64encode(weights.artifact_signature).decode()
 
-    return Response(content=bytes(blob), media_type="application/octet-stream",
+    return Response(content=blob, media_type="application/octet-stream",
                     headers=headers)

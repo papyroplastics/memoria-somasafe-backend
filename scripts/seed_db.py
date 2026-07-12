@@ -37,6 +37,7 @@ from common.db import (
     init_db,
     utcnow,
 )
+from common.storage import firmware_path, weights_artifact_path, write_compressed
 from ml.data import CLEAN_SUBDIR, get_sorted_paths
 from ml.model_list import MODELS
 from ml.payload import sign_blob, sign_model
@@ -97,6 +98,7 @@ def seed_models(session: Session) -> None:
         ).first()
         if has_weights is None:
             weights = load_trainable_weights(tflite)
+            trainable_bytes = tflite.read_bytes()
             quantized_file = MODELS_DIR / key / "quantized.tflite"
             quantized = quantized_file.read_bytes() if quantized_file.exists() else None
             signature = None
@@ -107,14 +109,19 @@ def seed_models(session: Session) -> None:
                 else:
                     print(f"  ! no key at {SERVER_PRIVATE_KEY_FILE}; "
                           f"'{key}' quantized artifact left unsigned")
-            session.add(GlobalWeights(
+            gw = GlobalWeights(
                 model_key=key, version_id=version.id,
                 weights=weights.astype("float32").tobytes(),
                 weight_count=int(weights.size),
-                trainable_artifact=tflite.read_bytes(),
-                quantized_artifact=quantized,
                 artifact_signature=signature,
-            ))
+            )
+            session.add(gw)
+            session.flush()  # need the row id the on-disk artifacts are keyed by
+            write_compressed(weights_artifact_path(key, version.id, gw.id,
+                                                   "trainable"), trainable_bytes)
+            if quantized is not None:
+                write_compressed(weights_artifact_path(key, version.id, gw.id,
+                                                       "quantized"), quantized)
             print(f"  + initial weights for '{key}' v{spec.version} ({weights.size} weights)")
     session.commit()
 
@@ -123,7 +130,8 @@ def seed_firmware(session: Session, firmware_dir: Path) -> None:
     """Seed each firmware version exported to ``firmware_dir`` (one
     ``{version}/`` subdirectory with ``firmware.bin`` + ``metadata.json``,
     written by ``firmware/scripts/export_image.py``), signing the image with
-    the server key. Already-seeded versions are skipped — a re-exported build
+    the server key. A build the server key can't sign is skipped (the signature
+    is mandatory). Already-seeded versions are skipped — a re-exported build
     under the same version needs the stored row deleted first."""
     if not firmware_dir.is_dir():
         print(f"  - firmware skipped (no {firmware_dir})")
@@ -141,13 +149,13 @@ def seed_firmware(session: Session, firmware_dir: Path) -> None:
             print(f"  = firmware '{version}' (already present)")
             continue
 
-        blob = image_file.read_bytes()
-        signature = None
-        if SERVER_PRIVATE_KEY_FILE.exists():
-            signature = sign_blob(blob, SERVER_PRIVATE_KEY_FILE)
-        else:
+        if not SERVER_PRIVATE_KEY_FILE.exists():
             print(f"  ! no key at {SERVER_PRIVATE_KEY_FILE}; "
-                  f"firmware '{version}' left unsigned")
+                  f"firmware '{version}' skipped (signature required)")
+            continue
+
+        blob = image_file.read_bytes()
+        signature = sign_blob(blob, SERVER_PRIVATE_KEY_FILE)
 
         created_at = datetime.fromisoformat(metadata["created_at"])
         if created_at.tzinfo is not None:
@@ -156,10 +164,11 @@ def seed_firmware(session: Session, firmware_dir: Path) -> None:
             version=version,
             interface_version=metadata["interface_version"],
             supported_contracts=metadata["supported_contracts"],
-            blob=blob,
+            size=len(blob),
             signature=signature,
             created_at=created_at,
         ))
+        write_compressed(firmware_path(version), blob)
         print(f"  + firmware '{version}' (interface {metadata['interface_version']}, "
               f"contracts {metadata['supported_contracts']}, {len(blob)} bytes)")
     session.commit()

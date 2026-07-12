@@ -37,6 +37,7 @@ from common.db import (
 )
 
 from common.ratelimit import clear_model_limits
+from common.storage import compress, weights_artifact_path, write_compressed
 
 from ml.model_list import MODELS
 from ml.payload import sign_model
@@ -121,9 +122,10 @@ def quantize_submission(job_id: str) -> None:
             delta = np.frombuffer(submission.weights, dtype=np.float32)
             local = (np.frombuffer(base.weights, dtype=np.float32) + delta).astype(np.float32)
             model.restore(tf.constant(local, dtype=tf.float32))
-            job.result = bytes(get_optimized_model(model, rep_dataset))
-            job.signature = sign_model(job.result, contract_version, norm_bytes,
+            optimized = bytes(get_optimized_model(model, rep_dataset))
+            job.signature = sign_model(optimized, contract_version, norm_bytes,
                                        SERVER_PRIVATE_KEY_FILE)
+            job.result = compress(optimized)  # served as-is; the client decompresses
             job.status = JobStatus.done
         except Exception as exc:  # surfaced to the client via the result endpoint
             job.status = JobStatus.failed
@@ -226,17 +228,24 @@ def _aggregate_model(session: Session, key: str) -> str:
     except Exception as exc:
         export_error = exc
 
-    session.add(GlobalWeights(
+    snapshot = GlobalWeights(
         model_key=key, version_id=latest.id,
         weights=new_weights.tobytes(),
         weight_count=model.total_weight_size,
         valid=export_error is None,
         mse_threshold=compute_mse_threshold(
             [update_magnitude(delta) for delta in kept]),
-        trainable_artifact=trainable,
-        quantized_artifact=quantized,
         artifact_signature=signature,
-    ))
+    )
+    session.add(snapshot)
+    if export_error is None:
+        # Flush to get the row id the artifacts are keyed by, then write them to
+        # disk (signature covers the raw bytes, so compression is downstream).
+        session.flush()
+        write_compressed(weights_artifact_path(key, latest.id, snapshot.id,
+                                               "trainable"), trainable)
+        write_compressed(weights_artifact_path(key, latest.id, snapshot.id,
+                                               "quantized"), quantized)
     session.commit()
     if export_error is not None:
         return (f"aggregated {len(kept)} submissions but artifact export failed "

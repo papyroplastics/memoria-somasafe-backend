@@ -1,8 +1,8 @@
 """Tests for the /ota routes (api.routes.ota).
 
 Firmware rows are inserted directly (random version strings, a random high
-interface number) so the tests don't depend on a firmware image having been
-exported and seeded.
+interface number) with their images written to the on-disk serve/ store, so the
+tests don't depend on a firmware image having been exported and seeded.
 """
 
 import base64
@@ -13,6 +13,7 @@ import pytest
 from sqlmodel import select
 
 from common.db import Firmware, Session, engine, utcnow
+from common.storage import decompress, firmware_path, write_compressed
 
 SIGNATURE_HEADER = "X-Firmware-Signature"
 
@@ -23,20 +24,28 @@ SIGNATURE = b"not-a-real-der-signature"
 
 @pytest.fixture
 def firmwares():
-    """Two throwaway builds on their own interface — the newer one signed, the
-    older one unsigned and a day older. Removed on teardown."""
+    """Two throwaway signed builds on their own interface, the older one a day
+    older. Rows and on-disk images are removed on teardown."""
     interface = 1000 + secrets.randbelow(1_000_000)
     suffix = secrets.token_hex(4)
     new_version, old_version = f"9.9.1-{suffix}", f"9.9.0-{suffix}"
     with Session(engine) as session:
         session.add(Firmware(version=old_version, interface_version=interface,
-                             supported_contracts=[1], blob=BLOB_OLD,
+                             supported_contracts=[1], size=len(BLOB_OLD),
+                             signature=SIGNATURE,
                              created_at=utcnow() - timedelta(days=1)))
         session.add(Firmware(version=new_version, interface_version=interface,
-                             supported_contracts=[1, 2], blob=BLOB_NEW,
+                             supported_contracts=[1, 2], size=len(BLOB_NEW),
                              signature=SIGNATURE))
         session.commit()
+    write_compressed(firmware_path(old_version), BLOB_OLD)
+    write_compressed(firmware_path(new_version), BLOB_NEW)
     yield interface, new_version, old_version
+    for version in (old_version, new_version):
+        path = firmware_path(version)
+        path.unlink(missing_ok=True)
+        if path.parent.exists():
+            path.parent.rmdir()
     with Session(engine) as session:
         for fw in session.exec(
                 select(Firmware).where(Firmware.interface_version == interface)):
@@ -84,18 +93,8 @@ def test_download_serves_blob_and_signature(client, auth_headers, owned_device,
     resp = client.get(f"/ota/download/{interface}/{new_version}",
                       headers=auth_headers)
     assert resp.status_code == 200, resp.text
-    assert resp.content == BLOB_NEW
+    assert decompress(resp.content) == BLOB_NEW  # served zstd-compressed
     assert base64.b64decode(resp.headers[SIGNATURE_HEADER]) == SIGNATURE
-
-
-def test_download_unsigned_omits_signature_header(client, auth_headers,
-                                                  owned_device, firmwares):
-    interface, _, old_version = firmwares
-    resp = client.get(f"/ota/download/{interface}/{old_version}",
-                      headers=auth_headers)
-    assert resp.status_code == 200, resp.text
-    assert resp.content == BLOB_OLD
-    assert SIGNATURE_HEADER not in resp.headers
 
 
 def test_download_unknown_version_404(client, auth_headers, owned_device,

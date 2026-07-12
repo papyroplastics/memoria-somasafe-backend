@@ -30,6 +30,7 @@ from sqlmodel import Session
 from tqdm import tqdm
 
 from common.config import DATASETS_DIR, MODELS_DIR
+from common.storage import decompress
 from common.post_train import get_report_dir, plot_metric, write_metrics_csv
 from common.db import (
     SubmissionType,
@@ -111,7 +112,7 @@ def login(base: str, username: str, password: str) -> str:
 def download_trainable(base: str, token: str, key: str) -> tuple[bytes, int]:
     resp = requests.get(f"{base}/model/download/trainable/{key}", headers=_auth(token))
     resp.raise_for_status()
-    return resp.content, int(resp.headers[WEIGHTS_ID_HEADER])
+    return decompress(resp.content), int(resp.headers[WEIGHTS_ID_HEADER])
 
 
 def submit(base: str, token: str, key: str, weights_id: int, body: bytes,
