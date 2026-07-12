@@ -2,7 +2,6 @@ from collections.abc import Sequence
 
 import numpy as np
 import tensorflow as tf
-from tqdm import tqdm
 
 from .models.common import Trainer
 
@@ -23,7 +22,7 @@ def _format(metrics: dict[str, float]) -> str:
 def normal_loop(trainer: Trainer, train_dataset: tf.data.Dataset,
                 eval_dataset: tf.data.Dataset, epochs: int) -> History:
     history: History = []
-    for epoch in tqdm(range(epochs), desc="epochs"):
+    for epoch in range(epochs):
         prefix = f"epoch={epoch + 1}/{epochs}"
         loss = trainer.train_epoch(train_dataset, prefix)
         metrics = trainer.evaluate(eval_dataset, prefix)
@@ -40,23 +39,19 @@ def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Datase
     global_weights = model.save()['weights']
 
     history: History = []
-    for r in tqdm(range(global_epochs), desc="rounds"):
+    for r in range(global_epochs):
         round_prefix = f"round={r + 1}/{global_epochs}"
-        client_weights: list[tf.Tensor] = []
+        base = np.asarray(global_weights)
+        client_deltas: list[np.ndarray] = []
         loss = 0.0
-        subjects = tqdm(enumerate(subject_train_datasets),
-                        total=len(subject_train_datasets),
-                        desc=f"{round_prefix} subjects", leave=False)
-        for s, train_ds in subjects:
+        for s, train_ds in enumerate(subject_train_datasets):
             model.restore(tf.constant(global_weights))
-            for e in tqdm(range(local_epochs),
-                          desc=f"{round_prefix} subject={s + 1}/{len(subject_train_datasets)} local",
-                          leave=False):
+            for e in range(local_epochs):
                 prefix = f"{round_prefix} subject={s + 1}/{len(subject_train_datasets)} local={e + 1}/{local_epochs}"
                 loss = trainer.train_epoch(train_ds, prefix)
-            client_weights.append(model.save()['weights'])
+            client_deltas.append(np.asarray(model.save()['weights']) - base)
 
-        global_weights = aggregate(client_weights, sizes)
+        global_weights = (base + aggregate(client_deltas, sizes)).astype(base.dtype)
         model.restore(tf.constant(global_weights))
 
         metrics = trainer.evaluate(eval_dataset, round_prefix)

@@ -169,17 +169,14 @@ def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
         history.append({"round": round_idx, trainer.primary_metric: value})
         print(f"round={round_idx} {trainer.primary_metric}={value:.6f}")
 
-    for r in tqdm(range(1, rounds + 1), desc="rounds"):
+    for r in range(1, rounds + 1):
         round_prefix = f"round={r}/{rounds}"
         with Session(engine) as session:
             if get_latest_version(session, key) is None:
                 raise SystemExit(f"model '{key}' has no seeded version")
 
         round_global: bytes | None = None
-        subjects = tqdm(enumerate(client_datasets, start=1),
-                        total=len(client_datasets),
-                        desc=f"{round_prefix} subjects", leave=False)
-        for i, dataset in subjects:
+        for i, dataset in enumerate(client_datasets, start=1):
             user = f"test_{i}"
             token = login(base, user, user)
             artifact, weights_id = download_trainable(base, token, key)
