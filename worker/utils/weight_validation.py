@@ -12,10 +12,10 @@ def malformed_reason(submission: ClientDeltaSubmission,
     if submission.weight_count != expected_weight_count:
         return (f"weight count {submission.weight_count} != "
                 f"model's {expected_weight_count}")
-    if len(submission.weights) != expected_weight_count * 4:
-        return (f"buffer size {len(submission.weights)} != "
+    if len(submission.deltas) != expected_weight_count * 4:
+        return (f"buffer size {len(submission.deltas)} != "
                 f"{expected_weight_count} float32 weights")
-    if not np.all(np.isfinite(np.frombuffer(submission.weights, dtype=np.float32))):
+    if not np.all(np.isfinite(np.frombuffer(submission.deltas, dtype=np.float32))):
         return "weights contain non-finite values"
     return None
 
@@ -26,7 +26,7 @@ def validate_submission(submission: ClientDeltaSubmission, expected_weight_count
     if reason is not None:
         return reason
     if reference is not None and reference.mse_threshold is not None:
-        delta = np.frombuffer(submission.weights, dtype=np.float32)
+        delta = np.frombuffer(submission.deltas, dtype=np.float32)
         error = update_magnitude(delta)
         if error > reference.mse_threshold:
             return (f"update magnitude {error:.6g} exceeds "

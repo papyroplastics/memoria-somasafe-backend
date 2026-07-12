@@ -31,6 +31,9 @@ REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
 SERVE_GRACE_SECONDS = int(os.environ.get("SERVE_GRACE_SECONDS", MINUTE * 5))
 RESULT_TTL_SECONDS = int(os.environ.get("RESULT_TTL_SECONDS", HOUR))
 CLEANUP_INTERVAL_SECONDS = int(os.environ.get("CLEANUP_INTERVAL_SECONDS", MINUTE * 2))
+# How long the quantize-result endpoint blocks on the task before returning 202
+# so the client re-polls (the job id is the Celery task id it waits on).
+RESULT_POLL_TIMEOUT_SECONDS = int(os.environ.get("RESULT_POLL_TIMEOUT_SECONDS", 30))
 
 # Seed used to rebuild the representative dataset for int8 calibration.
 SEED = int(os.environ.get("SEED", 1234))

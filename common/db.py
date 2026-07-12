@@ -166,7 +166,7 @@ class ClientDeltaSubmission(IntPKModel, table=True):
     model_key: str
     base_weights_id: int = Field(foreign_key="globalweights.id", index=True)
     version_id: int = Field(foreign_key="modelversion.id", index=True)
-    weights: bytes             # packed float32 delta (np.float32 .tobytes())
+    deltas: bytes              # packed float32 delta (np.float32 .tobytes())
     weight_count: int
     valid: bool | None = None
     created_at: datetime = Field(default_factory=utcnow)

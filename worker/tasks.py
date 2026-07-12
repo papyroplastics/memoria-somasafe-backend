@@ -119,7 +119,7 @@ def quantize_submission(job_id: str) -> None:
             base = session.get(GlobalWeights, submission.base_weights_id)
             if base is None:
                 raise ValueError(f"base weights {submission.base_weights_id} not found")
-            delta = np.frombuffer(submission.weights, dtype=np.float32)
+            delta = np.frombuffer(submission.deltas, dtype=np.float32)
             local = (np.frombuffer(base.weights, dtype=np.float32) + delta).astype(np.float32)
             model.restore(tf.constant(local, dtype=tf.float32))
             optimized = bytes(get_optimized_model(model, rep_dataset))
@@ -206,7 +206,7 @@ def _aggregate_model(session: Session, key: str) -> str:
         return (f"skipped: {len(valid)} valid submissions "
                 f"(min {FED_MIN_SUBMISSIONS}, {len(submissions)} in window)")
 
-    deltas = np.stack([np.frombuffer(sub.weights, dtype=np.float32)
+    deltas = np.stack([np.frombuffer(sub.deltas, dtype=np.float32)
                        for sub in valid])
     kept = deltas[filter_outliers(deltas)]
 

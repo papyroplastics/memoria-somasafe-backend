@@ -87,7 +87,8 @@ def test_download_unknown_version_404(client, auth_headers, owned_device):
     assert resp.status_code == 404
 
 
-def test_quantize_enqueues_and_polls_pending(client, auth_headers, owned_device):
+def test_quantize_enqueues_and_polls_pending(client, auth_headers, owned_device,
+                                             monkeypatch):
     model = _model_with_weights(client, auth_headers, "quantize")
     resp = _download_trainable(client, auth_headers, model["key"])
     weights_id = int(resp.headers[WEIGHTS_ID_HEADER])
@@ -98,7 +99,9 @@ def test_quantize_enqueues_and_polls_pending(client, auth_headers, owned_device)
     assert submit.status_code == 202, submit.text
     job_id = submit.json()["job_id"]
 
-    # No worker consumes the queue, so the result endpoint reports it pending.
+    # No worker consumes the queue, so the job stays pending. Keep the long-poll
+    # short so the endpoint returns 202 without blocking the full timeout.
+    monkeypatch.setattr("api.routes.model.RESULT_POLL_TIMEOUT_SECONDS", 0.1)
     result = client.get(f"/model/quantize/result/{job_id}", headers=auth_headers)
     assert result.status_code == 202
     assert result.json()["status"] == "pending"

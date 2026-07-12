@@ -15,6 +15,7 @@ from common.config import (
     DOWNLOAD_COOLDOWN_SECONDS,
     QUANTIZE_DAILY_LIMIT,
     QUANTIZE_DAILY_WINDOW_SECONDS,
+    RESULT_POLL_TIMEOUT_SECONDS,
     SUBMIT_DAILY_LIMIT,
     SUBMIT_DAILY_WINDOW_SECONDS,
 )
@@ -27,7 +28,9 @@ from common.db import (
     SubmissionType,
     User,
     ClientDeltaSubmission,
+    engine,
     get_latest_version,
+    get_latest_weights,
     get_model_def,
     get_session,
     get_version_weights,
@@ -35,8 +38,9 @@ from common.db import (
     user_owns_device,
     utcnow,
 )
+from common.ratelimit import RateLimit
 from common.storage import weights_artifact_path
-from api.lib.ratelimit import enforce_cooldown, enforce_daily_quota
+from api.lib.ratelimit import check_limit, record_usage
 from .auth import get_current_user
 
 router = APIRouter(prefix="/model")
@@ -60,12 +64,6 @@ class Artifact(str, Enum):
 
 
 class ModelInfo(BaseModel):
-    """What the gateway exposes about a model's latest version. The client
-    compares ``version`` (re-download and reset the local model when it moves —
-    the only thing that invalidates a federated epoch) and ``weights_version``
-    (re-pull the artifact when it moves) against what it holds locally, and
-    checks ``min_app_version`` against its own version before using the model."""
-
     key: str
     name: str
     purpose: str
@@ -98,27 +96,19 @@ def require_model(session: Session, key: str) -> ModelDefinition:
 
 
 def require_device_owner(session: Session, user: User) -> None:
-    """Gate model access on the user having attested ownership of a device."""
     if not user_owns_device(session, user.id):
         raise HTTPException(status_code=403, detail="No attested device for this user")
 
 
 def require_submission_type(session: Session, key: str,
                             accepted: set[SubmissionType]) -> None:
-    """404 (not 403) when the model's latest version doesn't accept uploads on
-    this endpoint. The raw endpoint accepts ``{raw, quantize}`` (quantize's dense
-    body is compatible); the quantize endpoint accepts ``{quantize}`` only."""
     latest = get_latest_version(session, key)
     if latest is None or latest.submission_type not in accepted:
         raise HTTPException(status_code=404, detail="Not found")
 
 
-def store_submission(session: Session, key: str, weights_id: int, body: bytes,
-                     user: User) -> ClientDeltaSubmission:
-    """Persist a raw-float32 weight *delta* (Δ = local − global, LE float32)
-    against the base GlobalWeights snapshot it was computed from. Only
-    malformedness is rejected here — whether the update is *usable* for
-    aggregation is judged asynchronously and never surfaced to the client."""
+def check_submission(session: Session, key: str, weights_id: int,
+                     body: bytes) -> GlobalWeights:
     require_model(session, key)
 
     base = session.get(GlobalWeights, weights_id)
@@ -126,12 +116,12 @@ def store_submission(session: Session, key: str, weights_id: int, body: bytes,
         raise HTTPException(status_code=400,
                             detail=f"Unknown base weights for model '{key}'")
 
-    latest = get_latest_version(session, key)
-    if latest is None or base.version_id != latest.id:
+    active = get_latest_weights(session, key)
+    if active is None or base.id != active.id:
         raise HTTPException(
             status_code=409,
-            detail=f"Frozen model version; only the latest version of '{key}' "
-                   f"accepts submissions")
+            detail=f"Stale base weights; re-download the latest weights of "
+                   f"'{key}' before submitting")
 
     if len(body) != base.weight_count * 4:
         raise HTTPException(
@@ -140,13 +130,17 @@ def store_submission(session: Session, key: str, weights_id: int, body: bytes,
     if not np.all(np.isfinite(np.frombuffer(body, dtype=np.float32))):
         raise HTTPException(status_code=400,
                             detail="Weights contain non-finite values")
+    return base
 
+
+def store_submission(session: Session, base: GlobalWeights, body: bytes,
+                     user: User) -> ClientDeltaSubmission:
     submission = ClientDeltaSubmission(
         user_id=user.id,
-        model_key=key,
+        model_key=base.model_key,
         base_weights_id=base.id,
-        version_id=latest.id,
-        weights=bytes(body),
+        version_id=base.version_id,
+        deltas=bytes(body),
         weight_count=base.weight_count,
     )
     session.add(submission)
@@ -193,8 +187,6 @@ def list_models(session: Session = Depends(get_session),
 def list_versions(key: str,
                   session: Session = Depends(get_session),
                   user: User = Depends(get_current_user)):
-    """Every published version of a model, newest first. Only the newest accepts
-    submissions; older versions are frozen but still downloadable."""
     require_model(session, key)
     versions = session.exec(
         select(ModelVersion)
@@ -208,62 +200,62 @@ def list_versions(key: str,
 async def quantize_model(key: str, weights_id: int, request: Request,
                          session: Session = Depends(get_session),
                          user: User = Depends(get_current_user)):
-    """Upload locally-trained weights (raw LE float32 body) and get a signed
-    int8 artifact built from them; the submission also feeds aggregation."""
+    check_limit(RateLimit.weight_submit, user.id, key,
+                QUANTIZE_DAILY_LIMIT, QUANTIZE_DAILY_WINDOW_SECONDS)
     require_submission_type(session, key, {SubmissionType.quantize})
     require_device_owner(session, user)
-    enforce_daily_quota("quantize", user.id, key, QUANTIZE_DAILY_LIMIT, QUANTIZE_DAILY_WINDOW_SECONDS)
-    submission = store_submission(session, key, weights_id, await request.body(), user)
+    body = await request.body()
+    base = check_submission(session, key, weights_id, body)
 
-    job = QuantizationJob(submission_id=submission.id, model_key=key)
-    session.add(job)
-    session.commit()
-    session.refresh(job)
-
-    celery_app.send_task(QUANTIZE_TASK, args=[str(job.id)])
-
-    return {"job_id": str(job.id), "status_url": f"/model/quantize/result/{job.id}"}
+    try:
+        submission = store_submission(session, base, body, user)
+        job = QuantizationJob(submission_id=submission.id, model_key=key)
+        session.add(job)
+        session.commit()
+        session.refresh(job)
+        # The job id doubles as the task id so the result endpoint can wait on it.
+        celery_app.send_task(QUANTIZE_TASK, args=[str(job.id)], task_id=str(job.id))
+        return {"job_id": str(job.id)}
+    finally:
+        record_usage(RateLimit.quantize, user.id, key, QUANTIZE_DAILY_WINDOW_SECONDS)
 
 
 @router.post("/submit/raw/{key}/{weights_id}", status_code=202)
 async def submit_weights(key: str, weights_id: int, request: Request,
                          session: Session = Depends(get_session),
                          user: User = Depends(get_current_user)):
-    """Submit-only federated update (raw LE float32 body): persisted for
-    aggregation and validated in the background; nothing comes back."""
+    check_limit(RateLimit.weight_submit, user.id, key,
+                SUBMIT_DAILY_LIMIT, SUBMIT_DAILY_WINDOW_SECONDS)
     require_submission_type(session, key,
                             {SubmissionType.raw, SubmissionType.quantize})
     require_device_owner(session, user)
-    enforce_daily_quota("submit", user.id, key, SUBMIT_DAILY_LIMIT, SUBMIT_DAILY_WINDOW_SECONDS)
-    submission = store_submission(session, key, weights_id, await request.body(), user)
+    body = await request.body()
+    base = check_submission(session, key, weights_id, body)
 
-    celery_app.send_task(VALIDATE_TASK, args=[submission.id])
+    try:
+        submission = store_submission(session, base, body, user)
+        celery_app.send_task(VALIDATE_TASK, args=[submission.id])
+        return {"submission_id": submission.id}
+    finally:
+        record_usage(RateLimit.submit, user.id, key, SUBMIT_DAILY_WINDOW_SECONDS)
 
-    return {"submission_id": submission.id}
 
-
-@router.get("/quantize/result/{job_id}")
-def quantize_result(job_id: uuid.UUID,
-                    session: Session = Depends(get_session),
-                    user: User = Depends(get_current_user)):
+def _settled_result(session: Session, job_id: uuid.UUID, user: User) -> Response | None:
     job = session.get(QuantizationJob, job_id)
     if job is None or job.status == JobStatus.expired:
         raise HTTPException(status_code=404, detail="Result not found or expired")
 
-    # Authorize via the originating submission; 404 (not 403) to keep the id unguessable.
     submission = session.get(ClientDeltaSubmission, job.submission_id)
     if submission is None or submission.user_id != user.id:
         raise HTTPException(status_code=404, detail="Result not found or expired")
 
     if job.status in (JobStatus.pending, JobStatus.running):
-        return JSONResponse(status_code=202, content={"status": job.status.value})
+        return None
 
     if job.status == JobStatus.failed:
         return JSONResponse(status_code=422,
                             content={"status": job.status.value, "error": job.error})
 
-    # done: stream the int8 .tflite and mark it served (cleanup happens later).
-    # Headers carry the signed fields the app forwards to the ESP32 (ml.payload).
     payload = bytes(job.result)
     job.served_at = utcnow()
     session.add(job)
@@ -282,16 +274,33 @@ def quantize_result(job_id: uuid.UUID,
                     headers=headers)
 
 
+@router.get("/quantize/result/{job_id}")
+def quantize_result(job_id: uuid.UUID, user: User = Depends(get_current_user)):
+    with Session(engine) as session:
+        settled = _settled_result(session, job_id, user)
+        if settled is not None:
+            return settled
+
+    try:
+        celery_app.AsyncResult(str(job_id)).get(
+            timeout=RESULT_POLL_TIMEOUT_SECONDS, propagate=False)
+    except Exception:
+        pass  # timeout (or a backend hiccup) — report whatever state the DB holds
+
+    with Session(engine) as session:
+        settled = _settled_result(session, job_id, user)
+        if settled is not None:
+            return settled
+        job = session.get(QuantizationJob, job_id)
+        return JSONResponse(status_code=202, content={"status": job.status.value})
+
+
 @router.get("/download/{artifact}/{key}")
 def download_model(artifact: Artifact, key: str, version: int | None = None,
                    session: Session = Depends(get_session),
                    user: User = Depends(get_current_user)):
-    """Serve an artifact of the model's newest (or, via ``?version=``, a frozen)
-    version, baked with that version's active global weights. The quantized
-    artifact additionally carries the signed fields the app forwards to the
-    ESP32 (ml.payload)."""
+    check_limit(RateLimit.model_download, user.id, key, 1, DOWNLOAD_COOLDOWN_SECONDS)
     require_device_owner(session, user)
-    enforce_cooldown("download", user.id, key, DOWNLOAD_COOLDOWN_SECONDS)
     require_model(session, key)
 
     if version is None:
@@ -313,21 +322,27 @@ def download_model(artifact: Artifact, key: str, version: int | None = None,
     if not path.exists():
         raise HTTPException(status_code=404,
                             detail=f"No {artifact.value} artifact for model '{key}'")
-    blob = path.read_bytes()  # zstd-compressed; the client decompresses
 
-    headers = {
-        FINGERPRINT_HEADER: ver.fingerprint,
-        MODEL_VERSION_HEADER: str(ver.version),
-        WEIGHTS_ID_HEADER: str(weights.id),
-        WEIGHTS_TIMESTAMP_HEADER: weights.created_at.isoformat(),
-        "Content-Disposition":
-            f'attachment; filename="{key}-v{ver.version}-{artifact.value}.tflite"',
-    }
-    if artifact is Artifact.quantized:
-        headers[CONTRACT_VERSION_HEADER] = str(ver.contract_version)
-        headers[NORM_PARAMS_HEADER] = base64.b64encode(ver.norm_params).decode()
-        if weights.artifact_signature is not None:
-            headers[SIGNATURE_HEADER] = base64.b64encode(weights.artifact_signature).decode()
+    # The cooldown is spent only once we actually serve the artifact, so the
+    # cheap rejections above (unknown version/weights/artifact) don't count.
+    try:
+        blob = path.read_bytes()  # zstd-compressed; the client decompresses
 
-    return Response(content=blob, media_type="application/octet-stream",
-                    headers=headers)
+        headers = {
+            FINGERPRINT_HEADER: ver.fingerprint,
+            MODEL_VERSION_HEADER: str(ver.version),
+            WEIGHTS_ID_HEADER: str(weights.id),
+            WEIGHTS_TIMESTAMP_HEADER: weights.created_at.isoformat(),
+            "Content-Disposition":
+                f'attachment; filename="{key}-v{ver.version}-{artifact.value}.tflite"',
+        }
+        if artifact is Artifact.quantized:
+            headers[CONTRACT_VERSION_HEADER] = str(ver.contract_version)
+            headers[NORM_PARAMS_HEADER] = base64.b64encode(ver.norm_params).decode()
+            if weights.artifact_signature is not None:
+                headers[SIGNATURE_HEADER] = base64.b64encode(weights.artifact_signature).decode()
+
+        return Response(content=blob, media_type="application/octet-stream",
+                        headers=headers)
+    finally:
+        record_usage(RateLimit.download, user.id, key, DOWNLOAD_COOLDOWN_SECONDS)

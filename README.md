@@ -303,28 +303,34 @@ aggregation; both take the raw little-endian float32 **weight-delta** buffer (Δ
 global, the change local training produced against the snapshot it trained from) as the
 request body and the `weights_id` of that `GlobalWeights` snapshot (echoed by the download
 headers) in the path. Malformed bodies (wrong length, non-finite values) are
-rejected with `400`; an unknown `weights_id` is `400`; a `weights_id` belonging to a
-frozen (non-latest) model version is `409` — the client must re-download the model first.
+rejected with `400`; an unknown `weights_id` is `400`; a `weights_id` that isn't the
+version's **active** weights — a frozen (non-latest) version, or a snapshot a later round
+superseded — is `409`, so a delta is only ever accepted against the base download served
+and aggregation reconstructs from; the client must re-download the latest weights first.
 
 Request flow for a `quantize`-typed model:
 
 1. `POST /model/submit/quantize/{key}/{weights_id}` stores the delta as a
    `ClientDeltaSubmission` (tagged with the submitting `user_id`, the `base_weights_id` and its
-   `version_id`), creates a `QuantizationJob` (`pending`), enqueues `quantize_submission`,
-   and returns `202` with a `job_id` + `status_url`.
+   `version_id`), creates a `QuantizationJob` (`pending`), enqueues `quantize_submission`
+   (the job id is set as the Celery task id), and returns `202` with the `job_id`.
 2. The worker runs the job: malformedness fails it, but the aggregation-usability verdict
    (MSE gate) is cached silently on the submission and the artifact is produced either
    way — a Byzantine client never learns its update was filtered. The int8 `.tflite` is
    written (zstd-compressed) to the job row along with an ECDSA signature over the canonical
    model bytes (`ml/payload.py`, spec in `shared/docs/model-signing.md`; the signature covers
    the raw model, so it is signed before compression).
-3. The client polls `GET /model/quantize/result/{job_id}`: `202` while `pending`/`running`,
+3. The client polls `GET /model/quantize/result/{job_id}`. The endpoint authorizes and
+   answers from the DB row first (the source of truth for the verdict), and only when the
+   job is still `pending`/`running` does it **long-poll** — blocking on the Celery task (the
+   job id is its task id) for up to `RESULT_POLL_TIMEOUT_SECONDS`, releasing the DB connection
+   meanwhile — before re-reading the settled row. It returns `202` while still running,
    `422` on `failed` (with the error), `200` with the zstd-compressed int8 `.tflite` body plus
    the `X-Model-Signature` / `X-Contract-Version` / `X-Norm-Params` headers once `done` — the
    app packages those fields for the ESP32 per its BLE interface version, and the firmware
    re-derives the canonical bytes and verifies the signature before loading. The result is
    scoped to the user who submitted it (resolved via the job's `ClientDeltaSubmission`); another
-   user's `job_id` returns `404`.
+   user's `job_id` returns `404`, and it never waits on a task it doesn't own.
 
 The submit-only path is `POST /model/submit/raw/{key}/{weights_id}`: same checks and
 storage, but nothing comes back — a `validate_submission` task caches the verdict in the
@@ -467,9 +473,17 @@ nvs_csv=...firmware/factory_nvs.csv`) to also register that device.
 Session semantics (stateful tokens, `api/routes/auth.py` endpoints, argon2 password
 hashing) are documented in [`shared/docs/authentication.md`](shared/docs/authentication.md).
 
-**Rate limiting is per-user, per-model (`api/lib/ratelimit.py`, Redis db 1).**
+**Rate limiting is per-user, per-resource (`api/lib/ratelimit.py`, Redis db 1).**
 The intent: a client can download + quantize every model once in a single pass,
 but immediate repeats on the same model are rejected with `429` (+ `Retry-After`).
+Each limit is a capped counter over a rolling window (a cooldown is the same with a
+cap of 1), keyed per (`RateLimit` action, user, resource — a model key, or a firmware
+interface for OTA). Enforcement is **two-phase**: the endpoint checks the limit up
+front (`check_limit`) but spends a slot (`record_usage`) only *after* it has done the
+work, so a request rejected by the validity checks (or the limit itself) never counts
+against the quota — while a request that got as far as doing real work is charged even
+if that work then fails. (Splitting the check from the spend makes the limit soft under
+concurrency; fine at this scale.)
 
 | Endpoint | Limit |
 |----------|-------|
