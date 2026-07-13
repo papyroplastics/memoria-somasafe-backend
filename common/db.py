@@ -2,7 +2,7 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import JSON, Column, UniqueConstraint
+from sqlalchemy import JSON, BigInteger, Column, UniqueConstraint
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from common.config import DATABASE_URL
@@ -25,11 +25,25 @@ class SubmissionType(str, Enum):
     both the submission endpoint a client uses and the aggregation strategy the
     worker applies. ``quantize`` also accepts submissions on the raw path (same
     dense LE-float32 format, less backend work); ``raw`` does not accept the
-    quantize path. Future formats (sparse, DP) carry incompatible bodies and are
-    only accepted on their own endpoint."""
+    quantize path. ``secure`` carries an incompatible body (masked ring elements,
+    not float32) and only aggregates inside a sealed ``SecureRound`` — it shares
+    nothing with the dense paths (see shared/docs/secure-aggregation.md). Future
+    formats (sparse, DP) likewise get their own endpoint."""
 
     raw = "raw"
     quantize = "quantize"
+    secure = "secure"
+
+
+class SecureRoundStatus(str, Enum):
+    """Lifecycle of one secure-aggregation round. A round is a first-class object
+    (unlike the implicit window the dense paths aggregate over) because masking
+    requires the cohort and its public keys to be frozen before anyone masks."""
+
+    open = "open"              # accepting members (roster still mutable)
+    sealed = "sealed"          # roster + keys frozen; accepting masked vectors
+    aggregated = "aggregated"  # summed, dequantized, baked into new weights
+    failed = "failed"          # a member never submitted — masks can't cancel
 
 
 class IntPKModel(SQLModel):
@@ -161,6 +175,44 @@ class ClientDeltaSubmission(IntPKModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
+class SecureRound(IntPKModel, table=True):
+    """One secure-aggregation round for a model version. Created ``open`` by the
+    first client to join (pinned to the version's active ``base_weights`` — the W
+    every member trains against), sealed once the cohort is fixed, then consumed
+    by ``worker.tasks.secure_aggregation``. ``member_count`` (n) and ``scale`` (the
+    fixed-point S = floor(2^31 / (n * clip_bound))) are null until seal, when the
+    roster size is known. Only the newest version aggregates; ``clip_bound`` (B)
+    bounds each client's per-coordinate influence and fixes the quantization range
+    (see shared/docs/secure-aggregation.md)."""
+
+    model_key: str = Field(foreign_key="modeldefinition.key", index=True)
+    version_id: int = Field(foreign_key="modelversion.id", index=True)
+    base_weights_id: int = Field(foreign_key="globalweights.id")
+    status: SecureRoundStatus = Field(default=SecureRoundStatus.open, index=True)
+    clip_bound: float
+    member_count: int | None = None
+    scale: int | None = Field(default=None, sa_column=Column(BigInteger))
+    created_at: datetime = Field(default_factory=utcnow)
+    sealed_at: datetime | None = None
+    finished_at: datetime | None = None
+
+
+class SecureRoundMember(SQLModel, table=True):
+    """A client's seat in a round. The composite (round_id, user_id) primary key is
+    the structural one-submission-per-client-per-round guard the protocol requires
+    (a second masked vector under the same masks would leak the difference of two
+    updates — reject it, don't merely rate-limit). ``ka_public_key`` is snapshotted
+    at join, never joined to a mutable key table, so a client changing keys mid-round
+    can't desync the roster the masks are derived against. ``masked`` is the client's
+    submitted vector — m little-endian uint32 ring elements — set exactly once."""
+
+    round_id: int = Field(foreign_key="secureround.id", primary_key=True)
+    user_id: int = Field(foreign_key="user.id", primary_key=True)
+    ka_public_key: bytes       # 65-byte uncompressed P-256 point, snapshot at join
+    masked: bytes | None = None
+    submitted_at: datetime | None = None
+
+
 class QuantizationJob(SQLModel, table=True):
     """Tracks one quantization request end to end. ``result`` holds the int8
     .tflite bytes and ``signature`` the server's ECDSA over its canonical model
@@ -246,6 +298,18 @@ def get_latest_weights(session: Session, key: str) -> GlobalWeights | None:
     if latest is None:
         return None
     return get_version_weights(session, latest.id)
+
+
+def get_open_round(session: Session, key: str) -> "SecureRound | None":
+    """The model's current ``open`` secure round, if any — the one a joining
+    client is added to. ``None`` once it seals (a new round opens on the next
+    join), so a fresh round always pins the then-active base weights."""
+    return session.exec(
+        select(SecureRound)
+        .where(SecureRound.model_key == key,
+               SecureRound.status == SecureRoundStatus.open)
+        .order_by(SecureRound.created_at.desc())  # type: ignore[attr-defined]
+    ).first()
 
 
 def list_firmware(session: Session, interface_version: int) -> list[Firmware]:

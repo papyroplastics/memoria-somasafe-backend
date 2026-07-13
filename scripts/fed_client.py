@@ -31,7 +31,7 @@ from tqdm import tqdm
 
 from common.config import DATASETS_DIR, MODELS_DIR
 from common.storage import decompress
-from common.post_train import get_report_dir, plot_metric, write_metrics_csv
+from scripts.common.post_train import get_report_dir, plot_metric, write_metrics_csv
 from common.db import (
     SubmissionType,
     engine,

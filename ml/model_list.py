@@ -8,7 +8,7 @@ from ml.models import (
     gru_autoencoder,
     lstm_autoencoder,
 )
-from ml.models.common import Trainer, TrainerBuilder
+from ml.models.common import TrainerBuilder
 
 @dataclass(frozen=True)
 class ModelSpec:
@@ -17,7 +17,7 @@ class ModelSpec:
     min_app_version: str   # oldest app that can use the current version
     build_trainer: TrainerBuilder
     # Upload path + aggregation strategy for this model's weight updates.
-    submission_type: SubmissionType = SubmissionType.raw
+    submission_type: SubmissionType
     firmware_id: int | None = None
     # Hand-bumped on any change that invalidates existing weights (architecture,
     # baked norm params, contract). The seed script errors if the fingerprint
@@ -39,18 +39,21 @@ MODELS: dict[str, ModelSpec] = {
         name="LSTM Autoencoder",
         min_app_version="1.0.0",
         build_trainer=lstm_autoencoder.get_trainer,
+        submission_type=SubmissionType.raw,
     ),
     "gru-ae": ModelSpec(
         key="gru-ae",
         name="GRU Autoencoder",
         min_app_version="1.0.0",
         build_trainer=gru_autoencoder.get_trainer,
+        submission_type=SubmissionType.raw,
     ),
     "cnn-ae": ModelSpec(
         key="cnn-ae",
         name="CNN Autoencoder",
         min_app_version="1.0.0",
         build_trainer=cnn_autoencoder.get_trainer,
+        submission_type=SubmissionType.secure,
     ),
 }
 

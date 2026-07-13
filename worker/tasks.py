@@ -27,6 +27,9 @@ from common.db import (
     GlobalWeights,
     JobStatus,
     QuantizationJob,
+    SecureRound,
+    SecureRoundMember,
+    SecureRoundStatus,
     SubmissionType,
     ClientDeltaSubmission,
     engine,
@@ -37,6 +40,7 @@ from common.db import (
 )
 
 from common.ratelimit import clear_model_limits
+from common.secure_agg import dequantize, ring_sum
 from common.storage import compress, weights_artifact_path, write_compressed
 
 from ml.model_list import MODELS
@@ -56,8 +60,8 @@ from ml.training import fed_avg
 # native mutexes the first time it runs a TF op.
 _models: dict[str, tuple] = {}
 
-
-def _init_models() -> None:
+@worker_process_init.connect
+def _load_models(**_) -> None:
     for key in MODELS:
         try:
             trainer = MODELS[key].build_trainer(DATASETS_DIR)
@@ -67,11 +71,6 @@ def _init_models() -> None:
                             trainer.contract_version, trainer.norm_param_bytes())
         except Exception as exc:  # missing dataset / build error — skip, don't crash boot
             print(f"[worker] model '{key}' unavailable, skipping: {exc}")
-
-
-@worker_process_init.connect
-def _load_models(**_) -> None:
-    _init_models()
 
 
 @app.task(name="worker.tasks.quantize_submission")
@@ -155,6 +154,42 @@ def validate_weight_submission(submission_id: int) -> None:
         session.commit()
 
 
+def _bake_and_store(session: Session, key: str, latest, new_weights: np.ndarray,
+                    mse_threshold: float | None, model, rep_dataset,
+                    contract_version: int, norm_bytes: bytes) -> Exception | None:
+    model.restore(tf.constant(new_weights, dtype=tf.float32))
+    trainable = quantized = signature = export_error = None
+    try:
+        trainable = bytes(get_trainable_model(model))
+        quantized = bytes(get_optimized_model(model, rep_dataset))
+        signature = sign_model(quantized, contract_version, norm_bytes,
+                               SERVER_PRIVATE_KEY_FILE)
+    except Exception as exc:
+        export_error = exc
+
+    snapshot = GlobalWeights(
+        model_key=key, version_id=latest.id,
+        weights=new_weights.tobytes(),
+        weight_count=model.total_weight_size,
+        valid=export_error is None,
+        mse_threshold=mse_threshold,
+        artifact_signature=signature,
+    )
+    session.add(snapshot)
+    if export_error is None:
+        # Flush to get the row id the artifacts are keyed by, then write them to
+        # disk (signature covers the raw bytes, so compression is downstream).
+        session.flush()
+        write_compressed(weights_artifact_path(key, latest.id, snapshot.id,
+                                               "trainable"), trainable)
+        write_compressed(weights_artifact_path(key, latest.id, snapshot.id,
+                                               "quantized"), quantized)
+    session.commit()
+    if export_error is None:
+        clear_model_limits(key)
+    return export_error
+
+
 def _aggregate_model(session: Session, key: str) -> str:
     if key not in _models:
         return "skipped: model not initialized"
@@ -218,42 +253,14 @@ def _aggregate_model(session: Session, key: str) -> str:
     # Bake the new weights into fresh serving artifacts. A failed export
     # invalidates the round: clients keep pulling the previous snapshot, and the
     # window's submissions stay consumed.
-    model.restore(tf.constant(new_weights, dtype=tf.float32))
-    trainable = quantized = signature = export_error = None
-    try:
-        trainable = bytes(get_trainable_model(model))
-        quantized = bytes(get_optimized_model(model, rep_dataset))
-        signature = sign_model(quantized, contract_version, norm_bytes,
-                               SERVER_PRIVATE_KEY_FILE)
-    except Exception as exc:
-        export_error = exc
-
-    snapshot = GlobalWeights(
-        model_key=key, version_id=latest.id,
-        weights=new_weights.tobytes(),
-        weight_count=model.total_weight_size,
-        valid=export_error is None,
-        mse_threshold=compute_mse_threshold(
-            [update_magnitude(delta) for delta in kept]),
-        artifact_signature=signature,
-    )
-    session.add(snapshot)
-    if export_error is None:
-        # Flush to get the row id the artifacts are keyed by, then write them to
-        # disk (signature covers the raw bytes, so compression is downstream).
-        session.flush()
-        write_compressed(weights_artifact_path(key, latest.id, snapshot.id,
-                                               "trainable"), trainable)
-        write_compressed(weights_artifact_path(key, latest.id, snapshot.id,
-                                               "quantized"), quantized)
-    session.commit()
+    export_error = _bake_and_store(
+        session, key, latest, new_weights,
+        compute_mse_threshold([update_magnitude(delta) for delta in kept]),
+        model, rep_dataset, contract_version, norm_bytes)
     if export_error is not None:
         return (f"aggregated {len(kept)} submissions but artifact export failed "
                 f"(round invalidated): {export_error}")
 
-    # New weights are live: let every client re-pull and submit again without
-    # waiting out the download cooldown / daily submission caps.
-    clear_model_limits(key)
     return (f"aggregated {len(kept)} submissions "
             f"({len(submissions)} in window, {len(latest_per_user)} users, "
             f"{len(valid) - len(kept)} outliers dropped)")
@@ -261,10 +268,6 @@ def _aggregate_model(session: Session, key: str) -> str:
 
 @app.task(name="worker.tasks.federated_aggregation")
 def federated_aggregation(model_key: str | None = None) -> dict[str, str]:
-    """One FedAvg round per model over the submissions accumulated since its
-    last GlobalWeights snapshot, keeping only each user's latest. Runs for every
-    initialized model unless ``model_key`` narrows it; a model is skipped when
-    fewer than FED_MIN_SUBMISSIONS submissions survive validation."""
     keys = [model_key] if model_key is not None else list(_models)
     summary: dict[str, str] = {}
     with Session(engine) as session:
@@ -272,6 +275,80 @@ def federated_aggregation(model_key: str | None = None) -> dict[str, str]:
             summary[key] = _aggregate_model(session, key)
             print(f"[aggregation] {key}: {summary[key]}")
     return summary
+
+
+def _fail_round(session: Session, round: SecureRound, reason: str) -> str:
+    round.status = SecureRoundStatus.failed
+    round.finished_at = utcnow()
+    session.add(round)
+    session.commit()
+    return f"failed: {reason}"
+
+
+@app.task(name="worker.tasks.secure_aggregation")
+def secure_aggregation(round_id: int) -> str:
+    with Session(engine) as session:
+        round = session.get(SecureRound, round_id)
+        if round is None:
+            return "skipped: round not found"
+        if round.status != SecureRoundStatus.sealed:
+            return f"skipped: round is {round.status.value}, not sealed"
+
+        key = round.model_key
+        if key not in _models:
+            return "skipped: model not initialized"
+        model, rep_dataset, fingerprint, contract_version, norm_bytes = _models[key]
+
+        latest = get_latest_version(session, key)
+        if latest is None or latest.id != round.version_id \
+                or latest.fingerprint != fingerprint:
+            return _fail_round(session, round, "round version is no longer current")
+
+        members = list(session.exec(
+            select(SecureRoundMember)
+            .where(SecureRoundMember.round_id == round_id)))
+        submitted = [m for m in members if m.masked is not None]
+        if len(submitted) != len(members) or len(members) != round.member_count:
+            return _fail_round(
+                session, round,
+                f"{len(submitted)}/{round.member_count} members submitted "
+                f"(masks only cancel with the full roster)")
+
+        base = session.get(GlobalWeights, round.base_weights_id)
+        if base is None:
+            return _fail_round(session, round, "base weights missing")
+
+        expected = model.total_weight_size
+        vectors = []
+        for m in members:
+            v = np.frombuffer(m.masked, dtype="<u4").astype(np.uint32)
+            if v.size != expected:
+                return _fail_round(session, round,
+                                   f"member {m.user_id} vector length mismatch")
+            vectors.append(v)
+
+        mean_delta = dequantize(ring_sum(vectors), round.scale, round.member_count)
+        reference = np.frombuffer(base.weights, dtype=np.float32)
+        new_weights = (reference + mean_delta).astype(np.float32)
+
+        # No individual update is visible, so the only guard is aggregate-level:
+        # the mean of clipped deltas must be finite and stay within the clip bound.
+        if not np.all(np.isfinite(new_weights)) \
+                or float(np.max(np.abs(mean_delta))) > round.clip_bound * 1.001:
+            return _fail_round(session, round,
+                               "aggregate failed sanity check (implausible mean delta)")
+
+        export_error = _bake_and_store(session, key, latest, new_weights, None,
+                                       model, rep_dataset, contract_version, norm_bytes)
+        round.status = (SecureRoundStatus.failed if export_error is not None
+                        else SecureRoundStatus.aggregated)
+        round.finished_at = utcnow()
+        session.add(round)
+        session.commit()
+        if export_error is not None:
+            return (f"aggregated {len(members)} members but artifact export failed "
+                    f"(round invalidated): {export_error}")
+        return f"aggregated {len(members)} members into new global weights"
 
 
 @app.task(name="worker.tasks.cleanup_results")

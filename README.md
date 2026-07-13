@@ -35,8 +35,9 @@ in `common/` (config, DB tables, the model registry) imported by both api and wo
 
 ```txt
 common/    Shared, TensorFlow-free infra imported by api + worker: env-driven config,
-           and the SQLModel tables (User, AuthSession, Device, ModelDefinition,
-           ModelVersion, GlobalWeights, ClientDeltaSubmission, QuantizationJob, Firmware).
+           the secure-aggregation primitives (secure_agg.py), and the SQLModel tables
+           (User, AuthSession, Device, ModelDefinition, ModelVersion, GlobalWeights,
+           ClientDeltaSubmission, QuantizationJob, SecureRound, SecureRoundMember, Firmware).
 api/       FastAPI gateway (no TensorFlow): routers for auth/device/model (routes/),
            rate-limiting + attestation-challenge helpers (lib/), and a pytest suite
            mirroring the routers (test/).
@@ -291,14 +292,17 @@ processes reach them; the API itself binds `0.0.0.0` so the phone can reach it o
   MainProcess: TensorFlow is not fork-safe once its runtime exists, so initializing it before
   the prefork pool forks would deadlock every child on inherited-locked native mutexes.
 
-There are **two upload paths**, and which one a model accepts is a per-model property:
-each `ModelVersion` carries a `submission_type` (`raw` / `quantize`, sourced from the code
-registry `ml/model_list.py` and seeded into the DB). The `quantize` path accepts only
+There are **two dense upload paths** (plus a third, `secure`, in its own section below),
+and which one a model accepts is a per-model property: each `ModelVersion` carries a
+`submission_type` (`raw` / `quantize` / `secure`, sourced from the code registry
+`ml/model_list.py` and seeded into the DB). The `quantize` path accepts only
 `quantize`-typed models; the `raw` (submit-only) path accepts both (`quantize`'s dense body
 is compatible and submit-only is the least work). A model uploaded on a path it doesn't
 accept gets `404` (not `403`, so the path stays unguessable). The type also selects the
-aggregation strategy (see "Federated aggregation"); future formats (sparse, DP) will add
-their own type + endpoint. Both current paths persist a `ClientDeltaSubmission` that feeds
+aggregation strategy (see "Federated aggregation"); `secure` carries an incompatible
+(masked, non-float32) body and aggregates only inside a sealed round, so it lives entirely
+on its own `/model/secure/*` endpoints (see "Secure aggregation"); future formats (sparse,
+DP) will likewise add their own type + endpoint. Both dense paths persist a `ClientDeltaSubmission` that feeds
 aggregation; both take the raw little-endian float32 **weight-delta** buffer (Δ = local −
 global, the change local training produced against the snapshot it trained from) as the
 request body and the `weights_id` of that `GlobalWeights` snapshot (echoed by the download
@@ -409,7 +413,62 @@ each owning a placeholder device).
 
 ```bash
 uv run -m scripts.seed_db --test-users                       # one test_N per subject
-uv run -m scripts.fed_client --model cnn-ae --rounds 5 --eval-subjects 2
+uv run -m scripts.fed_client --model feature-mlp --rounds 5 --eval-subjects 2
+```
+
+(`fed_client` drives the dense `raw`/`quantize` paths; `cnn-ae` is a `secure` model
+now, so it runs under `scripts.secure_fed_client` instead — see "Secure aggregation".)
+
+### Secure aggregation
+
+A model whose `submission_type` is `secure` (currently `cnn-ae`) aggregates weight
+updates the server can never read individually: it sees only their sum. The scheme is a
+minimal masking protocol for an **honest-but-curious server with no client dropouts and no
+Byzantine clients** — the full construction and its invariants are in
+[`shared/docs/secure-aggregation.md`](shared/docs/secure-aggregation.md). Unlike the dense
+paths' implicit "aggregate whoever submitted since the last snapshot" window, a secure
+**round is a first-class object** because the masks require the cohort and its public keys
+to be frozen before anyone masks:
+
+1. **Join** (`POST /model/secure/join/{key}`, body `{ka_public_key}`) — a client publishes
+   its long-term ECDH public key and takes a seat in the model's `open` `SecureRound`
+   (created on the first join, pinned to the version's active `GlobalWeights` as the base
+   `W` every member trains against). The key is **snapshotted** into `SecureRoundMember`,
+   not looked up later. Returns the `round_id`, the base `weights_id`, and the caller's own
+   `user_id` (needed for the add/subtract mask ordering).
+2. **Seal** — the roster is frozen, `n` and the fixed-point scale `S = floor(2^31/(n·B))`
+   are set, and the round goes `sealed`. There is deliberately **no seal endpoint**: the
+   harness (or, in a real deployment, an operator/beat task) does it, so a client can never
+   freeze a roster mid-join. Needs `n ≥ SECURE_MIN_MEMBERS` (default 3).
+3. **Masked submit** (`POST /model/secure/submit/{round_id}`) — a member fetches the frozen
+   descriptor (`GET /model/secure/round/{round_id}`: roster + keys, `n`, `B`, `S`, `R`),
+   trains against `W`, clips its delta to ±`B` (`SECURE_CLIP_BOUND`), quantizes into `Z_R`
+   (`R = 2^32`), adds each pairwise mask (lower `user_id` adds, higher subtracts), and
+   uploads only the `m` little-endian uint32 masked vector. Accepted **exactly once** per
+   member (the `(round_id, user_id)` primary key is the structural guard the protocol
+   demands — a second vector under the same masks would leak a difference).
+4. **Aggregate** (`worker.tasks.secure_aggregation`) — sums the masked vectors in the ring
+   (every pairwise mask cancels), dequantizes to the FedAvg mean delta, adds it onto `W`,
+   and bakes a new `GlobalWeights` + serving artifacts via the same path FedAvg uses. If any
+   member never submitted, the **round fails wholesale** (masks only cancel over the full
+   roster) — no partial recovery. The daily `federated_aggregation` beat skips `secure`
+   models (it has no strategy for them); a secure round only runs when its task is queued.
+
+**What secure aggregation costs.** The server never sees an individual update, so the
+per-submission MSE gate, the z-scored outlier filter, and the per-client validity verdict
+are all **structurally impossible** here — this is inherent to the scheme, not a gap. Only
+client-side clipping to `B` and an aggregate-level sanity check (finite, mean delta within
+the clip bound) remain. It buys privacy against an honest-but-curious server, not
+robustness.
+
+**Headless secure run.** `scripts/secure_fed_client.py` drives the whole stack over the
+real HTTP API, running the four phases above per round for each dataset subject (as user
+`test_N`), and additionally verifies client-side that the masks cancel exactly each round.
+The per-round convergence series is written to `results/<model>/reports/secure_fed_client/`.
+
+```bash
+uv run -m scripts.seed_db --test-users                            # one test_N per subject
+uv run -m scripts.secure_fed_client --model cnn-ae --rounds 5 --eval-subjects 2
 ```
 
 **Model versioning.** See [`shared/docs/versioning.md`](shared/docs/versioning.md) for
@@ -492,6 +551,9 @@ concurrency; fine at this scale.)
 | `POST /model/submit/quantize/{key}/{weights_id}` | device-owner only; `QUANTIZE_DAILY_LIMIT` (default 2) per model per rolling 24 h; `404` unless the model's `submission_type` is `quantize` |
 | `POST /model/submit/raw/{key}/{weights_id}` | device-owner only; `SUBMIT_DAILY_LIMIT` (default 2) per model per rolling 24 h; `404` unless the model's `submission_type` is `raw` or `quantize` |
 | `GET /model/quantize/result/{job_id}` | authed; only the user who submitted the job (else `404`) |
+| `POST /model/secure/join/{key}` | device-owner only; `404` unless the model's `submission_type` is `secure` |
+| `GET /model/secure/round/{round_id}` | authed; only a member of the round (else `404`); `409` until the round is sealed |
+| `POST /model/secure/submit/{round_id}` | device-owner + round member; one masked vector per member (structural, `409` on repeat) |
 | `GET /ota/versions/{interface}` | authed only |
 | `GET /ota/download/{interface}/{version}` | device-owner only; one firmware download per interface per `OTA_DOWNLOAD_COOLDOWN_SECONDS` (default 300 s) |
 

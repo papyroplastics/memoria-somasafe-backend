@@ -43,6 +43,16 @@ FED_AGG_INTERVAL_SECONDS = int(os.environ.get("FED_AGG_INTERVAL_SECONDS", DAY))
 # Minimum valid submissions a model needs in the window for a round to run.
 FED_MIN_SUBMISSIONS = int(os.environ.get("FED_MIN_SUBMISSIONS", 1))
 
+# --- Secure aggregation (see worker.tasks.secure_aggregation) ---
+# Per-coordinate clipping bound B: each client clips its delta to +/-B before
+# masking, capping its influence on the mean to B/n. Also fixes the fixed-point
+# range, so it must comfortably exceed real delta magnitudes (a generous default
+# — with ~15 clients there is ample headroom before the ring can wrap).
+SECURE_CLIP_BOUND = float(os.environ.get("SECURE_CLIP_BOUND", 1.0))
+# A round must have at least this many members to seal (n >= 3: the sum of two
+# updates plus one own value reveals the third).
+SECURE_MIN_MEMBERS = int(os.environ.get("SECURE_MIN_MEMBERS", 3))
+
 # --- Auth (stateful opaque tokens, see api.routes.auth) ---
 ACCESS_TOKEN_TTL_SECONDS = int(os.environ.get("ACCESS_TOKEN_TTL_SECONDS", MINUTE * 30))
 REFRESH_TOKEN_TTL_SECONDS = int(os.environ.get("REFRESH_TOKEN_TTL_SECONDS", DAY * 30))

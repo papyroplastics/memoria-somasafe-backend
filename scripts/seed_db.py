@@ -208,7 +208,6 @@ def seed_test_users(session: Session) -> None:
             session.add(user)
             session.commit()
             session.refresh(user)
-            print(f"  + user '{name}'")
 
         serial = f"TEST-DEVICE-{i}"
         device = session.get(Device, serial)

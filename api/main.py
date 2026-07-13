@@ -6,6 +6,7 @@ from common.db import init_db
 from .routes.auth import router as auth_router
 from .routes.device import router as device_router
 from .routes.model import router
+from .routes import secure as secure
 from .routes.ota import router as ota_router
 
 
