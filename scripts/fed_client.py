@@ -1,161 +1,192 @@
 """Headless federated client harness — drives the real HTTP API end to end.
 
-For each round, and for each training subject (as user ``test_N``), it:
-  1. logs in (``POST /auth/token``),
-  2. pulls the current global trainable artifact (``GET /model/download/trainable``),
-  3. trains one pass on that subject through the on-device LiteRT ``CompiledModel``
-     interface (the same runtime the phone uses),
-  4. uploads the resulting weight delta (local − global) to the submission endpoint,
-  5. logs out.
+One harness, two aggregation strategies picked by the model's ``submission_type``:
 
-After every client has submitted it queues one aggregation round, waits for the
-task to finish (via the Celery result backend), then scores the new snapshot on
-the held-out subjects. A per-round metric series is written out for the
-convergence curve.
+  - **dense** (``raw`` / ``quantize``): each round every training subject (as user
+    ``test_N``) logs in, pulls the current global trainable artifact, trains one pass
+    through the on-device LiteRT ``CompiledModel`` runtime, uploads the plaintext
+    weight delta (local − global), and logs out. One ``federated_aggregation`` task
+    then averages whatever landed since the last snapshot.
+  - **secure**: a secure round is a first-class object, so the round runs the four
+    synchronised phases the masking protocol needs — join (publish an ECDH key and
+    take a seat), seal (freeze the cohort + scale), masked submit (each member masks
+    its quantized delta against the frozen roster and uploads only the masked
+    vector), then one round-scoped ``secure_aggregation`` task sums them. The harness
+    also verifies client-side that the masks cancel exactly each round.
 
-    uv run -m scripts.fed_client
-    uv run -m scripts.fed_client --model cnn-ae --rounds 5 --eval-subjects 2
+Either way it scores the fresh snapshot on the held-out subjects and writes a
+per-round convergence CSV + plot.
 
-Prereqs: the services are up (api, worker, redis, postgres), the DB was seeded
-with ``--test-users``, and the model is trained/seeded. There are no local epochs
-— the system takes a single submission per client per round.
+    uv run -m scripts.fed_client --model feature-mlp --rounds 5 --eval-subjects 2
+    uv run -m scripts.fed_client --model cnn-ae     --rounds 5 --eval-subjects 2   # secure
+
+Prereqs: services up (api, worker, redis, postgres), DB seeded with ``--test-users``,
+and the model trained/seeded. There are no local epochs — one submission per client
+per round.
 """
 
 import argparse
+import base64
 
 import numpy as np
-import requests
-from ai_edge_litert.compiled_model import CompiledModel
 from sqlmodel import Session
-from tqdm import tqdm
 
-from common.config import DATASETS_DIR, MODELS_DIR
-from common.storage import decompress
-from scripts.common.post_train import get_report_dir, plot_metric, write_metrics_csv
-from common.db import (
-    SubmissionType,
-    engine,
-    get_latest_version,
+from common.config import DATASETS_DIR, MODELS_DIR, SECURE_MIN_MEMBERS
+from common.db import SubmissionType, engine, get_latest_version
+from common.secure_agg import (
+    dequantize,
+    generate_keypair,
+    mask_vector,
+    quantize,
+    ring_sum,
 )
 from ml.model_list import MODELS
 from worker.celery_app import app
 
-AGGREGATION_TASK = "worker.tasks.federated_aggregation"
-WEIGHTS_ID_HEADER = "X-Weights-ID"
-DEFAULT_BASE_URL = "http://localhost:8000"
+from scripts.common.api import (
+    DEFAULT_BASE_URL,
+    download_trainable,
+    get_descriptor,
+    join,
+    login,
+    logout,
+    submit_delta,
+    submit_masked,
+    wait_for_aggregation,
+    wait_for_round,
+)
+from scripts.common.litert import LiteRTClient
+from scripts.common.post_train import get_report_dir, plot_metric, write_metrics_csv
+from scripts.common.secure import seal_round
+
+FED_AGG_TASK = "worker.tasks.federated_aggregation"
+SECURE_AGG_TASK = "worker.tasks.secure_aggregation"
 
 
-class LiteRTClient:
-    """Trains and evaluates a trainable ``.tflite`` through LiteRT's CompiledModel,
-    driving the model's ``train`` / ``save`` / ``eval`` signatures exactly as the
-    on-device client does. Weight updates accumulate in the compiled model's
-    resource variables across ``train`` calls; ``save`` reads them back out."""
+class DenseStrategy:
+    """raw / quantize: plaintext deltas, averaged by the daily FedAvg task."""
 
-    def __init__(self, tflite_bytes: bytes, tensor_names: list[str]):
-        self.model = CompiledModel.from_buffer(tflite_bytes)
-        self.signatures = self.model.get_signature_list()
-        self.tensor_names = tensor_names
+    report_subdir = "fed_client"
 
-    def _run(self, signature: str, arrays: list[np.ndarray]) -> dict[str, np.ndarray]:
-        named = dict(zip(self.tensor_names, arrays))
-        input_map = {}
-        for name in self.signatures[signature]["inputs"]:
-            if name not in named:
-                raise ValueError(f"no input array named '{name}' for signature '{signature}'")
-            buffer = self.model.create_input_buffer_by_name(signature, name)
-            buffer.write(np.ascontiguousarray(named[name], dtype=np.float32))
-            input_map[name] = buffer
+    def setup(self, n_clients: int) -> None:
+        pass
 
-        output_details = self.model.get_output_tensor_details(signature)
-        output_map = {
-            name: self.model.create_output_buffer_by_name(signature, name)
-            for name in self.signatures[signature]["outputs"]
-        }
-        self.model.run_by_name(signature, input_map, output_map)
-
-        out = {}
-        for name, buffer in output_map.items():
-            shape = output_details[name]["shape"]
-            count = int(np.prod(shape)) if len(shape) else 1
-            out[name] = buffer.read(count, np.float32)
-        return out
-
-    def train_pass(self, dataset, prefix: str = "") -> float:
-        total, batches = 0.0, 0
-        for batch in tqdm(dataset, desc=f"{prefix} train".strip(), leave=False):
-            arrays = [t.numpy() for t in batch]
-            total += float(self._run("train", arrays)["loss"].reshape(-1)[0])
-            batches += 1
-        return total / batches if batches else 0.0
-
-    def weights(self) -> np.ndarray:
-        return self._run("save", [])["weights"].astype(np.float32)
-
-    def eval(self, datapoint) -> dict[str, np.ndarray]:
-        """Run the eval signature on one dataset batch, returning the output tensors
-        keyed by output name. Extra datapoint tensors (targets the eval signature
-        doesn't take, like the MLP's labels) are matched out by ``_run`` by name."""
-        return self._run("eval", [t.numpy() for t in datapoint])
+    def run_round(self, base, key, spec, trainer, client_datasets, r, rounds, score):
+        prefix = f"round={r}/{rounds}"
+        round_global = None
+        for i, dataset in enumerate(client_datasets, start=1):
+            user = f"test_{i}"
+            token = login(base, user, user)
+            artifact, weights_id = download_trainable(base, token, key)
+            client = LiteRTClient(artifact, trainer.dataset_tensors)
+            base_weights = client.weights()  # global snapshot the delta is relative to
+            if round_global is None:
+                round_global = artifact
+                score(client, r - 1)  # global weights this round trained from
+            client.train_pass(dataset, f"{prefix} subject={i}/{len(client_datasets)}")
+            delta = client.weights() - base_weights
+            submit_delta(base, token, key, weights_id,
+                         delta.astype(np.float32).tobytes(), spec.submission_type)
+            logout(base, token)
+        summary = wait_for_aggregation(app.send_task(FED_AGG_TASK, args=[key]), key)
+        print(f"{prefix} aggregated: {summary}")
 
 
-def _auth(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
+class SecureStrategy:
+    """secure: a first-class round — join, freeze the cohort, then every member
+    uploads a masked delta and the round-scoped task sums them (masks cancel)."""
+
+    report_subdir = "secure_fed_client"
+
+    def setup(self, n_clients: int) -> None:
+        if n_clients < SECURE_MIN_MEMBERS:
+            raise SystemExit(f"{n_clients} client subjects < SECURE_MIN_MEMBERS "
+                             f"({SECURE_MIN_MEMBERS}); a secure round needs at least that many")
+        # Long-term ECDH keypairs, generated once and reused across rounds (the round
+        # id in the mask seed keeps each round's masks fresh regardless).
+        self.keypairs = {f"test_{i}": generate_keypair() for i in range(1, n_clients + 1)}
+
+    def run_round(self, base, key, spec, trainer, client_datasets, r, rounds, score):
+        prefix = f"round={r}/{rounds}"
+
+        # Phase A — every client joins and publishes its public key.
+        round_id = None
+        seats = []  # (i, user, token, dataset, sk, my_user_id)
+        for i, dataset in enumerate(client_datasets, start=1):
+            user = f"test_{i}"
+            token = login(base, user, user)
+            sk, pk = self.keypairs[user]
+            resp = join(base, token, key, pk)
+            round_id = resp["round_id"]
+            seats.append((i, user, token, dataset, sk, resp["user_id"]))
+
+        # Phase B — seal the frozen cohort.
+        n = seal_round(round_id, SECURE_MIN_MEMBERS)
+        print(f"{prefix} sealed round {round_id} with {n} members")
+
+        # Phase C — train, mask, submit. Collected q/y let us confirm the masks
+        # cancel to the same sum the server will compute.
+        round_global = None
+        masked_vecs, plain_q, scale = [], [], None
+        for i, user, token, dataset, sk, my_id in seats:
+            desc = get_descriptor(base, token, round_id)
+            artifact, weights_id = download_trainable(base, token, key)
+            if weights_id != desc["base_weights_id"]:
+                raise SystemExit("served weights id != round base; client out of sync")
+            client = LiteRTClient(artifact, trainer.dataset_tensors)
+            base_weights = client.weights()
+            if round_global is None:
+                round_global = artifact
+                score(client, r - 1)
+            client.train_pass(dataset, f"{prefix} subject={i}/{len(seats)}")
+            delta = client.weights() - base_weights
+            scale = desc["scale"]
+            q = quantize(delta, desc["clip_bound"], scale)
+            roster = [(e["user_id"], base64.b64decode(e["ka_public_key"]))
+                      for e in desc["roster"]]
+            y = mask_vector(q, my_id, roster, sk, round_id)
+            submit_masked(base, token, round_id, y.astype("<u4").tobytes())
+            logout(base, token)
+            masked_vecs.append(y)
+            plain_q.append(q)
+
+        # Client-side proof the masks are antisymmetric: the masked sum equals the
+        # unmasked sum exactly (the value the server unmasks to).
+        residual = float(np.max(np.abs(
+            dequantize(ring_sum(masked_vecs), scale, n)
+            - dequantize(ring_sum(plain_q), scale, n))))
+        print(f"{prefix} mask-cancellation residual: {residual:.3e}")
+
+        # Phase D — aggregate.
+        summary = wait_for_round(app.send_task(SECURE_AGG_TASK, args=[round_id]))
+        print(f"{prefix} aggregated: {summary}")
 
 
-def login(base: str, username: str, password: str) -> str:
-    resp = requests.post(f"{base}/auth/token",
-                         data={"username": username, "password": password})
-    resp.raise_for_status()
-    return resp.json()["access_token"]
+def _strategy_for(submission_type: SubmissionType):
+    if submission_type is SubmissionType.secure:
+        return SecureStrategy()
+    return DenseStrategy()
 
 
-def download_trainable(base: str, token: str, key: str) -> tuple[bytes, int]:
-    resp = requests.get(f"{base}/model/download/trainable/{key}", headers=_auth(token))
-    resp.raise_for_status()
-    return decompress(resp.content), int(resp.headers[WEIGHTS_ID_HEADER])
-
-
-def submit(base: str, token: str, key: str, weights_id: int, body: bytes,
-           submission_type: SubmissionType) -> None:
-    path = "quantize" if submission_type is SubmissionType.quantize else "raw"
-    resp = requests.post(
-        f"{base}/model/submit/{path}/{key}/{weights_id}",
-        headers=_auth(token) | {"Content-Type": "application/octet-stream"},
-        data=body,
-    )
-    resp.raise_for_status()
-
-
-def logout(base: str, token: str) -> None:
-    requests.post(f"{base}/auth/logout", headers=_auth(token))
-
-
-def wait_for_aggregation(result, key: str, timeout: float = 300.0) -> str:
-    """Block on the aggregation task and return its summary for ``key``, raising
-    if the round was skipped or its artifact export invalidated it."""
-    summary = result.get(timeout=timeout)
-    message = summary.get(key, "no summary returned")
-    if message.startswith("skipped") or "export failed" in message:
-        raise SystemExit(f"aggregation for {key} produced no new weights: {message}")
-    return message
+def _split_eval(subject_datasets, eval_subjects):
+    if eval_subjects >= len(subject_datasets):
+        raise SystemExit(f"--eval-subjects {eval_subjects} leaves no training subjects "
+                         f"({len(subject_datasets)} available)")
+    if eval_subjects <= 0:
+        return subject_datasets, None
+    # Materialize each held-out subject and concatenate at the Python level, so the
+    # already-cached subject datasets are never re-combined into a new tf pipeline.
+    eval_data = [dp for ds in subject_datasets[-eval_subjects:] for dp in list(ds)]
+    return subject_datasets[:-eval_subjects], eval_data
 
 
 def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
     spec = MODELS[key]
+    strategy = _strategy_for(spec.submission_type)
     trainer = spec.build_trainer(DATASETS_DIR)
     subject_datasets, _ = trainer.subject_datasets(DATASETS_DIR, train_split=1.0)
-
-    if eval_subjects >= len(subject_datasets):
-        raise SystemExit(f"--eval-subjects {eval_subjects} leaves no training subjects "
-                         f"({len(subject_datasets)} available)")
-    if eval_subjects > 0:
-        client_datasets = subject_datasets[:-eval_subjects]
-        # Materialize each held-out subject and concatenate at the Python level, so the
-        # already-cached subject datasets are never re-combined into a new tf pipeline.
-        eval_data = [dp for ds in subject_datasets[-eval_subjects:] for dp in list(ds)]
-    else:
-        client_datasets = subject_datasets
-        eval_data = None
+    client_datasets, eval_data = _split_eval(subject_datasets, eval_subjects)
+    strategy.setup(len(client_datasets))
 
     print(f"model={key} type={spec.submission_type.value} clients={len(client_datasets)} "
           f"eval_subjects={eval_subjects} rounds={rounds}")
@@ -171,41 +202,18 @@ def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
         print(f"round={round_idx} {trainer.primary_metric}={value:.6f}")
 
     for r in range(1, rounds + 1):
-        round_prefix = f"round={r}/{rounds}"
         with Session(engine) as session:
             if get_latest_version(session, key) is None:
                 raise SystemExit(f"model '{key}' has no seeded version")
-
-        round_global: bytes | None = None
-        for i, dataset in enumerate(client_datasets, start=1):
-            user = f"test_{i}"
-            token = login(base, user, user)
-            artifact, weights_id = download_trainable(base, token, key)
-            client = LiteRTClient(artifact, trainer.dataset_tensors)
-            base_weights = client.weights()  # global snapshot the delta is relative to
-            if round_global is None:
-                round_global = artifact
-                score(client, r - 1)  # global weights this round trained from
-
-            client.train_pass(dataset, f"{round_prefix} subject={i}/{len(client_datasets)}")
-            delta = client.weights() - base_weights
-            submit(base, token, key, weights_id, delta.astype(np.float32).tobytes(),
-                   spec.submission_type)
-            logout(base, token)
-
-        result = app.send_task(AGGREGATION_TASK, args=[key])
-        summary = wait_for_aggregation(result, key)
-        print(f"round={r} aggregated: {summary}")
+        strategy.run_round(base, key, spec, trainer, client_datasets, r, rounds, score)
 
     # Final global weights, after the last round's aggregation.
     token = login(base, "test_1", "test_1")
     artifact, _ = download_trainable(base, token, key)
     logout(base, token)
+    score(LiteRTClient(artifact, trainer.dataset_tensors), rounds)
 
-    client = LiteRTClient(artifact, trainer.dataset_tensors)
-    score(client, rounds)
-
-    report_dir = get_report_dir(MODELS_DIR / key, "fed_client")
+    report_dir = get_report_dir(MODELS_DIR / key, strategy.report_subdir)
     write_metrics_csv(history, report_dir, "convergence.csv")
     plot_metric(history, "round", trainer.primary_metric, report_dir, "convergence.png")
 

@@ -32,5 +32,7 @@ api-test:
 
 worker-run:
 	uv run -m celery -A worker.celery_app worker -B --loglevel=info
+worker-monitor:
+	uv run -m celery -A worker.celery_app flower
 
 

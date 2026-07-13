@@ -292,10 +292,13 @@ processes reach them; the API itself binds `0.0.0.0` so the phone can reach it o
   MainProcess: TensorFlow is not fork-safe once its runtime exists, so initializing it before
   the prefork pool forks would deadlock every child on inherited-locked native mutexes.
 
-There are **two dense upload paths** (plus a third, `secure`, in its own section below),
-and which one a model accepts is a per-model property: each `ModelVersion` carries a
-`submission_type` (`raw` / `quantize` / `secure`, sourced from the code registry
-`ml/model_list.py` and seeded into the DB). The `quantize` path accepts only
+There are **multiple upload paths**, and which one a model accepts is a per-model property:
+each `ModelVersion` carries a `submission_type` (`raw` / `quantize` / `secure`, sourced from
+the code registry `ml/model_list.py` and seeded into the DB). See
+[`shared/docs/submission-type.md`](shared/docs/submission-type.md) for what each type is
+*for* — in particular why the `quantize` path exists (delivering a personalized int8 model
+to the firmware) and why that quantization runs server-side; this section covers the
+backend-specific endpoints and mechanics. The `quantize` path accepts only
 `quantize`-typed models; the `raw` (submit-only) path accepts both (`quantize`'s dense body
 is compatible and submit-only is the least work). A model uploaded on a path it doesn't
 accept gets `404` (not `403`, so the path stays unguessable). The type also selects the
@@ -406,18 +409,18 @@ uv run -m scripts.queue_aggregation cnn-ae    # a single model
 HTTP API: for each dataset subject (as user `test_N`) it logs in, pulls the global
 trainable artifact, trains one pass through the on-device LiteRT `CompiledModel` runtime,
 uploads the update, and logs out; then it queues a round, waits for the new `GlobalWeights`,
-and scores it on the held-out subjects, repeating for `--rounds`. The per-round
-convergence series is written as a CSV + plot to `results/<model>/reports/fed_client/`.
+and scores it on the held-out subjects, repeating for `--rounds`. It picks the aggregation
+strategy from the model's `submission_type`: the dense `raw`/`quantize` path (convergence
+series to `results/<model>/reports/fed_client/`) or the masked `secure` path (see "Secure
+aggregation" for the extra phases, series to `results/<model>/reports/secure_fed_client/`).
 Seed the accounts first with `scripts.seed_db --test-users` (one `test_N` per subject,
 each owning a placeholder device).
 
 ```bash
 uv run -m scripts.seed_db --test-users                       # one test_N per subject
-uv run -m scripts.fed_client --model feature-mlp --rounds 5 --eval-subjects 2
+uv run -m scripts.fed_client --model feature-mlp --rounds 5 --eval-subjects 2   # dense
+uv run -m scripts.fed_client --model cnn-ae     --rounds 5 --eval-subjects 2   # secure
 ```
-
-(`fed_client` drives the dense `raw`/`quantize` paths; `cnn-ae` is a `secure` model
-now, so it runs under `scripts.secure_fed_client` instead — see "Secure aggregation".)
 
 ### Secure aggregation
 
@@ -461,14 +464,24 @@ client-side clipping to `B` and an aggregate-level sanity check (finite, mean de
 the clip bound) remain. It buys privacy against an honest-but-curious server, not
 robustness.
 
-**Headless secure run.** `scripts/secure_fed_client.py` drives the whole stack over the
-real HTTP API, running the four phases above per round for each dataset subject (as user
-`test_N`), and additionally verifies client-side that the masks cancel exactly each round.
-The per-round convergence series is written to `results/<model>/reports/secure_fed_client/`.
+**Headless secure run.** The secure path of `scripts/fed_client.py` (selected when the
+model's `submission_type` is `secure`) drives the whole stack over the real HTTP API,
+running the four phases above per round for each dataset subject (as user `test_N`), and
+additionally verifies client-side that the masks cancel exactly each round. The per-round
+convergence series is written to `results/<model>/reports/secure_fed_client/`.
 
 ```bash
 uv run -m scripts.seed_db --test-users                            # one test_N per subject
-uv run -m scripts.secure_fed_client --model cnn-ae --rounds 5 --eval-subjects 2
+uv run -m scripts.fed_client --model cnn-ae --rounds 5 --eval-subjects 2
+```
+
+**No-training aggregation check.** `scripts/secure_aggregation.py` exercises the same
+secure endpoints without any training: each client submits a *random* weight tensor and the
+script asserts the global weights the server bakes equal the plaintext mean (up to
+quantization + float32 error) — a fast correctness probe of the masking/summation pipeline.
+
+```bash
+uv run -m scripts.secure_aggregation --clients 4 --rounds 3
 ```
 
 **Model versioning.** See [`shared/docs/versioning.md`](shared/docs/versioning.md) for
