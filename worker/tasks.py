@@ -16,6 +16,13 @@ from worker.utils.weight_validation import (
     validate_submission,
 )
 
+from common.celery_tasks import (
+    CLEANUP_TASK,
+    FED_AGG_TASK,
+    QUANTIZE_TASK,
+    SECURE_AGG_TASK,
+    VALIDATE_TASK,
+)
 from common.config import (
     DATASETS_DIR,
     FED_MIN_SUBMISSIONS,
@@ -80,7 +87,7 @@ def _load_models(**_) -> None:
             print(f"[worker] model '{key}' unavailable, skipping: {exc}")
 
 
-@app.task(name="worker.tasks.quantize_submission")
+@app.task(name=QUANTIZE_TASK)
 def quantize_submission(job_id: str) -> None:
     with Session(engine) as session:
         job = session.get(QuantizationJob, uuid.UUID(job_id))
@@ -142,7 +149,7 @@ def quantize_submission(job_id: str) -> None:
             session.commit()
 
 
-@app.task(name="worker.tasks.validate_submission")
+@app.task(name=VALIDATE_TASK)
 def validate_weight_submission(submission_id: int) -> None:
     """Background verdict for a submit-only upload. Cached on the row for
     aggregation; never surfaced to the client."""
@@ -273,7 +280,7 @@ def _aggregate_model(session: Session, key: str) -> str:
             f"{len(valid) - len(kept)} outliers dropped)")
 
 
-@app.task(name="worker.tasks.federated_aggregation")
+@app.task(name=FED_AGG_TASK)
 def federated_aggregation(model_key: str | None = None) -> dict[str, str]:
     keys = [model_key] if model_key is not None else list(_models)
     summary: dict[str, str] = {}
@@ -292,7 +299,7 @@ def _fail_round(session: Session, round: SecureRound, reason: str) -> str:
     return f"failed: {reason}"
 
 
-@app.task(name="worker.tasks.secure_aggregation")
+@app.task(name=SECURE_AGG_TASK)
 def secure_aggregation(round_id: int) -> str:
     with Session(engine) as session:
         round = session.get(SecureRound, round_id)
@@ -358,7 +365,7 @@ def secure_aggregation(round_id: int) -> str:
         return f"aggregated {len(members)} members into new global weights"
 
 
-@app.task(name="worker.tasks.cleanup_results")
+@app.task(name=CLEANUP_TASK)
 def cleanup_results() -> int:
     """Drop results for jobs that were served (after a grace window) or never
     claimed (after the TTL): the stored object is deleted and the row's

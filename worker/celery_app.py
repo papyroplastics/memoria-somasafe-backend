@@ -1,5 +1,6 @@
 from celery import Celery
 
+from common.celery_tasks import CLEANUP_TASK, FED_AGG_TASK
 from common.config import (
     REDIS_URL,
     CLEANUP_INTERVAL_SECONDS,
@@ -19,11 +20,11 @@ app.conf.update(
     accept_content=["json"],
     beat_schedule={
         "cleanup-results": {
-            "task": "worker.tasks.cleanup_results",
+            "task": CLEANUP_TASK,
             "schedule": float(CLEANUP_INTERVAL_SECONDS),
         },
         "federated-aggregation": {
-            "task": "worker.tasks.federated_aggregation",
+            "task": FED_AGG_TASK,
             "schedule": float(FED_AGG_INTERVAL_SECONDS),
         },
     },

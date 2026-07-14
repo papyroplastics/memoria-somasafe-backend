@@ -20,6 +20,7 @@ import base64
 import numpy as np
 from sqlmodel import Session
 
+from common.celery_tasks import SECURE_AGG_TASK
 from common.config import SECURE_MIN_MEMBERS
 from common.db import (
     GlobalWeights,
@@ -47,8 +48,6 @@ from scripts.common.api import (
     wait_for_round,
 )
 from scripts.common.secure import seal_round
-
-SECURE_AGG_TASK = "worker.tasks.secure_aggregation"
 
 
 def read_weights(weights_id: int) -> np.ndarray:

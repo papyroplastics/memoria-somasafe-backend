@@ -11,6 +11,7 @@ from sqlmodel import Session, select
 
 from worker.celery_app import app as celery_app
 
+from common.celery_tasks import QUANTIZE_TASK, VALIDATE_TASK
 from common.config import (
     DOWNLOAD_COOLDOWN_SECONDS,
     QUANTIZE_DAILY_LIMIT,
@@ -43,9 +44,6 @@ from api.lib.ratelimit import check_limit, record_usage
 from api.lib.session import get_current_user
 
 router = APIRouter(prefix="/model")
-
-QUANTIZE_TASK = "worker.tasks.quantize_submission"
-VALIDATE_TASK = "worker.tasks.validate_submission"
 
 
 FINGERPRINT_HEADER = "X-Model-Fingerprint"

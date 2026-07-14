@@ -31,6 +31,7 @@ import base64
 import numpy as np
 from sqlmodel import Session
 
+from common.celery_tasks import FED_AGG_TASK, SECURE_AGG_TASK
 from common.config import DATASETS_DIR, MODELS_DIR, SECURE_MIN_MEMBERS
 from common.db import SubmissionType, engine, get_latest_version
 from common.secure_agg import (
@@ -58,9 +59,6 @@ from scripts.common.api import (
 from scripts.common.litert import LiteRTClient
 from scripts.common.post_train import get_report_dir, plot_metric, write_metrics_csv
 from scripts.common.secure import seal_round
-
-FED_AGG_TASK = "worker.tasks.federated_aggregation"
-SECURE_AGG_TASK = "worker.tasks.secure_aggregation"
 
 
 class DenseStrategy:
