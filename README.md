@@ -275,7 +275,10 @@ the app's on-device feature/context recovery and its handling of missing samples
 The server is a FastAPI **gateway** in front of a Celery **worker**; the gateway never
 runs ML work directly. Both run on the host with `uv` (`make api-run`, `make worker-run`);
 only the external services — PostgreSQL, Redis, and MinIO — run in containers via
-`compose.yaml` (`make db-run`, podman). Those three are bound to `127.0.0.1` since only the
+`compose.yaml` (`make db-run`, podman). Credentials and connection settings are read from a
+`.env` file (`common/config.py` loads it via `python-dotenv`, and `compose.yaml` uses it for
+variable substitution); copy `example.env` to `.env` and adjust as needed — there are no
+hardcoded defaults, so the gateway/worker refuse to start without it. Those three are bound to `127.0.0.1` since only the
 host-run processes reach them; the API itself binds `0.0.0.0` so the phone can reach it over
 the LAN. The gateway and worker do not need a shared filesystem — they only need to reach the
 same MinIO bucket, which is what makes the worker actually distributable (Celery's premise)

@@ -5,9 +5,9 @@ services:
   postgres:
     image: docker.io/library/postgres:18-alpine
     environment:
-      POSTGRES_USER: somasafe
-      POSTGRES_PASSWORD: somasafe
-      POSTGRES_DB: somasafe
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     ports:
       - 127.0.0.1:5432:5432
     volumes:
@@ -24,8 +24,8 @@ services:
     image: docker.io/minio/minio:latest
     command: server /data
     environment:
-      MINIO_ROOT_USER: somasafe
-      MINIO_ROOT_PASSWORD: somasafe123
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
     ports:
       - 127.0.0.1:9000:9000  # S3 API
       - 127.0.0.1:9001:9001  # web console

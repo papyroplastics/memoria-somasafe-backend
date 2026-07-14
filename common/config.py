@@ -1,6 +1,18 @@
 import os
 from pathlib import Path
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _require(name: str) -> str:
+    value = os.environ.get(name)
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name} (see example.env)")
+    return value
+
+
 # Time unit constants (all other time values in this file are in seconds)
 MINUTE = 60
 HOUR = 60 * MINUTE
@@ -14,10 +26,10 @@ DATASETS_DIR = Path(os.environ.get("DATASETS_DIR", "shared/gen/datasets"))
 # MinIO/S3 bucket the gateway serves model/firmware/quantize-result blobs from,
 # keyed by DB row so an object key is reconstructable from the row alone (see
 # common/storage.py). The seed script populates it; aggregation appends to it.
-S3_ENDPOINT_URL = os.environ.get("S3_ENDPOINT_URL", "localhost:9000")
-S3_ACCESS_KEY = os.environ.get("S3_ACCESS_KEY", "somasafe")
-S3_SECRET_KEY = os.environ.get("S3_SECRET_KEY", "somasafe123")
-S3_BUCKET = os.environ.get("S3_BUCKET", "somasafe")
+S3_ENDPOINT_URL = _require("S3_ENDPOINT_URL")
+S3_ACCESS_KEY = _require("S3_ACCESS_KEY")
+S3_SECRET_KEY = _require("S3_SECRET_KEY")
+S3_BUCKET = _require("S3_BUCKET")
 S3_SECURE = os.environ.get("S3_SECURE", "false") == "true"
 
 # ECDSA P-256 private key the worker signs quantized-model payloads with; its public
@@ -26,8 +38,8 @@ S3_SECURE = os.environ.get("S3_SECURE", "false") == "true"
 SERVER_PRIVATE_KEY_FILE = Path(os.environ.get("SERVER_PRIVATE_KEY", "shared/gen/server-private-key.pem"))
 
 # PostgreSQL (SQLModel/SQLAlchemy URL) and Redis instance.
-DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql+psycopg://somasafe:somasafe@localhost:5432/somasafe")
-REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/0")
+DATABASE_URL = _require("DATABASE_URL")
+REDIS_URL = _require("REDIS_URL")
 
 # Quantization-result lifetime. A served result is kept for SERVE_GRACE_SECONDS
 # so the client can retry the download; an unclaimed one is kept up to
@@ -63,8 +75,8 @@ ACCESS_TOKEN_TTL_SECONDS = int(os.environ.get("ACCESS_TOKEN_TTL_SECONDS", MINUTE
 REFRESH_TOKEN_TTL_SECONDS = int(os.environ.get("REFRESH_TOKEN_TTL_SECONDS", DAY * 30))
 
 # Default account created by scripts.seed (no public registration).
-SEED_USER = os.environ.get("SEED_USER", "somasafe")
-SEED_PASSWORD = os.environ.get("SEED_PASSWORD", "somasafe")
+SEED_USER = _require("SEED_USER")
+SEED_PASSWORD = _require("SEED_PASSWORD")
 SEED_EMAIL = os.environ.get("SEED_EMAIL") or None
 
 # --- Rate limiting ---
