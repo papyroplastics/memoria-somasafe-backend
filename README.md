@@ -54,7 +54,7 @@ worker/    Celery task layer (TensorFlow loads at startup): celery_app.py wires 
            broker + beat schedule; tasks.py holds quantize_submission,
            validate_submission, federated_aggregation and cleanup_results; utils/ has
            the TF-free validation/outlier-filtering helpers tasks.py calls into.
-scripts/   CLI entry points: dataset fetch/build, train / transfer_learn, seed_db,
+scripts/   CLI entry points: dataset fetch/build, train, seed_db,
            export_subject_data, queue_aggregation, and the autoencoder-distillation tools.
 ```
 

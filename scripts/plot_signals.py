@@ -22,7 +22,7 @@ KINDS = ('clean', *ANOMALY_KINDS)
 
 
 def window_views(data_dir, sid, window, index):
-    """Normalized [BVP, ACC] window + its conditioning vector for the clean signal
+    """Raw [BVP, ACC] window + its raw conditioning vector for the clean signal
     and each anomaly kind, all sliced at the same window ``index``. Only BVP carries
     the anomaly; ACC is always the subject's clean signal."""
     subjects_dir = data_dir / CLEAN_SUBDIR
@@ -68,6 +68,9 @@ if __name__ == "__main__":
     fig_in.suptitle(f'{sid} window {index} — normalized BVP')
     fig_rec.suptitle(f'{sid} window {index} — {args.model} reconstruction')
 
+    bvp_mean = trainer.model.signal_mean.numpy()[0]
+    bvp_std = trainer.model.signal_std.numpy()[0]
+
     for ax_in, ax_rec, kind in zip(axs_in, axs_rec, KINDS):
         sig, cond = views[kind]
         bvp = sig[:, 0]
@@ -75,6 +78,9 @@ if __name__ == "__main__":
             sig[None].astype(np.float32),
             cond[None].astype(np.float32),
         )['reconstruction'][0, :, 0].numpy()
+        # eval() reconstructs in z-scored space; denormalize back to raw BVP units
+        # so it's comparable to the raw `bvp` it's plotted against.
+        recon = recon * bvp_std + bvp_mean
 
         ax_in.plot(t, bvp)
         ax_in.set_ylabel(kind)

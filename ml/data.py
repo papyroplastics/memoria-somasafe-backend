@@ -242,7 +242,7 @@ def apply_anomaly(segment: np.ndarray, kind: int, rng: np.random.Generator,
     src = np.linspace(0, n - 1, n)
 
     if kind == 0:    # spike — baseline step (sustained DC offset over the span)
-        scale = sig_range * float(rng.uniform(0.1, 0.25))
+        scale = sig_range * float(rng.uniform(0.05, 0.1))
         seg += scale * float(rng.choice([-1.0, 1.0]))
     elif kind == 1:  # blowup — amplitude blow-up around the local mean
         mean = float(seg.mean())
