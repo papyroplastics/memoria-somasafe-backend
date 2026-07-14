@@ -38,7 +38,7 @@ from common.db import (
     utcnow,
 )
 from common.ratelimit import RateLimit
-from common.storage import weights_artifact_path
+from common.storage import fetch_raw, object_exists, quantize_result_key, weights_artifact_key
 from api.lib.ratelimit import check_limit, record_usage
 from api.lib.session import get_current_user
 
@@ -249,7 +249,7 @@ def _settled_result(session: Session, job_id: uuid.UUID, user: User) -> Response
         return JSONResponse(status_code=422,
                             content={"status": job.status.value, "error": job.error})
 
-    payload = bytes(job.result)
+    payload = fetch_raw(quantize_result_key(job.id))
     job.served_at = utcnow()
     session.add(job)
     session.commit()
@@ -310,16 +310,16 @@ def download_model(artifact: Artifact, key: str, version: int | None = None,
     if weights is None:
         raise HTTPException(status_code=404, detail=f"No weights for model '{key}'")
 
-    path = weights_artifact_path(weights.model_key, weights.version_id,
-                                 weights.id, artifact.value)
-    if not path.exists():
+    object_key = weights_artifact_key(weights.model_key, weights.version_id,
+                                      weights.id, artifact.value)
+    if not object_exists(object_key):
         raise HTTPException(status_code=404,
                             detail=f"No {artifact.value} artifact for model '{key}'")
 
     # The cooldown is spent only once we actually serve the artifact, so the
     # cheap rejections above (unknown version/weights/artifact) don't count.
     try:
-        blob = path.read_bytes()  # zstd-compressed; the client decompresses
+        blob = fetch_raw(object_key)  # zstd-compressed; the client decompresses
 
         headers = {
             FINGERPRINT_HEADER: ver.fingerprint,

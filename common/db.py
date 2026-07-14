@@ -129,8 +129,8 @@ class ModelVersion(IntPKModel, table=True):
 
 class GlobalWeights(IntPKModel, table=True):
     """A snapshot of a model version's global weights. The trainable/quantized
-    serving artifacts baked from these weights live on disk under SERVE_DIR,
-    keyed by this row (common.storage), not in the DB; only their signature is
+    serving artifacts baked from these weights live in object storage, keyed
+    by this row (common.storage), not in the DB; only their signature is
     kept here. Seeded from the trained tflite files and appended to by
     aggregation, which re-exports both artifacts (and signs the quantized one,
     see ml.payload) each round. The active weights of a version are its latest
@@ -214,16 +214,19 @@ class SecureRoundMember(SQLModel, table=True):
 
 
 class QuantizationJob(SQLModel, table=True):
-    """Tracks one quantization request end to end. ``result`` holds the int8
-    .tflite bytes and ``signature`` the server's ECDSA over its canonical model
-    bytes (ml.payload); both are ephemeral — nulled by the cleanup sweep once
-    served (after a grace period) or once expired (unclaimed)."""
+    """Tracks one quantization request end to end. The int8 .tflite result
+    itself lives in object storage (common.storage.quantize_result_key, keyed
+    by this row's own uuid4 id — already unguessable); ``result_size`` is the
+    ephemeral marker of its presence there, and ``signature`` the server's
+    ECDSA over its canonical model bytes (ml.payload). Both are nulled by the
+    cleanup sweep once served (after a grace period) or once expired
+    (unclaimed) — the sweep also deletes the object itself."""
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     submission_id: int = Field(foreign_key="clientdeltasubmission.id")
     model_key: str
     status: JobStatus = Field(default=JobStatus.pending)
-    result: bytes | None = None
+    result_size: int | None = None
     signature: bytes | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
@@ -235,7 +238,7 @@ class QuantizationJob(SQLModel, table=True):
 class Firmware(IntPKModel, table=True):
     """A published firmware build, seeded from a `shared/gen/firmware/{version}`
     export (`firmware/scripts/export_image.py`) and served by the /ota routes.
-    The image itself lives on disk under SERVE_DIR, keyed by ``version``
+    The image itself lives in object storage, keyed by ``version``
     (common.storage); only its ``size`` (raw image bytes) and ``signature`` are
     kept here. ``interface_version`` is the BLE contract an app build must share
     to talk to it; ``supported_contracts`` are the model contract versions it

@@ -23,7 +23,6 @@ db-run:
 db-clean:
 	podman compose down
 	podman volume rm -a
-	rm -rf serve/
 
 api-run:
 	uv run fastapi dev api --host 0.0.0.0

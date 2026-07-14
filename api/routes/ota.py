@@ -9,7 +9,7 @@ from sqlmodel import Session
 from common.config import OTA_DOWNLOAD_COOLDOWN_SECONDS
 from common.db import User, get_firmware, get_session, list_firmware
 from common.ratelimit import RateLimit
-from common.storage import firmware_path
+from common.storage import fetch_raw, firmware_key
 from api.lib.challenge import require_device_owner
 from api.lib.ratelimit import check_limit, record_usage
 from api.lib.session import get_current_user
@@ -59,9 +59,9 @@ def download_firmware(interface: int, version: str,
             "Content-Disposition":
                 f'attachment; filename="somasafe-firmware-{version}.bin"',
         }
-        # zstd-compressed on disk; the client decompresses, then verifies the
+        # zstd-compressed in storage; the client decompresses, then verifies the
         # signature (which covers the raw image) before forwarding it to the device.
-        return Response(content=firmware_path(firmware.version).read_bytes(),
+        return Response(content=fetch_raw(firmware_key(firmware.version)),
                         media_type="application/octet-stream", headers=headers)
     finally:
         record_usage(RateLimit.ota_download, user.id, str(interface),

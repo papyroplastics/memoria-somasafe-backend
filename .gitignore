@@ -1,7 +1,6 @@
 shared
 datasets/
 results/
-serve/
 S*.ssds
 
 # protobuf stub generated from shared/dataset.proto by `make proto`

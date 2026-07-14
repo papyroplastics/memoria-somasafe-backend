@@ -1,7 +1,7 @@
 """Tests for the /ota routes (api.routes.ota).
 
 Firmware rows are inserted directly (random version strings, a random high
-interface number) with their images written to the on-disk serve/ store, so the
+interface number) with their images uploaded to the object store, so the
 tests don't depend on a firmware image having been exported and seeded.
 """
 
@@ -13,7 +13,7 @@ import pytest
 from sqlmodel import select
 
 from common.db import Firmware, Session, engine, utcnow
-from common.storage import decompress, firmware_path, write_compressed
+from common.storage import decompress, delete_object, firmware_key, put_compressed
 
 SIGNATURE_HEADER = "X-Firmware-Signature"
 
@@ -38,14 +38,11 @@ def firmwares():
                              supported_contracts=[1, 2], size=len(BLOB_NEW),
                              signature=SIGNATURE))
         session.commit()
-    write_compressed(firmware_path(old_version), BLOB_OLD)
-    write_compressed(firmware_path(new_version), BLOB_NEW)
+    put_compressed(firmware_key(old_version), BLOB_OLD)
+    put_compressed(firmware_key(new_version), BLOB_NEW)
     yield interface, new_version, old_version
     for version in (old_version, new_version):
-        path = firmware_path(version)
-        path.unlink(missing_ok=True)
-        if path.parent.exists():
-            path.parent.rmdir()
+        delete_object(firmware_key(version))
     with Session(engine) as session:
         for fw in session.exec(
                 select(Firmware).where(Firmware.interface_version == interface)):

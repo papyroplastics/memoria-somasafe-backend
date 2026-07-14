@@ -41,7 +41,13 @@ from common.db import (
 
 from common.ratelimit import clear_model_limits
 from common.secure_agg import dequantize, ring_sum
-from common.storage import compress, weights_artifact_path, write_compressed
+from common.storage import (
+    delete_object,
+    ensure_bucket,
+    put_compressed,
+    quantize_result_key,
+    weights_artifact_key,
+)
 
 from ml.model_list import MODELS
 from ml.payload import sign_model
@@ -62,6 +68,7 @@ _models: dict[str, tuple] = {}
 
 @worker_process_init.connect
 def _load_models(**_) -> None:
+    ensure_bucket()
     for key in MODELS:
         try:
             trainer = MODELS[key].build_trainer(DATASETS_DIR)
@@ -124,7 +131,7 @@ def quantize_submission(job_id: str) -> None:
             optimized = bytes(get_optimized_model(model, rep_dataset))
             job.signature = sign_model(optimized, contract_version, norm_bytes,
                                        SERVER_PRIVATE_KEY_FILE)
-            job.result = compress(optimized)  # served as-is; the client decompresses
+            job.result_size = put_compressed(quantize_result_key(job.id), optimized)
             job.status = JobStatus.done
         except Exception as exc:  # surfaced to the client via the result endpoint
             job.status = JobStatus.failed
@@ -177,13 +184,13 @@ def _bake_and_store(session: Session, key: str, latest, new_weights: np.ndarray,
     )
     session.add(snapshot)
     if export_error is None:
-        # Flush to get the row id the artifacts are keyed by, then write them to
-        # disk (signature covers the raw bytes, so compression is downstream).
+        # Flush to get the row id the artifacts are keyed by, then upload them
+        # (signature covers the raw bytes, so compression is downstream).
         session.flush()
-        write_compressed(weights_artifact_path(key, latest.id, snapshot.id,
-                                               "trainable"), trainable)
-        write_compressed(weights_artifact_path(key, latest.id, snapshot.id,
-                                               "quantized"), quantized)
+        put_compressed(weights_artifact_key(key, latest.id, snapshot.id,
+                                            "trainable"), trainable)
+        put_compressed(weights_artifact_key(key, latest.id, snapshot.id,
+                                            "quantized"), quantized)
     session.commit()
     if export_error is None:
         clear_model_limits(key)
@@ -353,15 +360,16 @@ def secure_aggregation(round_id: int) -> str:
 
 @app.task(name="worker.tasks.cleanup_results")
 def cleanup_results() -> int:
-    """Drop result bytes for jobs that were served (after a grace window) or
-    never claimed (after the TTL). Weight submissions are left untouched."""
+    """Drop results for jobs that were served (after a grace window) or never
+    claimed (after the TTL): the stored object is deleted and the row's
+    ``result_size`` marker nulled. Weight submissions are left untouched."""
     now = utcnow()
     grace_cutoff = now - timedelta(seconds=SERVE_GRACE_SECONDS)
     ttl_cutoff = now - timedelta(seconds=RESULT_TTL_SECONDS)
     cleaned = 0
     with Session(engine) as session:
         stmt = select(QuantizationJob).where(
-            QuantizationJob.result.is_not(None),  # type: ignore
+            QuantizationJob.result_size.is_not(None),  # type: ignore
             or_(
                 and_(
                     QuantizationJob.served_at.is_not(None),  # type: ignore
@@ -371,7 +379,8 @@ def cleanup_results() -> int:
             ),
         )
         for job in session.exec(stmt):
-            job.result = None
+            delete_object(quantize_result_key(job.id))
+            job.result_size = None
             job.signature = None
             job.status = JobStatus.expired
             session.add(job)

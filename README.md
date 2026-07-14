@@ -274,14 +274,17 @@ the app's on-device feature/context recovery and its handling of missing samples
 
 The server is a FastAPI **gateway** in front of a Celery **worker**; the gateway never
 runs ML work directly. Both run on the host with `uv` (`make api-run`, `make worker-run`);
-only the external services — PostgreSQL and Redis — run in containers via `compose.yaml`
-(`make api-serv-up`, podman). Those two are bound to `127.0.0.1` since only the host-run
-processes reach them; the API itself binds `0.0.0.0` so the phone can reach it over the LAN.
+only the external services — PostgreSQL, Redis, and MinIO — run in containers via
+`compose.yaml` (`make db-run`, podman). Those three are bound to `127.0.0.1` since only the
+host-run processes reach them; the API itself binds `0.0.0.0` so the phone can reach it over
+the LAN. The gateway and worker do not need a shared filesystem — they only need to reach the
+same MinIO bucket, which is what makes the worker actually distributable (Celery's premise)
+instead of implicitly assuming a co-located disk.
 
-- **Gateway (`api/`, no TensorFlow):** serves the model artifacts (from the on-disk `serve/`
-  store, keyed by the active `GlobalWeights` row), accepts weight-delta uploads, persists them,
-  enqueues worker jobs, and exposes a result endpoint the client polls. Fast to start since it
-  never imports TF.
+- **Gateway (`api/`, no TensorFlow):** serves the model artifacts (fetched from the MinIO
+  object store and streamed back, keyed by the active `GlobalWeights` row), accepts
+  weight-delta uploads, persists them, enqueues worker jobs, and exposes a result endpoint the
+  client polls. Fast to start since it never imports TF.
 - **Worker (`worker/tasks.py`):** restores uploaded weights into the model, converts it to
   an int8 `.tflite` against the per-model calibration dataset
   (`ml/saving.py:get_optimized_model`) and signs it, validates submit-only uploads, and
@@ -380,10 +383,10 @@ FedAvg round per initialized model:
    The result is stored as a new `GlobalWeights` row along with the next round's
    `mse_threshold` (a margin over the worst deviation accepted this round).
 6. **Artifact baking:** the averaged weights are restored into the cached model and both
-   serving artifacts are re-exported and written to the `serve/` store keyed by the new row —
+   serving artifacts are re-exported and uploaded to MinIO keyed by the new row —
    the LiteRT-trainable `.tflite` and the signed int8 `.tflite` — so a client always pulls a
    file with the current global parameters already inside. If an export fails the row is stored
-   with `valid = false` and no files: clients keep pulling the previous snapshot and the
+   with `valid = false` and no objects: clients keep pulling the previous snapshot and the
    window's submissions stay consumed.
 7. **Rate-limit reset:** on a successful round the model's download/submission counters are
    cleared for every user (`ratelimit.clear_model_limits`), so clients can immediately
@@ -507,27 +510,32 @@ trusts what the seed wrote to the DB.
   (e.g. `queue_aggregation`/`fed_client` block on the aggregation summary instead of polling
   `GlobalWeights`); results expire after `RESULT_TTL_SECONDS`.
 - **Redis** is the Celery broker.
-- **On-disk blob store, no object store.** The served blobs — model artifacts and firmware
-  images — live in a gitignored `serve/` tree (`SERVE_DIR`, `common/storage.py`) at paths
-  derived purely from the owning DB row (`serve/models/<key>/<version_id>/<weights_id>/{trainable,
-  quantized}.tflite`, `serve/firmware/<version>/firmware.bin`), so a handler locates a file
-  from the row it already loaded — no filename column, assuming the tree and DB stay in sync
-  (the seed script rebuilds the tree from scratch). The DB keeps only what the server itself
-  reads: the raw float32 `weights` on `GlobalWeights` (aggregation math), the artifact/firmware
-  `signature`, and firmware `size`. Quantization-job `result`s are the exception — small and
-  ephemeral, they stay as `BYTEA` on the job row. Rollback is still a `valid` flag flip; the
-  previous row's files are untouched. This drops the planned "distribution worker" and S3/MinIO
-  entirely (MinIO remains a drop-in if real object storage is ever wanted).
+- **MinIO (S3-compatible object storage)** holds every served blob — model artifacts, firmware
+  images, and per-user quantization results (`common/storage.py`) — at keys derived purely from
+  the owning DB row (`models/<key>/<version_id>/<weights_id>/{trainable,quantized}.tflite.zst`,
+  `firmware/<version>/firmware.bin.zst`, `quantize-results/<job_id>.tflite.zst`), so a handler
+  locates an object from the row it already loaded — no filename column, assuming the bucket and
+  DB stay in sync (the seed script repopulates it from scratch). This replaced an earlier local-disk
+  design (`serve/` tree) once the worker stopped being assumed to share a filesystem with the API —
+  Celery is a distributed-computing tool, so pretending its workers and the gateway share a mount
+  was the wrong assumption from the start. The API always proxies: it fetches the object
+  server-side and streams it back, so auth and per-user rate limiting are unchanged and MinIO is
+  never exposed to the client directly (no presigned URLs). The DB keeps only what the server
+  itself reads: the raw float32 `weights` on `GlobalWeights` (aggregation math), the
+  artifact/firmware `signature`, firmware `size`, and — for quantization jobs — `result_size` as
+  a presence marker for the object in MinIO (the job's own `uuid4` id doubles as its unguessable
+  object key, so no separate random token was needed). Rollback is still a `valid` flag flip; the
+  previous row's objects are untouched.
 - **Everything served is zstd-compressed.** Blobs are stored compressed and served as-is; the
   client decompresses (any zstd library, a few lines). Signatures cover the *raw* bytes, so the
   server compresses after signing and the client verifies after decompressing — compression is
   a pure transport wrapper, invisible to the signing scheme.
 
 **Result lifecycle.** A `done` result is streamed on request and stamped `served_at`. A Celery
-beat sweep (`cleanup_results`, in-process via `celery worker -B`) nulls the result bytes (and
-signature) once a served result is older than `SERVE_GRACE_SECONDS` (5 min) or an unclaimed one
-is older than `RESULT_TTL_SECONDS` (1 h), flipping the job to `expired`. Weight submissions are
-never reaped.
+beat sweep (`cleanup_results`, in-process via `celery worker -B`) deletes the result object from
+MinIO and nulls the row's `result_size` (and `signature`) once a served result is older than
+`SERVE_GRACE_SECONDS` (5 min) or an unclaimed one is older than `RESULT_TTL_SECONDS` (1 h),
+flipping the job to `expired`. Weight submissions are never reaped.
 
 ## Auth & rate limiting
 
@@ -584,7 +592,7 @@ interface yields `[]`); `GET /ota/download/{interface}/{version}` streams the ra
 with the server's ECDSA signature over it in `X-Firmware-Signature`, which the app
 forwards to the device for verification against its factory `srv_pub`.
 
-Images live in the `serve/` store (zstd-compressed, keyed by version), like the model
+Images live in MinIO (zstd-compressed, keyed by version), like the model
 artifacts; the `Firmware` row keeps only the raw `size` and the mandatory `signature`.
 `scripts/seed_db.py` publishes them: it scans a directory of exports (`--firmware-dir`,
 default `shared/gen/firmware/`, populated by `make export-image` in `firmware/`), signs
