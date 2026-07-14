@@ -60,3 +60,27 @@ class LiteRTClient:
         keyed by output name. Extra datapoint tensors (targets the eval signature
         doesn't take, like the MLP's labels) are matched out by ``_run`` by name."""
         return self._run("eval", [t.numpy() for t in datapoint])
+
+
+def infer_int8(tflite_bytes: bytes, X_norm: np.ndarray, signature: str = "infer") -> np.ndarray:
+    """Runs a quantized int8 model's single-input/single-output signature over
+    per-row logits, quantizing/dequantizing with the tensors' own scale/zero-point
+    exactly as the on-device int8 runtime does."""
+    model = CompiledModel.from_buffer(tflite_bytes)
+    sig = model.get_signature_list()[signature]
+    in_name, out_name = sig["inputs"][0], sig["outputs"][0]
+    in_details = model.get_input_tensor_details(signature)[in_name]
+    out_details = model.get_output_tensor_details(signature)[out_name]
+    iscale, izp = in_details["quantization"]
+    oscale, ozp = out_details["quantization"]
+
+    out = np.empty(len(X_norm), dtype=np.float32)
+    for i, x in enumerate(X_norm):
+        q = np.clip(np.round(x / iscale + izp), -128, 127).astype(np.int8).reshape(in_details["shape"])
+        input_buffer = model.create_input_buffer_by_name(signature, in_name)
+        input_buffer.write(q)
+        output_buffer = model.create_output_buffer_by_name(signature, out_name)
+        model.run_by_name(signature, {in_name: input_buffer}, {out_name: output_buffer})
+        o = float(output_buffer.read(1, np.int8)[0])
+        out[i] = (o - ozp) * oscale
+    return out

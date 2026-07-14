@@ -26,6 +26,7 @@ from ml.data import MIXED_FEATURE_SUBDIR, get_sorted_paths
 from ml.metrics import classification_report
 from ml.model_list import MODELS
 from ml.saving import load_trainable_weights, get_optimized_model
+from .common.litert import infer_int8
 from .common.post_train import get_report_dir, write_metrics_csv
 
 VARIANTS = ('global_float', 'global_int8', 'personal_float', 'personal_int8')
@@ -37,25 +38,6 @@ def eval_logits_float(model, X: np.ndarray) -> np.ndarray:
     for i, x in enumerate(X):
         logits = model.eval(tf.constant(x.reshape(1, -1), dtype=tf.float32))['logits']
         out[i] = float(np.asarray(logits).reshape(-1)[0])
-    return out
-
-
-def eval_logits_int8(tflite_bytes: bytes, X_norm: np.ndarray) -> np.ndarray:
-    """Per-window logits from the int8 model. The `infer` graph takes already-normalized
-    features, so ``X_norm`` must be z-scored; inputs/outputs are int8, quantized here with
-    the tensors' own scale/zero-point."""
-    interp = tf.lite.Interpreter(model_content=tflite_bytes)
-    interp.allocate_tensors()
-    inp, outp = interp.get_input_details()[0], interp.get_output_details()[0]
-    iscale, izp = inp['quantization']
-    oscale, ozp = outp['quantization']
-    out = np.empty(len(X_norm), dtype=np.float32)
-    for i, x in enumerate(X_norm):
-        q = np.clip(np.round(x / iscale + izp), -128, 127).astype(np.int8).reshape(inp['shape'])
-        interp.set_tensor(inp['index'], q)
-        interp.invoke()
-        o = float(interp.get_tensor(outp['index']).astype(np.float32).reshape(-1)[0])
-        out[i] = (o - ozp) * oscale
     return out
 
 
@@ -153,9 +135,9 @@ if __name__ == "__main__":
 
         logits = {
             'global_float': eval_logits_float(base_trainer.model, X_ev),
-            'global_int8': eval_logits_int8(global_int8, X_ev_norm),
+            'global_int8': infer_int8(global_int8, X_ev_norm),
             'personal_float': eval_logits_float(trainer.model, X_ev),
-            'personal_int8': eval_logits_int8(personal_int8, X_ev_norm),
+            'personal_int8': infer_int8(personal_int8, X_ev_norm),
         }
         row = {'subject': sid, 'n_eval': len(X_ev)}
         for v in VARIANTS:

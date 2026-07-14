@@ -42,6 +42,7 @@ from common.ratelimit import RateLimit
 from common.storage import fetch_raw, object_exists, quantize_result_key, weights_artifact_key
 from api.lib.ratelimit import check_limit, record_usage
 from api.lib.session import get_current_user
+from api.lib.challenge import require_device_owner
 
 router = APIRouter(prefix="/model")
 

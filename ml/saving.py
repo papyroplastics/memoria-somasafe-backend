@@ -2,6 +2,7 @@ import tempfile
 from pathlib import Path
 import numpy as np
 import tensorflow as tf
+from ai_edge_litert.compiled_model import CompiledModel
 from .models.common import TrainableModel, Trainer
 
 def optimize_saved_model(rep_dataset: tf.data.Dataset, saved_dir: Path) -> bytes:
@@ -53,9 +54,20 @@ def get_optimized_model(model: TrainableModel, rep_dataset: tf.data.Dataset) -> 
 
 
 def load_trainable_weights(tflite_path: Path) -> np.ndarray:
-    interpreter = tf.lite.Interpreter(model_path=str(tflite_path))
-    save = interpreter.get_signature_runner('save')
-    return np.asarray(save()['weights'], dtype=np.float32)
+    """Runs the trainable .tflite's `save` signature through LiteRT's
+    CompiledModel — the same runtime the on-device client trains through —
+    to read back the baked-in weights with no inputs to feed."""
+    model = CompiledModel.from_file(str(tflite_path))
+    signature = 'save'
+    output_map = {
+        name: model.create_output_buffer_by_name(signature, name)
+        for name in model.get_signature_list()[signature]['outputs']
+    }
+    model.run_by_name(signature, {}, output_map)
+    details = model.get_output_tensor_details(signature)
+    shape = details['weights']['shape']
+    count = int(np.prod(shape)) if len(shape) else 1
+    return output_map['weights'].read(count, np.float32).astype(np.float32)
 
 
 def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset: tf.data.Dataset | None,

@@ -1,8 +1,7 @@
 """Tests for the /model routes (api.routes.model).
 
-These stop at the enqueue/poll boundary: no worker runs, so a submitted job
-stays ``pending`` (202) and the int8 result is never produced (that path needs
-TensorFlow and is covered by the worker, not here).
+These assume a worker is running against the same queue/DB, so a submitted
+quantize job is expected to actually complete and produce a result.
 """
 
 import pytest
@@ -16,13 +15,17 @@ WEIGHTS_ID_HEADER = "X-Weights-ID"
 OCTET_STREAM = {"Content-Type": "application/octet-stream"}
 
 
-def _model_with_weights(client, headers, submission_type: str | None = None) -> dict:
+def _model_with_weights(client, headers, submission_type: str | None = None,
+                        exclude_submission_type: str | None = None) -> dict:
     resp = client.get("/model/list", headers=headers)
     assert resp.status_code == 200, resp.text
     for model in resp.json():
         if model["weights_version"] is None:
             continue
         if submission_type is not None and model["submission_type"] != submission_type:
+            continue
+        if exclude_submission_type is not None and \
+                model["submission_type"] == exclude_submission_type:
             continue
         return model
     pytest.skip(f"no seeded {submission_type or ''} model has weights; "
@@ -87,8 +90,7 @@ def test_download_unknown_version_404(client, auth_headers, owned_device):
     assert resp.status_code == 404
 
 
-def test_quantize_enqueues_and_polls_pending(client, auth_headers, owned_device,
-                                             monkeypatch):
+def test_quantize_enqueues_and_polls_pending(client, auth_headers, owned_device):
     model = _model_with_weights(client, auth_headers, "quantize")
     resp = _download_trainable(client, auth_headers, model["key"])
     weights_id = int(resp.headers[WEIGHTS_ID_HEADER])
@@ -99,12 +101,10 @@ def test_quantize_enqueues_and_polls_pending(client, auth_headers, owned_device,
     assert submit.status_code == 202, submit.text
     job_id = submit.json()["job_id"]
 
-    # No worker consumes the queue, so the job stays pending. Keep the long-poll
-    # short so the endpoint returns 202 without blocking the full timeout.
-    monkeypatch.setattr("api.routes.model.RESULT_POLL_TIMEOUT_SECONDS", 0.1)
+    # The worker is expected to be running locally, so the long-poll should
+    # settle well within the default timeout instead of hitting it.
     result = client.get(f"/model/quantize/result/{job_id}", headers=auth_headers)
-    assert result.status_code == 202
-    assert result.json()["status"] == "pending"
+    assert result.status_code == 200, result.text
 
 
 def test_quantize_unknown_weights_400(client, auth_headers, owned_device):
@@ -140,8 +140,8 @@ def test_quantize_daily_limit(client, auth_headers, owned_device):
 
 
 def test_quantize_rejects_raw_model(client, auth_headers, owned_device):
-    """A submit-only (raw) model has no quantize path — 404, not 403."""
-    model = _model_with_weights(client, auth_headers, "raw")
+    """A model whose submission type isn't 'quantize' has no quantize path — 404, not 403."""
+    model = _model_with_weights(client, auth_headers, exclude_submission_type="quantize")
     resp = _download_trainable(client, auth_headers, model["key"])
     weights_id = int(resp.headers[WEIGHTS_ID_HEADER])
     resp = client.post(f"/model/submit/quantize/{model['key']}/{weights_id}",
