@@ -53,7 +53,8 @@ SECURE_CLIP_BOUND = float(os.environ.get("SECURE_CLIP_BOUND", 1.0))
 # updates plus one own value reveals the third).
 SECURE_MIN_MEMBERS = int(os.environ.get("SECURE_MIN_MEMBERS", 3))
 
-# --- Auth (stateful opaque tokens, see api.routes.auth) ---
+# --- Auth (stateful opaque tokens: access in Redis, refresh in Postgres — see
+# api.lib.session and api.routes.auth) ---
 ACCESS_TOKEN_TTL_SECONDS = int(os.environ.get("ACCESS_TOKEN_TTL_SECONDS", MINUTE * 30))
 REFRESH_TOKEN_TTL_SECONDS = int(os.environ.get("REFRESH_TOKEN_TTL_SECONDS", DAY * 30))
 

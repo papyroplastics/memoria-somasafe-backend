@@ -506,10 +506,7 @@ trusts what the seed wrote to the DB.
   result backend** is used only so callers can await a queued task and read its return value
   (e.g. `queue_aggregation`/`fed_client` block on the aggregation summary instead of polling
   `GlobalWeights`); results expire after `RESULT_TTL_SECONDS`.
-- **Redis** is the Celery broker. RabbitMQ was considered but rejected: the workload is a few
-  low-frequency jobs, not high-throughput routing, and Redis is a single lightweight service
-  that will also host rate-limit counters later — its delivery guarantees are more than enough
-  here.
+- **Redis** is the Celery broker.
 - **On-disk blob store, no object store.** The served blobs — model artifacts and firmware
   images — live in a gitignored `serve/` tree (`SERVE_DIR`, `common/storage.py`) at paths
   derived purely from the owning DB row (`serve/models/<key>/<version_id>/<weights_id>/{trainable,
@@ -554,8 +551,7 @@ interface for OTA). Enforcement is **two-phase**: the endpoint checks the limit 
 front (`check_limit`) but spends a slot (`record_usage`) only *after* it has done the
 work, so a request rejected by the validity checks (or the limit itself) never counts
 against the quota — while a request that got as far as doing real work is charged even
-if that work then fails. (Splitting the check from the spend makes the limit soft under
-concurrency; fine at this scale.)
+if that work then fails.
 
 | Endpoint | Limit |
 |----------|-------|

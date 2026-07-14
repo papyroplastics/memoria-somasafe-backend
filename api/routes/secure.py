@@ -29,8 +29,9 @@ from common.db import (
     utcnow,
 )
 from common.secure_agg import RING_MODULUS
-from .auth import get_current_user
-from .model import require_device_owner, require_submission_type, router
+from api.lib.session import get_current_user
+from api.lib.challenge import require_device_owner
+from .model import require_submission_type, router
 
 _KA_KEY_LEN = 65
 

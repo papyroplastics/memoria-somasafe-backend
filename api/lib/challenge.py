@@ -12,9 +12,12 @@ user_id(u64) ‖ serial(ascii).
 
 import json
 import uuid
+from sqlmodel import Session
+from fastapi import HTTPException
 
 from common.config import DEVICE_CHALLENGE_TTL_SECONDS
 from common.redis import client
+from common.db import user_owns_device, User
 
 _PREFIX = "device:challenge:"
 
@@ -39,3 +42,10 @@ def take(instance_id: str) -> dict | None:
     """Atomically fetch and delete a challenge (one-shot). None if absent/expired."""
     raw = client.getdel(_PREFIX + instance_id)
     return json.loads(raw) if raw is not None else None
+
+def require_device_owner(session: Session, user: User) -> None:
+    if not user_owns_device(session, user.id):
+        raise HTTPException(status_code=403, detail="No attested device for this user")
+
+
+

@@ -10,9 +10,9 @@ from common.config import OTA_DOWNLOAD_COOLDOWN_SECONDS
 from common.db import User, get_firmware, get_session, list_firmware
 from common.ratelimit import RateLimit
 from common.storage import firmware_path
+from api.lib.challenge import require_device_owner
 from api.lib.ratelimit import check_limit, record_usage
-from .auth import get_current_user
-from .model import require_device_owner
+from api.lib.session import get_current_user
 
 router = APIRouter(prefix="/ota")
 

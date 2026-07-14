@@ -35,13 +35,12 @@ from common.db import (
     get_session,
     get_version_weights,
     list_model_defs,
-    user_owns_device,
     utcnow,
 )
 from common.ratelimit import RateLimit
 from common.storage import weights_artifact_path
 from api.lib.ratelimit import check_limit, record_usage
-from .auth import get_current_user
+from api.lib.session import get_current_user
 
 router = APIRouter(prefix="/model")
 
@@ -92,11 +91,6 @@ def require_model(session: Session, key: str) -> ModelDefinition:
     if meta is None:
         raise HTTPException(status_code=404, detail=f"Model '{key}' not found")
     return meta
-
-
-def require_device_owner(session: Session, user: User) -> None:
-    if not user_owns_device(session, user.id):
-        raise HTTPException(status_code=403, detail="No attested device for this user")
 
 
 def require_submission_type(session: Session, key: str,

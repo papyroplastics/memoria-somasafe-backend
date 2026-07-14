@@ -67,18 +67,18 @@ class User(IntPKModel, table=True):
 
 
 class AuthSession(SQLModel, table=True):
-    """A stateful login session. Tokens are opaque random strings; only their
-    sha256 is stored, so a row can be revoked to invalidate a session at once."""
+    """A stateful login session's long-lived half. Only the refresh token lives
+    here (opaque random string, only its sha256 stored, so a row can be revoked
+    to invalidate refresh at once); the short-lived access token is validated
+    against Redis instead (api.lib.session) — a Postgres row per request would be
+    pure overhead for a token that expires in minutes anyway."""
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
-    access_hash: str = Field(unique=True, index=True)
     refresh_hash: str = Field(unique=True, index=True)
-    access_expires_at: datetime
     refresh_expires_at: datetime
     revoked: bool = False
     created_at: datetime = Field(default_factory=utcnow)
-    last_used_at: datetime = Field(default_factory=utcnow)
 
 
 class Device(SQLModel, table=True):

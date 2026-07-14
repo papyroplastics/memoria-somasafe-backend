@@ -32,7 +32,7 @@ from sqlmodel import Session, select
 from api.lib import challenge
 from common.config import DEVICE_ATTEST_COOLDOWN_SECONDS
 from common.db import Device, User, get_session, utcnow
-from .auth import get_current_user
+from api.lib.session import get_current_user
 
 router = APIRouter(prefix="/device")
 
