@@ -1,4 +1,3 @@
-from numpy import dtype
 from abc import ABC, abstractmethod
 from typing import Protocol
 from pathlib import Path
@@ -7,12 +6,14 @@ import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
 
+from common.config import DISABLE_TQDM
+
 from ..optimizers import Adam
 from ..layers import Dense, relu
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
 from ..data import (
     DatasetUnavailibleError, CLEAN_SUBDIR, BVP_RATE,
-    windowed_conditional, get_sorted_paths, combine_datasets,
+    windowed_conditional, get_sorted_paths, combine_datasets, pool_datasets,
     stacked_signal, norm_stats, window_cond_vectors,
     load_context_norm_params, load_static_norm_params,
 )
@@ -231,14 +232,16 @@ class Trainer(ABC):
         ``prefix`` labels the progress bar (e.g. ``epoch=3/20``)."""
         datapoints = list(dataset)
         outputs = [self.model.eval(*dp[:self.n_eval_inputs])
-                   for dp in tqdm(datapoints, desc=f'{prefix} eval'.strip(), leave=False)]
+                   for dp in tqdm(datapoints, desc=f'{prefix} eval'.strip(),
+                                  leave=False, disable=DISABLE_TQDM)]
         return self.eval_metrics(datapoints, outputs)
 
     def train_epoch(self, dataset: tf.data.Dataset, prefix: str = '') -> float:
         """One pass over ``dataset``; returns mean training loss. """
         batches = len(dataset)
         total = 0.0
-        for batch in tqdm(dataset, total=batches, desc=f'{prefix} train'.strip(), leave=False):
+        for batch in tqdm(dataset, total=batches, desc=f'{prefix} train'.strip(), 
+                          leave=False, disable=DISABLE_TQDM):
             total += float(self.model.train(*batch)['loss'])
         return total / batches if batches else 0.0
 
@@ -246,50 +249,54 @@ class Trainer(ABC):
         """Optional model-specific artifact."""
         pass
 
-    def subject_datasets(
-            self, data_root: Path, train_split: float
-        ) -> tuple[list[tf.data.Dataset], tf.data.Dataset]:
-        """Per-subject datasets for federated trainig loop"""
-
+    def subject_dirs(self, data_root: Path) -> list[Path]:
         data_dir = data_root / self.data_subdir
         subject_dirs = get_sorted_paths(data_dir)
         if not subject_dirs:
             raise DatasetUnavailibleError(data_dir)
+        return subject_dirs
 
-        subj_train, subj_eval = [], []
-        for d in subject_dirs:
+    def all_subject_datasets(self, data_root: Path) -> list[tf.data.Dataset]:
+        """Every subject's batched, cached dataset, in subject order."""
+        datasets = []
+        for d in self.subject_dirs(data_root):
             ds = self.subject_dataset(d)
-            ds = ds.shuffle(len(ds)).batch(self.batch_size, drop_remainder=True)
+            datasets.append(
+                ds.shuffle(len(ds), reshuffle_each_iteration=False)
+                  .batch(self.batch_size, drop_remainder=True)
+                  .cache())
+        return datasets
 
-            n_train = int(len(ds) * train_split)
-            subj_train.append(ds.take(n_train).cache())
-            subj_eval.append(ds.skip(n_train).cache())
+    def subject_datasets(
+            self, data_root: Path, eval_subjects: int
+        ) -> tuple[list[tf.data.Dataset], list[tf.data.Dataset]]:
+        """Per-subject datasets for the federated loop, split at *subject* granularity:
+        the last ``eval_subjects`` are held out whole, so a metric measured on them is
+        generalization to an unseen subject rather than to unseen windows of a subject
+        the model already trained on. ``eval_subjects=0`` holds out nothing."""
+        # Checked against the subject dirs before the datasets are built: an out-of-range
+        # argument should fail now, not after windowing every subject.
+        available = len(self.subject_dirs(data_root))
+        if eval_subjects < 0:
+            raise ValueError(f"eval_subjects must be >= 0, got {eval_subjects}")
+        if eval_subjects >= available:
+            raise ValueError(f"eval_subjects {eval_subjects} leaves no training subjects "
+                             f"({available} available)")
 
-        return subj_train, combine_datasets(subj_eval).cache()
+        datasets = self.all_subject_datasets(data_root)
+        if eval_subjects == 0:
+            return datasets, []
+        return datasets[:-eval_subjects], datasets[-eval_subjects:]
 
     def combined_datasets(
-            self, data_root: Path, train_split: float
-        ) -> tuple[tf.data.Dataset, tf.data.Dataset]:
-        """Joint subject dataset for normal training loop"""
-
-        data_dir = data_root / self.data_subdir
-        subject_dirs = get_sorted_paths(data_dir)
-        if not subject_dirs:
-            raise DatasetUnavailibleError(data_dir)
-
-        subject_datasets = [
-            self.subject_dataset(d)
-            for d in subject_dirs
-        ]
-
-        ds = combine_datasets([
-                d.shuffle(len(d), reshuffle_each_iteration=False)
-                for d in subject_datasets
-            ]).batch(self.batch_size, drop_remainder=True)
-
-        n_train = int(len(ds) * train_split)
-
-        return ds.take(n_train).cache(), ds.skip(n_train).cache()
+            self, data_root: Path, eval_subjects: int
+        ) -> tuple[tf.data.Dataset, tf.data.Dataset | None]:
+        """The same subject-level split as ``subject_datasets``, pooled into one train and
+        one eval dataset for the normal loop — so a centralized run and a federated run at
+        the same ``eval_subjects`` train on the same data and score on the same held-out
+        subjects, and their curves are comparable."""
+        train, evaluation = self.subject_datasets(data_root, eval_subjects)
+        return pool_datasets(train), combine_datasets(evaluation) if evaluation else None
 
 class TrainerBuilder(Protocol):
     def __call__(self, data_root: Path, batch_size: int | None = None) -> Trainer: ...

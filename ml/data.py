@@ -10,10 +10,11 @@ call the load helpers here.
 
 import pickle as pkl
 from pathlib import Path
-
 import numpy as np
 import pandas as pd
 import tensorflow as tf
+
+from common.config import SEED
 
 RAW_SUBDIR = 'PPG_FieldStudy'
 CLEAN_SUBDIR = 'clean-signals'
@@ -41,7 +42,6 @@ MAX_ANOMALY_WINDOWS = 30
 # flatline is below the AE's reconstruction error floor (catch it with a signal-
 # quality gate instead) and wander is physiological (already in the clean signal).
 ANOMALY_KINDS = ('spike', 'blowup', 'noise', 'timewarp', 'afib')
-FEATURE_SEED = 1234
 N_FEATURES = 17
 EPS = 1e-8
 
@@ -333,7 +333,7 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
     ANOMALY_KINDS, apply it to every window of each subject's clean BVP. Layout:
     ``<anomalous_dir>/<kind>/S*/bvp.npy``. ACC is unchanged (load from clean-signals).
     """
-    rng = np.random.default_rng(FEATURE_SEED)
+    rng = np.random.default_rng(SEED)
 
     for kind, name in enumerate(ANOMALY_KINDS):
         kind_dir = anomalous_dir / name
@@ -356,7 +356,7 @@ def create_mixed_signals(subjects_dir: Path, mixed_dir: Path):
     feature-mlp training.
     """
     mixed_dir.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(FEATURE_SEED)
+    rng = np.random.default_rng(SEED)
 
     for subject_dir in get_sorted_paths(subjects_dir):
         subject_id = subject_dir.name
@@ -612,6 +612,13 @@ def combine_datasets(datasets: list[tf.data.Dataset]) -> tf.data.Dataset:
     return (tf.data.Dataset
             .sample_from_datasets(datasets, rerandomize_each_iteration=False)
             .apply(tf.data.experimental.assert_cardinality(count)))
+
+
+def pool_datasets(datasets: list[tf.data.Dataset]) -> tf.data.Dataset:
+    """Merge per-subject datasets into the single stream a centralized loop trains on,
+    shuffled so gradient steps are not ordered by subject."""
+    pooled = combine_datasets(datasets)
+    return pooled.shuffle(len(pooled), reshuffle_each_iteration=False)
 
 
 def conditional_windows(subjects_dir: Path, sid: str, window_size: int,

@@ -9,14 +9,14 @@ import argparse
 import matplotlib.pyplot as plt
 import numpy as np
 
-from common.config import DATASETS_DIR, MODELS_DIR
+from common.config import DATASETS_DIR
 from ml.model_list import MODELS
 from ml.data import (
     CLEAN_SUBDIR, ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_RATE,
     conditional_windows, get_sorted_paths,
 )
-from .common.post_train import get_report_dir
-from .common.autoencoders import load_autoencoder
+from ..common.post_train import get_report_dir, write_summary
+from ..common.autoencoders import load_autoencoder
 
 KINDS = ('clean', *ANOMALY_KINDS)
 
@@ -93,10 +93,32 @@ if __name__ == "__main__":
     axs_rec[-1].set_xlabel('seconds')
     axs_rec[0].legend(loc='upper right')
 
-    report_dir = get_report_dir(MODELS_DIR / args.model)
+    report_dir = get_report_dir(args.model)
     in_path = report_dir / 'signals.png'
     rec_path = report_dir / 'signals_reconstructed.png'
     fig_in.savefig(in_path)
     fig_rec.savefig(rec_path)
     print(f"saved input windows to {in_path}")
     print(f"saved reconstructions to {rec_path}")
+
+    sample = {'subject': sid, 'window': index, 'of_windows': n_windows, 'seed': args.seed}
+    axes = {'x_axis': {'name': 'seconds', 'range': [0, 8], 'sample_rate_hz': BVP_RATE},
+            'y_axis': {'name': 'raw BVP amplitude', 'units': 'sensor units'}}
+
+    write_summary(report_dir / 'signals.yaml',
+        shows=f"Raw BVP signal windows for subject {sid}: one 8 s window per row, the same "
+              f"window under the clean signal and each synthetic anomaly kind.",
+        rows={'order': 'top to bottom', 'kinds': list(KINDS)},
+        **axes,
+        sample=sample,
+        note='only BVP carries the anomaly; ACC stays the subject\'s clean signal',
+        backs='report Sec. 4.1 (illustrative)')
+    write_summary(report_dir / 'signals_reconstructed.yaml',
+        shows=f"The same {len(KINDS)} windows with the {args.model} autoencoder's "
+              f"reconstruction (denormalized to raw BVP units) overlaid on the input: the "
+              f"conditioned autoencoder tracks clean rhythm and departs on "
+              f"integrity/rhythm anomalies.",
+        rows={'order': 'top to bottom', 'kinds': list(KINDS)},
+        **axes,
+        sample=sample,
+        backs='report Sec. 4.1 (illustrative)')

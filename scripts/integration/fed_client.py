@@ -32,7 +32,7 @@ import numpy as np
 from sqlmodel import Session
 
 from common.celery_tasks import FED_AGG_TASK, SECURE_AGG_TASK
-from common.config import DATASETS_DIR, MODELS_DIR, SECURE_MIN_MEMBERS
+from common.config import DATASETS_DIR, SECURE_MIN_MEMBERS
 from common.db import SubmissionType, engine, get_latest_version
 from common.secure_agg import (
     dequantize,
@@ -57,7 +57,7 @@ from scripts.common.api import (
     wait_for_round,
 )
 from scripts.common.litert import LiteRTClient
-from scripts.common.post_train import get_report_dir, plot_metric, write_metrics_csv
+from scripts.common.post_train import get_report_dir, plot_metric, write_metrics_csv, write_summary
 from scripts.common.secure import seal_round
 
 
@@ -166,24 +166,14 @@ def _strategy_for(submission_type: SubmissionType):
     return DenseStrategy()
 
 
-def _split_eval(subject_datasets, eval_subjects):
-    if eval_subjects >= len(subject_datasets):
-        raise SystemExit(f"--eval-subjects {eval_subjects} leaves no training subjects "
-                         f"({len(subject_datasets)} available)")
-    if eval_subjects <= 0:
-        return subject_datasets, None
-    # Materialize each held-out subject and concatenate at the Python level, so the
-    # already-cached subject datasets are never re-combined into a new tf pipeline.
-    eval_data = [dp for ds in subject_datasets[-eval_subjects:] for dp in list(ds)]
-    return subject_datasets[:-eval_subjects], eval_data
-
-
 def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
     spec = MODELS[key]
     strategy = _strategy_for(spec.submission_type)
     trainer = spec.build_trainer(DATASETS_DIR)
-    subject_datasets, _ = trainer.subject_datasets(DATASETS_DIR, train_split=1.0)
-    client_datasets, eval_data = _split_eval(subject_datasets, eval_subjects)
+    client_datasets, held_out = trainer.subject_datasets(DATASETS_DIR, eval_subjects)
+    # Materialize each held-out subject and concatenate at the Python level, so the
+    # already-cached subject datasets are never re-combined into a new tf pipeline.
+    eval_data = [dp for ds in held_out for dp in list(ds)]
     strategy.setup(len(client_datasets))
 
     print(f"model={key} type={spec.submission_type.value} clients={len(client_datasets)} "
@@ -211,9 +201,27 @@ def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
     logout(base, token)
     score(LiteRTClient(artifact, trainer.dataset_tensors), rounds)
 
-    report_dir = get_report_dir(MODELS_DIR / key, strategy.report_subdir)
+    report_dir = get_report_dir(key, strategy.report_subdir)
     write_metrics_csv(history, report_dir, "convergence.csv")
     plot_metric(history, "round", trainer.primary_metric, report_dir, "convergence.png")
+    metric = trainer.primary_metric
+    values = [h[metric] for h in history]
+    write_summary(report_dir / "convergence.yaml",
+        shows=f"Integration-path convergence of {key} ({spec.submission_type.value}), "
+              f"driven over the real HTTP API by the headless "
+              f"{strategy.report_subdir} client.",
+        x_axis={'name': 'global round', 'range': [0, rounds],
+                'note': '0 = initial global weights, '
+                        f'{rounds} = after the last aggregation'},
+        y_axis={'name': metric, 'better': 'lower' if 'error' in metric else 'higher'},
+        split={'clients': f'{len(client_datasets)} training subjects (test_N), one '
+                          f'submission each per round',
+               'eval_subjects': eval_subjects,
+               'holdout': f'leave-{eval_subjects}-subject-out'},
+        headline={'start': values[0], 'end': values[-1], 'delta': values[-1] - values[0]},
+        purpose='integration verification (Sec. 5.1), not a reported convergence curve — '
+                'those come from the simulated federated loop (scripts.system.train '
+                '--loop federated, plotted by scripts.figures.plot_convergence)')
 
 
 def main() -> None:

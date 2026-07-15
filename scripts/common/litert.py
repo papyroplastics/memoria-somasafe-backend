@@ -5,9 +5,26 @@ phone does, so a headless harness exercises the same runtime as the device.
 """
 
 import numpy as np
+from ai_edge_litert import schema_py_generated as tflite_schema
 from ai_edge_litert.compiled_model import CompiledModel
 from tqdm import tqdm
 
+from common.config import DISABLE_TQDM
+
+
+def _tensor_quantization(tflite_bytes: bytes, name: str) -> tuple[float, int]:
+    """Per-tensor (scale, zero_point) for a named tensor, read straight from the
+    flatbuffer schema: CompiledModel's tensor-detail dicts no longer carry a
+    'quantization' key on this LiteRT version (name/index/dtype/shape only)."""
+    model = tflite_schema.Model.GetRootAsModel(tflite_bytes, 0)
+    for i in range(model.SubgraphsLength()):
+        subgraph = model.Subgraphs(i)
+        for j in range(subgraph.TensorsLength()):
+            tensor = subgraph.Tensors(j)
+            if tensor.Name().decode() == name:
+                q = tensor.Quantization()
+                return float(q.Scale(0)), int(q.ZeroPoint(0))
+    raise ValueError(f"tensor '{name}' not found in any subgraph")
 
 class LiteRTClient:
     """Trains and evaluates a trainable ``.tflite`` through LiteRT's CompiledModel,
@@ -46,7 +63,8 @@ class LiteRTClient:
 
     def train_pass(self, dataset, prefix: str = "") -> float:
         total, batches = 0.0, 0
-        for batch in tqdm(dataset, desc=f"{prefix} train".strip(), leave=False):
+        for batch in tqdm(dataset, desc=f"{prefix} train".strip(),
+                          leave=False, disable=DISABLE_TQDM):
             arrays = [t.numpy() for t in batch]
             total += float(self._run("train", arrays)["loss"].reshape(-1)[0])
             batches += 1
@@ -71,8 +89,8 @@ def infer_int8(tflite_bytes: bytes, X_norm: np.ndarray, signature: str = "infer"
     in_name, out_name = sig["inputs"][0], sig["outputs"][0]
     in_details = model.get_input_tensor_details(signature)[in_name]
     out_details = model.get_output_tensor_details(signature)[out_name]
-    iscale, izp = in_details["quantization"]
-    oscale, ozp = out_details["quantization"]
+    iscale, izp = _tensor_quantization(tflite_bytes, in_details["name"])
+    oscale, ozp = _tensor_quantization(tflite_bytes, out_details["name"])
 
     out = np.empty(len(X_norm), dtype=np.float32)
     for i, x in enumerate(X_norm):

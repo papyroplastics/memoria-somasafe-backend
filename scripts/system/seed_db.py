@@ -3,9 +3,9 @@ builds, a default user, and a device from a factory NVS partition definition.
 
 Idempotent — run it after the services are up to bootstrap a fresh database:
 
-    uv run -m scripts.seed_db # use default nvs path
-    uv run -m scripts.seed_db <nvs definition csv> # use specific device
-    uv run -m scripts.seed_db --assign-device # assign the device to the seed user
+    uv run -m scripts.system.seed_db # use default nvs path
+    uv run -m scripts.system.seed_db <nvs definition csv> # use specific device
+    uv run -m scripts.system.seed_db --assign-device # assign the device to the seed user
 """
 
 import argparse
@@ -28,12 +28,16 @@ from common.config import (
 from common.compression import compress
 from common.db import (
     Artifact,
+    ClientDeltaSubmission,
     Device,
     Firmware,
     FirmwareImage,
     GlobalWeights,
     ModelDefinition,
     ModelVersion,
+    QuantizationJob,
+    SecureRound,
+    SecureRoundMember,
     User,
     WeightsArtifact,
     engine,
@@ -49,12 +53,50 @@ from ml.saving import load_trainable_weights
 default_nvs = "shared/gen/factory_nvs.csv"
 default_firmware_dir = "shared/gen/firmware"
 
-def seed_models(session: Session) -> None:
-    """Seed each model that has a trained artifact on disk. Building the trainer
-    yields the fingerprint the registry version is checked against (a moved
-    fingerprint without a ModelSpec.version bump aborts the seed); the trained
-    artifacts seed the version's initial GlobalWeights. Untrained models are
-    skipped — rerun once they're trained."""
+def reset_weights(session: Session, key: str) -> None:
+    weights = session.exec(
+        select(GlobalWeights).where(GlobalWeights.model_key == key)).all()
+    if not weights:
+        return
+    weights_ids = [w.id for w in weights]
+
+    submissions = session.exec(
+        select(ClientDeltaSubmission)
+        .where(ClientDeltaSubmission.base_weights_id.in_(weights_ids))  # type: ignore[attr-defined]
+    ).all()
+    jobs = session.exec(
+        select(QuantizationJob)
+        .where(QuantizationJob.submission_id.in_([s.id for s in submissions]))  # type: ignore[attr-defined]
+    ).all() if submissions else []
+    rounds = session.exec(
+        select(SecureRound)
+        .where(SecureRound.base_weights_id.in_(weights_ids))  # type: ignore[attr-defined]
+    ).all()
+    members = session.exec(
+        select(SecureRoundMember)
+        .where(SecureRoundMember.round_id.in_([r.id for r in rounds]))  # type: ignore[attr-defined]
+    ).all() if rounds else []
+
+    # Children first: each level is a foreign key into the next. Their blob rows
+    # (QuantizationResult, WeightsArtifact) cascade at the DB level.
+    for job in jobs:
+        session.delete(job)
+    for submission in submissions:
+        session.delete(submission)
+    for member in members:
+        session.delete(member)
+    for round_ in rounds:
+        session.delete(round_)
+    for w in weights:
+        session.delete(w)
+    session.flush()
+
+    print(f"  - reset '{key}': dropped {len(weights)} weight snapshot(s), "
+          f"{len(submissions)} submission(s), {len(jobs)} quantization job(s), "
+          f"{len(rounds)} secure round(s)")
+
+
+def seed_models(session: Session, reset: bool = False) -> None:
     for key, spec in MODELS.items():
         tflite = MODELS_DIR / key / "trainable.tflite"
         if not tflite.exists():
@@ -96,6 +138,9 @@ def seed_models(session: Session) -> None:
             session.flush()
             print(f"  + model '{key}' v{spec.version} [{fingerprint}]")
 
+        if reset:
+            reset_weights(session, key)
+
         has_weights = session.exec(
             select(GlobalWeights).where(GlobalWeights.version_id == version.id)
         ).first()
@@ -132,12 +177,6 @@ def seed_models(session: Session) -> None:
 
 
 def seed_firmware(session: Session, firmware_dir: Path) -> None:
-    """Seed each firmware version exported to ``firmware_dir`` (one
-    ``{version}/`` subdirectory with ``firmware.bin`` + ``metadata.json``,
-    written by ``firmware/scripts/export_image.py``), signing the image with
-    the server key. A build the server key can't sign is skipped (the signature
-    is mandatory). Already-seeded versions are skipped — a re-exported build
-    under the same version needs the stored row deleted first."""
     if not firmware_dir.is_dir():
         print(f"  - firmware skipped (no {firmware_dir})")
         return
@@ -196,9 +235,6 @@ def seed_users(session: Session) -> User:
 
 
 def seed_test_users(session: Session) -> None:
-    """Create one ``test_N`` account (password == username) per subject in the
-    clean-signals dataset, each owning a placeholder device so it clears the
-    device-owner gate."""
     subjects = get_sorted_paths(DATASETS_DIR / CLEAN_SUBDIR)
     if not subjects:
         raise SystemExit(f"no subjects under {DATASETS_DIR / CLEAN_SUBDIR}; "
@@ -271,6 +307,11 @@ def main() -> None:
     parser.add_argument("--test-users", action="store_true",
                         help="create a test_N user (owning a placeholder device) per "
                              "dataset subject, for the headless federated harness")
+    parser.add_argument("--reset-weights", action="store_true",
+                        help="drop each seeded model's weight snapshots (and the "
+                             "submissions, quantization jobs and secure rounds based on "
+                             "them) and re-seed from the artifacts now on disk — use "
+                             "after retraining a model that is already seeded")
     args = parser.parse_args()
 
     if not args.factory_nvs.exists():
@@ -278,7 +319,7 @@ def main() -> None:
 
     init_db()
     with Session(engine) as session:
-        seed_models(session)
+        seed_models(session, reset=args.reset_weights)
         seed_firmware(session, args.firmware_dir)
         user = seed_users(session)
         seed_device(session, args.factory_nvs, user if args.assign_device else None)

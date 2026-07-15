@@ -16,15 +16,15 @@ from pathlib import Path
 
 import numpy as np
 
-from common.config import MODELS_DIR, DATASETS_DIR
+from common.config import RESULTS_DIR, DATASETS_DIR
 from ml.data import MIXED_FEATURE_SUBDIR, FEATURE_STATS_FILE, BVP_WINDOW, WINDOW_SECONDS
 from ml.model_list import MODELS
-from .common.autoencoders import load_autoencoder
-from .common.scoring import (
+from ..common.autoencoders import load_autoencoder
+from ..common.scoring import (
     SCORE_NAMES, subject_thresholds, soft_score, median3,
     score_dir_by_subject, score_mixed_by_subject,
 )
-from .common.post_train import load_budgets
+from ..common.post_train import load_budgets
 
 
 def relink(link: Path, target: Path):
@@ -43,7 +43,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     data_dir = DATASETS_DIR
-    result_dir = MODELS_DIR / args.model
+    result_dir = RESULTS_DIR / args.model
 
     budgets = load_budgets(args.model)
     # batch_size=1 so every window is scored (no batch remainder dropped): distilled

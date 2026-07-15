@@ -23,6 +23,11 @@ WEEK = 7 * DAY
 MODELS_DIR = Path(os.environ.get("MODELS_DIR", "shared/gen/models"))
 DATASETS_DIR = Path(os.environ.get("DATASETS_DIR", "shared/gen/datasets"))
 
+# Evaluation/experiment outputs (histories, reports, figures, distilled labels).
+# Separate from MODELS_DIR: those are serving artifacts the system consumes, this
+# is everything the thesis measures. Gitignored.
+RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
+
 # ECDSA P-256 private key the worker signs quantized-model payloads with; its public
 # half must be the srv_pub provisioned in the device's factory NVS (see shared/make_keys.sh
 # and firmware/scripts/gen_factory_nvs.py).
@@ -42,7 +47,7 @@ CLEANUP_INTERVAL_SECONDS = int(os.environ.get("CLEANUP_INTERVAL_SECONDS", MINUTE
 # so the client re-polls (the job id is the Celery task id it waits on).
 RESULT_POLL_TIMEOUT_SECONDS = int(os.environ.get("RESULT_POLL_TIMEOUT_SECONDS", 30))
 
-# Seed used to rebuild the representative dataset for int8 calibration.
+# RNG seed used globally
 SEED = int(os.environ.get("SEED", 1234))
 
 # --- Federated aggregation (see worker.tasks.federated_aggregation) ---
@@ -88,3 +93,7 @@ DEVICE_CHALLENGE_TTL_SECONDS = int(os.environ.get("DEVICE_CHALLENGE_TTL_SECONDS"
 # A device's owner may only change once per this window (24 h since the last
 # successful attestation). Failed/timed-out challenges do not count.
 DEVICE_ATTEST_COOLDOWN_SECONDS = int(os.environ.get("DEVICE_ATTEST_COOLDOWN_SECONDS", DAY))
+
+# Disable tqdm globally
+DISABLE_TQDM = os.getenv("DISABLE_TQDM", "").lower() in ("1", "true", "yes")
+

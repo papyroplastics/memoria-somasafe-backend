@@ -14,10 +14,16 @@ proto: shared
 	protoc --proto_path=shared --python_out=scripts/common shared/dataset.proto
 
 get-data: shared
-	uv run -m scripts.get_dataset
+	uv run -m scripts.system.get_dataset
+
+# Every report result, from a clean slate. Needs the services + api + worker up.
+run-all: shared
+	./run_all.sh
 
 db-seed: shared
-	uv run -m scripts.seed_db --assign-device --test-users
+	uv run -m scripts.system.seed_db --assign-device --test-users
+db-reseed: shared
+	uv run -m scripts.system.seed_db --assign-device --test-users --reset-weights
 db-run:
 	podman compose up
 db-clean:

@@ -19,7 +19,7 @@ LiteRT-trainable on-device and its flattened weights can move through FedAvg.
 
 ## Generated code
 
-`scripts/export_subject_data.py` writes the capture-import protobuf defined in the
+`scripts/system/export_subject_data.py` writes the capture-import protobuf defined in the
 shared schema (`shared/dataset.proto`). Generate (or regenerate, after editing the
 schema) its Python stub with the system `protoc` before running the export:
 
@@ -56,9 +56,28 @@ worker/    Celery task layer (TensorFlow loads at startup): celery_app.py wires 
            broker + beat schedule; tasks.py holds quantize_submission,
            validate_submission, federated_aggregation and cleanup_results; utils/ has
            the TF-free validation/outlier-filtering helpers tasks.py calls into.
-scripts/   CLI entry points: dataset fetch/build, train, seed_db,
-           export_subject_data, queue_aggregation, and the autoencoder-distillation tools.
+scripts/   CLI entry points, grouped into subpackages by how each relates to the system.
+           common/ holds their shared, model-agnostic helpers (api, litert, scoring, dsp,
+           post_train, secure, autoencoders + the generated dataset_pb2); scripts/__init__.py
+           seeds the RNG on any submodule import.
+             system/       essential to the running pipeline: get_dataset, train (exports the
+                           served .tflite artifacts + is the source of the federated
+                           convergence curves), transfer_learn, export_subject_data, seed_db.
+             distillation/ the unsupervised-teacher label pipeline + personalization probe
+                           (a demonstrated use case, not part of the deployed architecture):
+                           distill_calibrate/labels/eval, personalize_test.
+             integration/  multi-user backend verification over the real HTTP API: fed_client,
+                           secure_aggregation, queue_aggregation.
+             figures/      report result/figure generators (see PLOTS.md): plot_signals,
+                           plot_convergence (reads a previous train.py run — Secs. 5.2+5.3 —
+                           and never trains), byzantine + sensitivity (sweeps that do train,
+                           sharing one subject-dataset build via sweeps.py), footprint.
 ```
+
+Evaluation/experiment output (histories, reports, figures, distilled labels) goes to
+`results/<model>/`; the served `.tflite` artifacts stay in `shared/gen/models/<model>/`.
+[`PLOTS.md`](PLOTS.md) catalogs every figure/report file, the command that produces it, and
+the report section it feeds.
 
 Training is split into three layers so any model can be run under any loop:
 
@@ -76,8 +95,15 @@ Training is split into three layers so any model can be run under any loop:
   (simulated FedAvg with an injectable `aggregate` strategy). Loops talk only to the
   `Trainer` interface, so a `(model, trainer)` pair works with either loop and they
   can be compared. `train.py` picks the model and loop and handles export + plotting;
-  each run writes its history plot + CSV and eval report under
-  `results/<model>/reports/<loop>/` (`normal` or `federated`).
+  each run writes its history plot + CSV, its `run.yaml` manifest and eval report under
+  `results/<model>/<loop>/` (`normal` or `federated`).
+
+Both loops split the data at **subject** granularity: `--eval-subjects N` (default 2) holds
+out the last N subjects whole, the centralized loop pools the rest and the federated loop
+trains those same subjects as separate clients. So a metric is generalization to an unseen
+subject, and the two loops are directly comparable — `scripts.figures.plot_convergence`
+plots both curves from the `run.yaml` manifests without retraining anything, and refuses to
+overlay runs whose manifests disagree.
 
 Autoencoder variants (LSTM/GRU/CNN/...) share `TrainableAutoencoder` (reconstruction
 train/eval + conditioning) and `AutoencoderTrainer` (windowing + recon-error metrics).
@@ -143,7 +169,7 @@ only the budgets are global and everything else is done per-client on unlabeled 
   data, capped at `--max-budget`. Independent (not a shared combined-FPR ceiling) so a
   low-volume specialist (rr → afib/timewarp) can't be crowded out by a high-volume
   generalist (recon); Youden's J is degeneracy-free, unlike an F1 sweep that flags
-  everything on a weakly-separating score. Writes only the budgets to `results/<model>/reports/`.
+  everything on a weakly-separating score. Writes only the budgets to `results/<model>/`.
 - **`distill_labels.py` (client: unlabeled)** touches only what a real client has — its
   own clean baseline and the mixed signal + on-device features, **never the true labels or
   the per-anomaly sets**. Reads the budgets, derives each subject's thresholds from its
@@ -157,7 +183,7 @@ only the budgets are global and everything else is done per-client on unlabeled 
   thresholds a client uses, then scores the OR detector against the true mixed-window
   labels and the per-type `anomalous-signals/` sets: OR-combined + per-score
   precision/recall/F1, per-anomaly-kind recall, clean FPR. Writes the metrics to
-  `results/<model>/reports/`.
+  `results/<model>/`.
 
 The labels land in a datasets-shaped tree (`mixed-features/S*/` with the distilled
 `labels.npy`, feature arrays symlinked back to `datasets/`), so the student `FeatureMLP`
@@ -171,26 +197,37 @@ Fetch + preprocess the dataset first (idempotent: skips download/processing if
 already present):
 
 ```bash
-uv run -m ml.scripts.get-dataset
+uv run -m scripts.system.get_dataset
 ```
 
-Then train any model; artifacts land in `results/<model>/`:
+Then train any model; the served `.tflite` artifacts land in `shared/gen/models/<model>/`
+and the training report/plot in `results/<model>/<loop>/`:
 
 ```bash
-uv run -m ml.scripts.train feature-mlp                      # synthetic-anomaly classifier
-uv run -m ml.scripts.train cnn-ae                           # conditional Conv1D autoencoder (focus)
-uv run -m ml.scripts.train lstm-ae                          # conditional LSTM autoencoder
-uv run -m ml.scripts.train gru-ae                           # conditional GRU autoencoder
-uv run -m ml.scripts.train feature-mlp --loop federated     # simulated FedAvg
-uv run -m ml.scripts.train feature-mlp --batch-size 32       # train at a larger batch (GPU-friendly)
+uv run -m scripts.system.train feature-mlp                      # synthetic-anomaly classifier
+uv run -m scripts.system.train cnn-ae                           # conditional Conv1D autoencoder (focus)
+uv run -m scripts.system.train lstm-ae                          # conditional LSTM autoencoder
+uv run -m scripts.system.train gru-ae                           # conditional GRU autoencoder
+uv run -m scripts.system.train feature-mlp --loop federated     # simulated FedAvg
+uv run -m scripts.system.train feature-mlp --batch-size 32       # train at a larger batch (GPU-friendly)
+uv run -m scripts.system.train cnn-ae --eval-subjects 3          # hold out the last 3 subjects
 ```
 
-`--loop` selects the training loop (`normal` by default, or `federated`);
-`--epochs` tunes the normal loop and `--local-epochs` the local passes per round
-for the federated one. `--batch-size` overrides the model's `default_batch_size`
+To produce **every** report result in one go — from an empty database and no exported
+artifacts, with the services/api/worker already up — run `./run_all.sh` (or `make run-all`).
+It sequences training, figures, the distillation round-trip, seeding and the integration
+harness in dependency order; it is resumable (each step is skipped when its output exists,
+`FORCE=1` redoes them) and tunable via the env vars at the top of the file. See
+[`PLOTS.md`](PLOTS.md) for what each step emits.
+
+`--loop` selects the training loop (`normal` by default, or `federated`); `--epochs` tunes
+the normal loop while `--rounds` and `--local-epochs` tune the federated one's global rounds
+and local passes per round. `--eval-subjects` (default 2) sets how many subjects are held out
+whole for evaluation. `--batch-size` overrides the model's `default_batch_size`
 (useful for GPU throughput — the on-device default batch is often 1). Each run
-writes `trainable.tflite` (LiteRT-trainable), `quantized.tflite` (int8, when
-supported) and a diagnostic plot into `results/<model>/`; the intermediate
+writes `trainable.tflite` (LiteRT-trainable) and `quantized.tflite` (int8, when
+supported) into `shared/gen/models/<model>/`, and a diagnostic plot + history + `run.yaml`
+into `results/<model>/<loop>/`; the intermediate
 `SavedModel`s only exist in a temp dir during conversion. Models z-score their own
 inputs: the `eval`/`train` signatures take
 raw inputs and normalize internally (baked z-score constants), so nothing ships or serves
@@ -202,14 +239,22 @@ they travel to the firmware alongside the signed model (see `shared/docs/model-s
 non-default `--batch-size` suffixes those artifacts (`trainable_32.tflite`,
 `quantized_32.tflite`, ...) so they don't clobber the canonical default-batch exports.
 
+`--tag NAME` does the same for a *variant* of a model you also train normally: results go to
+`results/<model>/<loop>-<name>/` and artifacts are suffixed (`trainable_<name>.tflite`), so
+the canonical artifact — the one `seed_db` publishes and the system serves — stays the
+untagged run. It exists because the same model key can be trained on different data: the
+distillation round-trip below trains `feature-mlp` on both the synthetic ground truth and the
+teacher's distilled labels, and without a tag the second run would silently overwrite the
+first's results and artifacts.
+
 Because the model's batch size is baked into the `.tflite` input signature, the
 GPU-trained large-batch model isn't itself the deliverable. `transfer_learn`
 bridges that: it seeds a fresh default-batch model from the large-batch artifact's
 weights (via `TrainableModel.transfer_from`) and fine-tunes it for a few epochs.
 
 ```bash
-uv run -m ml.scripts.train feature-mlp --batch-size 32       # 1) fast GPU training
-uv run -m ml.scripts.transfer_learn feature-mlp 32 --epochs 3 # 2) transfer -> default-batch + fine-tune
+uv run -m scripts.system.train feature-mlp --batch-size 32       # 1) fast GPU training
+uv run -m scripts.system.transfer_learn feature-mlp 32 --epochs 3 # 2) transfer -> default-batch + fine-tune
 ```
 
 The source batch size must be `>=` the default; `transfer_learn` re-exports the
@@ -222,11 +267,17 @@ detector's per-kind metrics against the ground truth. Then point `feature-mlp` a
 labels with `--dataset-dir`:
 
 ```bash
-uv run -m scripts.distill_calibrate cnn-ae                                       # budgets -> results/cnn-ae/reports/
-uv run -m scripts.distill_eval cnn-ae                                            # metrics -> results/cnn-ae/reports/
-uv run -m scripts.distill_labels cnn-ae                                          # teacher -> results/cnn-ae/distilled-labels/
-uv run -m scripts.train feature-mlp --dataset-dir results/cnn-ae/distilled-labels  # student on pseudo-labels
+uv run -m scripts.distillation.distill_calibrate cnn-ae                                       # budgets -> results/cnn-ae/
+uv run -m scripts.distillation.distill_eval cnn-ae                                            # metrics -> results/cnn-ae/
+uv run -m scripts.distillation.distill_labels cnn-ae                                          # teacher -> results/cnn-ae/distilled-labels/
+uv run -m scripts.system.train feature-mlp --dataset-dir results/cnn-ae/distilled-labels \
+    --tag distilled                                                                       # student on pseudo-labels
 ```
+
+`--tag distilled` keeps this run off the canonical `feature-mlp` results and artifacts, so it
+can be compared against the same student trained on the direct synthetic labels rather than
+replacing it (see "Run"). `personalize_test` fine-tunes the distilled student, so pass
+`--weights shared/gen/models/feature-mlp/trainable_distilled.tflite`.
 
 ### Export a subject to the Android app
 
@@ -239,12 +290,12 @@ de-normalizing `static.npy`), which the app stamps onto the imported group as it
 conditioning static.
 
 ```bash
-uv run -m scripts.export_subject_data 1                              # S1.ssds, every window complete
-uv run -m scripts.export_subject_data 1 --include-context           # also embed each window's raw context
-uv run -m scripts.export_subject_data 1 --missing-samples 0.7       # keep 70% of windows' signal; drop the rest
-uv run -m scripts.export_subject_data 1 --missing-features 0.7      # keep 70% of windows' ML result; phone recomputes the rest
-uv run -m scripts.export_subject_data 1 --missing-samples 0.7 --missing-features 0.7  # both, drawn independently
-uv run -m scripts.export_subject_data 1 --clean                     # clean (anomaly-free) signals; features from clean-features
+uv run -m scripts.system.export_subject_data 1                              # S1.ssds, every window complete
+uv run -m scripts.system.export_subject_data 1 --include-context           # also embed each window's raw context
+uv run -m scripts.system.export_subject_data 1 --missing-samples 0.7       # keep 70% of windows' signal; drop the rest
+uv run -m scripts.system.export_subject_data 1 --missing-features 0.7      # keep 70% of windows' ML result; phone recomputes the rest
+uv run -m scripts.system.export_subject_data 1 --missing-samples 0.7 --missing-features 0.7  # both, drawn independently
+uv run -m scripts.system.export_subject_data 1 --clean                     # clean (anomaly-free) signals; features from clean-features
 ```
 
 `--clean` exports the anomaly-free `clean-signals/` instead of `mixed-signals/`; its
@@ -410,25 +461,25 @@ no migrations).
 A round can also be queued by hand, for testing:
 
 ```bash
-uv run -m scripts.queue_aggregation           # every initialized model
-uv run -m scripts.queue_aggregation cnn-ae    # a single model
+uv run -m scripts.integration.queue_aggregation           # every initialized model
+uv run -m scripts.integration.queue_aggregation cnn-ae    # a single model
 ```
 
-**Headless federated run.** `scripts/fed_client.py` drives the whole stack over the real
+**Headless federated run.** `scripts/integration/fed_client.py` drives the whole stack over the real
 HTTP API: for each dataset subject (as user `test_N`) it logs in, pulls the global
 trainable artifact, trains one pass through the on-device LiteRT `CompiledModel` runtime,
 uploads the update, and logs out; then it queues a round, waits for the new `GlobalWeights`,
 and scores it on the held-out subjects, repeating for `--rounds`. It picks the aggregation
 strategy from the model's `submission_type`: the dense `raw`/`quantize` path (convergence
-series to `results/<model>/reports/fed_client/`) or the masked `secure` path (see "Secure
-aggregation" for the extra phases, series to `results/<model>/reports/secure_fed_client/`).
-Seed the accounts first with `scripts.seed_db --test-users` (one `test_N` per subject,
+series to `results/<model>/fed_client/`) or the masked `secure` path (see "Secure
+aggregation" for the extra phases, series to `results/<model>/secure_fed_client/`).
+Seed the accounts first with `scripts.system.seed_db --test-users` (one `test_N` per subject,
 each owning a placeholder device).
 
 ```bash
-uv run -m scripts.seed_db --test-users                       # one test_N per subject
-uv run -m scripts.fed_client --model feature-mlp --rounds 5 --eval-subjects 2   # dense
-uv run -m scripts.fed_client --model cnn-ae     --rounds 5 --eval-subjects 2   # secure
+uv run -m scripts.system.seed_db --test-users                       # one test_N per subject
+uv run -m scripts.integration.fed_client --model feature-mlp --rounds 5 --eval-subjects 2   # dense
+uv run -m scripts.integration.fed_client --model cnn-ae     --rounds 5 --eval-subjects 2   # secure
 ```
 
 ### Secure aggregation
@@ -473,24 +524,24 @@ client-side clipping to `B` and an aggregate-level sanity check (finite, mean de
 the clip bound) remain. It buys privacy against an honest-but-curious server, not
 robustness.
 
-**Headless secure run.** The secure path of `scripts/fed_client.py` (selected when the
+**Headless secure run.** The secure path of `scripts/integration/fed_client.py` (selected when the
 model's `submission_type` is `secure`) drives the whole stack over the real HTTP API,
 running the four phases above per round for each dataset subject (as user `test_N`), and
 additionally verifies client-side that the masks cancel exactly each round. The per-round
-convergence series is written to `results/<model>/reports/secure_fed_client/`.
+convergence series is written to `results/<model>/secure_fed_client/`.
 
 ```bash
-uv run -m scripts.seed_db --test-users                            # one test_N per subject
-uv run -m scripts.fed_client --model cnn-ae --rounds 5 --eval-subjects 2
+uv run -m scripts.system.seed_db --test-users                            # one test_N per subject
+uv run -m scripts.integration.fed_client --model cnn-ae --rounds 5 --eval-subjects 2
 ```
 
-**No-training aggregation check.** `scripts/secure_aggregation.py` exercises the same
+**No-training aggregation check.** `scripts/integration/secure_aggregation.py` exercises the same
 secure endpoints without any training: each client submits a *random* weight tensor and the
 script asserts the global weights the server bakes equal the plaintext mean (up to
 quantization + float32 error) — a fast correctness probe of the masking/summation pipeline.
 
 ```bash
-uv run -m scripts.secure_aggregation --clients 4 --rounds 3
+uv run -m scripts.integration.secure_aggregation --clients 4 --rounds 3
 ```
 
 **Model versioning.** See [`shared/docs/versioning.md`](shared/docs/versioning.md) for
@@ -498,13 +549,13 @@ what `version`, `contract_version`, `fingerprint` and weights (`weights_id` /
 `weights_version`) each mean and how a client reacts to each changing. Backend-specific:
 `ModelVersion.version` is hand-bumped in the code registry (`ml.model_list.ModelSpec`),
 `fingerprint` is derived (`Trainer.arch_fingerprint()`) and enforced as a tripwire only by
-`scripts/seed_db.py` (aborts if the fingerprint moved but the version didn't); `/model/list`
+`scripts/system/seed_db.py` (aborts if the fingerprint moved but the version didn't); `/model/list`
 reports the latest version only, `/model/versions/{key}` the full history; `/model/download/*`
 echoes `X-Model-Fingerprint`, `X-Model-Version`, `X-Weights-ID` and `X-Weights-Timestamp`.
 
 The registry that ties a model `key` to its metadata *and* its TensorFlow trainer builder is
-`ml/model_list.py` — the single source of truth consumed by `scripts/train.py` (one trainer),
-`worker/tasks.py` (all models + fingerprints, built per worker child), and `scripts/seed_db.py` (publishes
+`ml/model_list.py` — the single source of truth consumed by `scripts/system/train.py` (one trainer),
+`worker/tasks.py` (all models + fingerprints, built per worker child), and `scripts/system/seed_db.py` (publishes
 versions + metadata, enforcing the fingerprint tripwire). The api never imports it; it
 trusts what the seed wrote to the DB.
 
@@ -563,11 +614,20 @@ so it never loads the blobs it is about to drop. Weight submissions are never re
 
 All `/model/*` routes require a logged-in user, and the rate-limited ones
 additionally require the user to be a verified device owner (see "Device
-attestation"). Accounts are **seeded, not self-registered** — `make seed`
-(`uv run -m scripts.seed_db`) bootstraps a fresh DB with the model registry rows
+attestation"). Accounts are **seeded, not self-registered** —
+`uv run -m scripts.system.seed_db` (or `make db-seed`, which also passes
+`--assign-device --test-users`) bootstraps a fresh DB with the model registry rows
 and a default user (`SEED_USER` / `SEED_PASSWORD`, default `somasafe` /
-`somasafe`); it is idempotent. Pass a factory NVS CSV (`make seed
-nvs_csv=...firmware/factory_nvs.csv`) to also register that device.
+`somasafe`); it is idempotent. Pass a factory NVS CSV as the positional argument
+(`uv run -m scripts.system.seed_db firmware/factory_nvs.csv`) to also register that device.
+
+A model's weights are seeded **once** and then owned by aggregation, so re-running the seed
+after retraining leaves the old snapshot in place. `--reset-weights` (or `make db-reseed`)
+re-points each seeded model at the artifacts currently on disk: it drops the model's
+`GlobalWeights` history along with everything anchored to it — the submissions, quantization
+jobs and secure rounds that name a base snapshot they were computed against, and the stored
+`WeightsArtifact` rows — then re-seeds from `shared/gen/models/<model>/`. Model definitions and
+versions are untouched.
 
 Session semantics (stateful tokens, `api/routes/auth.py` endpoints, argon2 password
 hashing) are documented in [`shared/docs/authentication.md`](shared/docs/authentication.md).
@@ -617,7 +677,7 @@ forwards to the device for verification against its factory `srv_pub`.
 Images live in `FirmwareImage` rows (zstd-compressed, keyed by the `Firmware` row), like the
 model artifacts; the `Firmware` row itself keeps only the raw `size` and the mandatory
 `signature`, so listing versions never reads an image.
-`scripts/seed_db.py` publishes them: it scans a directory of exports (`--firmware-dir`,
+`scripts/system/seed_db.py` publishes them: it scans a directory of exports (`--firmware-dir`,
 default `shared/gen/firmware/`, populated by `make export-image` in `firmware/`), signs
 each image with `SERVER_PRIVATE_KEY_FILE` (a build it can't sign is skipped — the signature
 is not optional) and inserts any version not already present. Re-publishing a changed build
@@ -631,7 +691,7 @@ See [`shared/docs/device-attestation.md`](shared/docs/device-attestation.md) for
 full ownership-proof flow. Backend-specific: `api/routes/device.py` implements it; a
 `Device` row holds the `serial` (PK), the 65-byte uncompressed `public_key`, an optional
 `owner_id`, and `last_attested_at`. Devices are seeded ownerless from a factory NVS image
-(`scripts/seed_db.py`).
+(`scripts/system/seed_db.py`).
 
 | Method | Path | Purpose |
 |--------|------|---------|

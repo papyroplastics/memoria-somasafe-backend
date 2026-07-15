@@ -21,13 +21,13 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 
-from common.config import MODELS_DIR, DATASETS_DIR
+from common.config import MODELS_DIR, DATASETS_DIR, RESULTS_DIR
 from ml.data import MIXED_FEATURE_SUBDIR, get_sorted_paths
 from ml.metrics import classification_report
 from ml.model_list import MODELS
 from ml.saving import load_trainable_weights, get_optimized_model
-from .common.litert import infer_int8
-from .common.post_train import get_report_dir, write_metrics_csv
+from ..common.litert import infer_int8
+from ..common.post_train import get_report_dir, write_metrics_csv
 
 VARIANTS = ('global_float', 'global_int8', 'personal_float', 'personal_int8')
 
@@ -68,7 +68,7 @@ if __name__ == "__main__":
                         help='Autoencoder whose distilled-labels tree to fine-tune on '
                              '(results/<teacher>/distilled-labels; default: cnn-ae)')
     parser.add_argument('--weights', type=Path, default=None,
-                        help='Global trainable .tflite (default: results/<model>/trainable.tflite)')
+                        help='Global trainable .tflite (default: shared/gen/models/<model>/trainable.tflite)')
     parser.add_argument('--epochs', type=int, default=5, help='Fine-tune epochs (default: 5)')
     parser.add_argument('--train-split', type=float, default=0.6,
                         help='Fraction of each subject used to fine-tune; the rest is the '
@@ -84,7 +84,7 @@ if __name__ == "__main__":
 
     data_dir = DATASETS_DIR
     result_dir = MODELS_DIR / args.model
-    distilled_dir = MODELS_DIR / args.teacher / 'distilled-labels'
+    distilled_dir = RESULTS_DIR / args.teacher / 'distilled-labels'
     weights_path = args.weights or (result_dir / 'trainable.tflite')
 
     if not weights_path.exists():
@@ -165,7 +165,7 @@ if __name__ == "__main__":
           f"float={overall['personal_float']['f1'] - overall['global_float']['f1']:+.4f}  "
           f"int8={overall['personal_int8']['f1'] - overall['global_int8']['f1']:+.4f}")
 
-    report_dir = get_report_dir(result_dir, 'personalization')
+    report_dir = get_report_dir(args.model, 'personalization')
     suffix = f'_{args.eval_subject}' if args.eval_subject else ''
     write_metrics_csv(rows, report_dir, f'personalization{suffix}.csv')
     (report_dir / f'personalization{suffix}.json').write_text(json.dumps({

@@ -4,7 +4,7 @@ budgets — the only globally-relevant output. A budget is the share of clean wi
 score may fire on (the quantile level a client will threshold at), chosen independently
 on the labeled global data as the level that maximizes the score's Youden's J (mixed-set
 recall minus clean FPR), capped at --max-budget. Writes only the budgets to
-results/<model>/reports/; distill_labels.py turns them into per-subject thresholds +
+results/<model>/; distill_labels.py turns them into per-subject thresholds +
 labels and reports the detector's metrics.
 """
 
@@ -14,12 +14,12 @@ import json
 
 import numpy as np
 
-from common.config import MODELS_DIR, DATASETS_DIR
+from common.config import DATASETS_DIR
 from ml.model_list import MODELS
 from ml.metrics import classification_report
-from .common.post_train import get_report_dir, CALIBRATION_REPORT
-from .common.autoencoders import load_autoencoder
-from .common.scoring import (
+from ..common.post_train import get_report_dir, CALIBRATION_REPORT
+from ..common.autoencoders import load_autoencoder
+from ..common.scoring import (
     SCORE_NAMES, clean_threshold, score_dir_by_subject, score_mixed_by_subject,
     load_mixed_truth,
 )
@@ -87,7 +87,7 @@ if __name__ == "__main__":
           + "  ".join(f"{n}={budgets[n]:.4f}" for n in SCORE_NAMES))
 
     results = {'model': args.model, 'max_budget': args.max_budget, 'budgets': budgets}
-    report_dir = get_report_dir(MODELS_DIR / args.model)
+    report_dir = get_report_dir(args.model)
     report_path = report_dir / CALIBRATION_REPORT
     report_path.write_text(json.dumps(results, indent=2))
     print(f"\nWrote budgets to {report_path}")

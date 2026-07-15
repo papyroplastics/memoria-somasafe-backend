@@ -90,11 +90,9 @@ class FeatureMLPTrainer(Trainer):
     default_batch_size = 1
     contract_version = 1   # norm layout: mean[17] then std[17], LE float32
 
-    def __init__(self, model: FeatureMLP, batch_size: int = 1,
-                 train_split: float = 0.8):
+    def __init__(self, model: FeatureMLP, batch_size: int = 1):
         self.model: FeatureMLP = model # type: ignore
         self.batch_size = batch_size
-        self.train_split = train_split
         self.data_subdir = MIXED_FEATURE_SUBDIR
 
     def norm_param_bytes(self):

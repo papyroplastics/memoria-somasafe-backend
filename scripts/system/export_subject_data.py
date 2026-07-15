@@ -24,7 +24,7 @@ from ml.data import (
     MIXED_SUBDIR, CLEAN_SUBDIR, MIXED_FEATURE_SUBDIR, CLEAN_FEATURE_SUBDIR, CONTEXT_FILE,
     BVP_WINDOW, ACC_WINDOW, WINDOW_SECONDS, load_static_norm_params,
 )
-from .common import dataset_pb2 as pb
+from ..common import dataset_pb2 as pb
 
 FORMAT_VERSION = 1
 

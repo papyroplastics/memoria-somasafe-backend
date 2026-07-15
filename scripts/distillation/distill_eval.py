@@ -4,7 +4,7 @@ scientific / testing step, with no restriction on what data it reads. Uses the s
 budgets (distill_calibrate.py) and per-subject thresholds a client would (distill_labels.py),
 then scores the OR detector against the true mixed-window labels and the per-type
 anomalous-signals/ sets: OR-combined + per-score precision/recall/F1, per-anomaly-kind
-recall, and the clean false-positive rate. Writes the metrics to results/<model>/reports/.
+recall, and the clean false-positive rate. Writes the metrics to results/<model>/.
 """
 
 
@@ -14,16 +14,16 @@ from pathlib import Path
 
 import numpy as np
 
-from common.config import MODELS_DIR, DATASETS_DIR
+from common.config import DATASETS_DIR
 from ml.data import ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_WINDOW, WINDOW_SECONDS
 from ml.metrics import classification_report
 from ml.model_list import MODELS
-from .common.autoencoders import load_autoencoder
-from .common.scoring import (
+from ..common.autoencoders import load_autoencoder
+from ..common.scoring import (
     SCORE_NAMES, subject_thresholds, pooled_predict,
     score_dir_by_subject, score_mixed_by_subject, load_mixed_truth,
 )
-from .common.post_train import get_report_dir, load_budgets, EVAL_REPORT
+from ..common.post_train import get_report_dir, load_budgets, EVAL_REPORT
 
 
 def evaluate(trainer, data_dir: Path, clean: dict[str, dict[str, np.ndarray]],
@@ -100,7 +100,6 @@ if __name__ == "__main__":
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to evaluate')
     args = parser.parse_args()
 
-    result_dir = MODELS_DIR / args.model
     data_dir = DATASETS_DIR
 
     budgets = load_budgets(args.model)
@@ -129,7 +128,7 @@ if __name__ == "__main__":
     results = evaluate(trainer, data_dir, clean, mixed, truth, thresholds)
     print_metrics(results, budgets)
 
-    report_dir = get_report_dir(result_dir)
+    report_dir = get_report_dir(args.model)
     eval_path = report_dir / EVAL_REPORT
     eval_path.write_text(json.dumps({'model': args.model, 'budgets': budgets, **results}, indent=2))
     print(f"\nWrote detector metrics to {eval_path}")

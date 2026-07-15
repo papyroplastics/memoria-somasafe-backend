@@ -33,14 +33,14 @@ def normal_loop(trainer: Trainer, train_dataset: tf.data.Dataset,
 
 def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Dataset],
                    eval_dataset: tf.data.Dataset, local_epochs: int,
-                   global_epochs: int, aggregate=fed_avg) -> History:
+                   rounds: int, aggregate=fed_avg) -> History:
     model = trainer.model
     sizes = [len(ds) for ds in subject_train_datasets]
     global_weights = model.save()['weights']
 
     history: History = []
-    for r in range(global_epochs):
-        round_prefix = f"round={r + 1}/{global_epochs}"
+    for r in range(rounds):
+        round_prefix = f"round={r + 1}/{rounds}"
         base = np.asarray(global_weights)
         client_deltas: list[np.ndarray] = []
         loss = 0.0
