@@ -146,20 +146,20 @@ separate per-type `anomalous-signals/<kind>/` (each kind applied to every window
 
 Because injection operates on un-normalized signals, perturbations scale with the
 signal's own range/std, so they apply at any sensor output range. The five kinds are
-signal-integrity artifacts (spike = a sustained baseline step, amplitude blow-up, and a
-wavy band-limited noise burst) and rhythm anomalies (timewarp = uniform tachy/brady via
-resampling, afib = irregularly-irregular rhythm via a jittered time-warp). Flatline and
-baseline wander were dropped: a flatline sits below the AE's reconstruction-error floor
-(handle sensor dropout with a signal-quality gate instead) and wander is physiological —
-already in the clean signal, so the AE rightly does not flag it.
+signal-integrity artifacts (amplitude blow-up and a wavy band-limited noise burst) and
+rhythm anomalies (tachycardia/bradycardia = uniform tempo change via resampling, afib =
+irregularly-irregular rhythm via a jittered time-warp). Flatline and baseline wander were
+dropped: a flatline sits below the AE's reconstruction-error floor (handle sensor dropout
+with a signal-quality gate instead) and wander is physiological — already in the clean
+signal, so the AE rightly does not flag it. A sustained-baseline-step "spike" kind was
+also dropped.
 
 ### Autoencoder evaluation and distillation
 
 The detector is an OR of **several scores**, each oriented higher = more anomalous:
-reconstruction MSE — strong on spike/blowup/noise but phase/rate-blind — OR'd with two
-cheap, jDSP-portable rhythm indices (in-band spectral entropy, beat-interval
-coefficient-of-variation) that catch afib, which reconstruction alone misses. A window is
-anomalous if any score crosses its threshold, and the threshold is **per subject** — each
+reconstruction MSE, OR'd with two cheap, jDSP-portable rhythm indices (in-band spectral
+entropy, beat-interval coefficient-of-variation). A window is anomalous if any score
+crosses its threshold, and the threshold is **per subject** — each
 score fires at the `1 - budget` quantile of *that subject's own* clean windows, so a
 subject-specific score scale (reconstruction error especially) gives a uniform per-subject
 false-alarm rate instead of one dominated by the noisiest subjects. The work splits into
@@ -170,10 +170,8 @@ only the budgets are global and everything else is done per-client on unlabeled 
   the only globally-relevant output, and the only thing that reads the synthetic labels.
   Each budget (the quantile level a client thresholds at) is chosen *independently* as the
   level that maximizes that score's Youden's J (recall minus clean FPR) on the labeled
-  data, capped at `--max-budget`. Independent (not a shared combined-FPR ceiling) so a
-  low-volume specialist (rr → afib/timewarp) can't be crowded out by a high-volume
-  generalist (recon); Youden's J is degeneracy-free, unlike an F1 sweep that flags
-  everything on a weakly-separating score. Writes only the budgets to `results/<model>/`.
+  data, capped at `--max-budget`. Independent (not a shared combined-FPR ceiling) so one
+  score's budget isn't set by another's scale. Writes only the budgets to `results/<model>/`.
 - **`distill_labels.py` (client: unlabeled)** touches only what a real client has — its
   own clean baseline and the mixed signal + on-device features, **never the true labels or
   the per-anomaly sets**. Reads the budgets, derives each subject's thresholds from its
@@ -192,8 +190,7 @@ only the budgets are global and everything else is done per-client on unlabeled 
 The labels land in a datasets-shaped tree (`mixed-features/S*/` with the distilled
 `labels.npy`, feature arrays symlinked back to `datasets/`), so the student `FeatureMLP`
 trains on them via `train.py --dataset-dir` — the path to validating an unsupervised
-teacher that needs no labels on-device. (Uniform-tempo timewarp stays below all three
-scores; it needs the activity-expected-HR check on the roadmap.)
+teacher that needs no labels on-device.
 
 ## Run
 

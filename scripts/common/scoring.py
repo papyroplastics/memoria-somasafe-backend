@@ -4,16 +4,14 @@ The detector is an OR of independently-thresholded scores, each oriented
 *higher = more anomalous*:
 
   - ``recon``    reconstruction MSE from the autoencoder — amplitude/integrity
-                 anomalies (spike, blowup, noise).
+                 anomalies (blowup, noise).
   - ``spectral`` in-band spectral entropy — irregular/smeared rhythm (afib), noise.
   - ``rr``       beat-interval coefficient of variation — irregular rhythm (afib).
 
 Each score gets a per-subject threshold — the ``1 - budget`` quantile of that subject's
 own clean-window scores — and a window is anomalous if *any* score crosses its threshold.
 distill_calibrate.py picks the global per-score budgets; distill_labels.py turns them
-into per-subject thresholds and soft labels. The rhythm scores cover the rhythm anomalies
-reconstruction error is structurally blind to; uniform-tempo timewarp is regular and
-stays below all three (handled by a later activity-expected-HR check, see the roadmap).
+into per-subject thresholds and soft labels.
 """
 
 import json

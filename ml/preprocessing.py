@@ -9,6 +9,7 @@ the tf.data pipelines on top of these arrays.
 """
 
 import pickle as pkl
+import random
 from pathlib import Path
 import numpy as np
 
@@ -34,12 +35,8 @@ ACC_WINDOW = ACC_RATE * WINDOW_SECONDS    # 256 samples
 ANOMALY_PROB = 0.5
 MIN_ANOMALY_WINDOWS = 8
 MAX_ANOMALY_WINDOWS = 30
-# Synthetic anomaly kinds (apply_anomaly index). Signal-integrity artifacts
-# (spike/blowup/noise) + rhythm anomalies (timewarp = local tachy/brady, afib =
-# irregularly-irregular rhythm). Flatline and baseline wander were dropped: a
-# flatline is below the AE's reconstruction error floor (catch it with a signal-
-# quality gate instead) and wander is physiological (already in the clean signal).
-ANOMALY_KINDS = ('spike', 'blowup', 'noise', 'timewarp', 'afib')
+
+ANOMALY_KINDS = ('blowup', 'noise', 'tachy', 'brady', 'afib')
 N_FEATURES = 17
 EPS = 1e-8
 
@@ -202,70 +199,53 @@ def build_context_pass(subjects_dir: Path):
 # Stage 2 — Synthetic anomalies on raw BVP
 # ---------------------------------------------------------------------------
 
-def wavy_noise(n: int, rng: np.random.Generator, std: float) -> np.ndarray:
-    """Smooth band-limited random noise over ``n`` samples, std-normalized to ``std``.
-
-    Random values on control points every ~0.12–0.38 s are interpolated to fill the
-    rest, so the result is wavy and below the PPG band rather than per-sample hiss.
-    Control points are evenly spaced (filled by FFT/trigonometric interpolation) or
-    randomly placed (smoothed linear interpolation), chosen per call for variety.
-    """
-    spacing = int(rng.integers(8, 25))
+def wavy_noise(n: int, std: float) -> np.ndarray:
+    """Smooth band-limited random noise over ``n`` samples, std-normalized to ``std``."""
+    spacing = int(np.random.randint(8, 25))
     m = max(3, n // spacing)
-    if rng.random() < 0.5:                                   # regular grid → trig interp
-        noise = np.fft.irfft(np.fft.rfft(rng.normal(0.0, 1.0, size=m)), n)
-    else:                                                    # random points → smoothed linear
-        pos = np.concatenate((
-            [0],
-            np.sort(rng.choice(np.arange(1, n - 1), size=min(m, n - 2), replace=False)),
-            [n - 1]))
-        noise = np.interp(np.arange(n), pos, rng.normal(0.0, 1.0, size=len(pos)))
-        kernel = np.hanning(max(3, spacing))
-        noise = np.convolve(noise, kernel / kernel.sum(), mode='same')
+    noise = np.fft.irfft(np.fft.rfft(np.random.normal(0.0, 1.0, size=m)), n)
     sd = float(noise.std())
-    return (noise / sd * std if sd > 0 else noise).astype(np.float32)
+    return noise / sd * std
 
+def stretch_by(factor, x, y):
+    m = int(round(len(x) * factor))
+    return np.interp(np.linspace(0, len(x) - 1, m), x, y)
 
-def apply_anomaly(segment: np.ndarray, kind: int, rng: np.random.Generator,
-                  sig_range: float, sig_std: float) -> np.ndarray:
-    """Return a perturbed copy of a BVP ``segment`` for ``ANOMALY_KINDS[kind]``.
-
-    Perturbations are scaled by the signal's own range/std so they are equally
-    disruptive at any sensor output range. The rhythm anomalies (timewarp/afib) are
-    monotonic time-warps via ``np.interp`` — they need no beat detection and stay
-    within the segment.
-    """
-    seg = segment.astype(np.float32).copy()
+def apply_anomaly(segment: np.ndarray, kind: int, sig_std: float) -> np.ndarray:
+    """Return a perturbed copy of a BVP ``segment`` for ``ANOMALY_KINDS[kind]``."""
+    seg = segment.copy()
     n = len(seg)
     src = np.linspace(0, n - 1, n)
 
-    if kind == 0:    # spike — baseline step (sustained DC offset over the span)
-        scale = sig_range * float(rng.uniform(0.05, 0.1))
-        seg += scale * float(rng.choice([-1.0, 1.0]))
-    elif kind == 1:  # blowup — amplitude blow-up around the local mean
+    if kind == 0:    # blowup - amplitude blow-up around the local mean
         mean = float(seg.mean())
-        seg = mean + (seg - mean) * float(rng.uniform(2.0, 4.0))
-    elif kind == 2:  # noise — wavy band-limited interference burst
-        seg += wavy_noise(n, rng, sig_std * float(rng.uniform(0.25, 0.4)))
-    elif kind == 3:  # timewarp — uniform tempo change (tachy/brady): resample + refit
-        factor = float(rng.uniform(1.4, 1.8)) if rng.random() < 0.5 else float(rng.uniform(0.55, 0.7))
-        m = max(2, int(round(n / factor)))
-        resampled = np.interp(np.linspace(0, n - 1, m), src, seg).astype(np.float32)
-        seg = (resampled[:n] if m >= n
-               else np.tile(resampled, int(np.ceil(n / m)))[:n]).astype(np.float32)
-    else:            # afib — irregularly-irregular rhythm via a jittered monotonic warp
-        n_ctrl = max(2, n // BVP_RATE)                  # ~1 speed control point per second
+        seg = mean + (seg - mean) * float(np.random.uniform(2.0, 4.0))
+
+    elif kind == 1:  # noise - wavy band-limited interference burst
+        seg += wavy_noise(n, sig_std * float(np.random.uniform(0.25, 0.4)))
+
+    elif kind == 2:  # tachycardia - increased tempo by shrinking and tiling
+        factor = np.random.uniform(0.5, 0.65)
+        resampled = stretch_by(factor, src, seg)
+        seg = np.tile(resampled, int(np.ceil(n / len(resampled))))[:n]
+
+    elif kind == 3:  # bradycardia - decreased tempo by stretching
+        factor = float(np.random.uniform(1.5, 1.65))
+        resampled = stretch_by(factor, src, seg)
+        seg = resampled[:n]
+
+    else:            # afib - irregularly-irregular rhythm via a jittered monotonic warp
+        n_ctrl = max(2, n // BVP_RATE)   # ~1 speed control point per second
         speed = np.interp(src, np.linspace(0, n - 1, n_ctrl),
-                          rng.uniform(0.3, 1.7, size=n_ctrl))
+                          np.random.uniform(0.3, 1.7, size=n_ctrl))
         warp = np.cumsum(speed)
-        warp *= (n - 1) / warp[-1]                      # normalize to [0, n-1], endpoints fixed
-        seg = np.interp(warp, src, seg).astype(np.float32)
+        warp *= (n - 1) / warp[-1]       # normalize to [0, n-1], endpoints fixed
+        seg = np.interp(warp, src, seg)
 
     return seg.astype(np.float32)
 
 
-def inject_mixed(bvp: np.ndarray, rng: np.random.Generator,
-                 anomaly_prob: float) -> tuple[np.ndarray, np.ndarray]:
+def inject_mixed(bvp: np.ndarray, anomaly_prob: float) -> tuple[np.ndarray, np.ndarray]:
     """Inject a window-aligned mix of random anomaly kinds into a raw BVP signal.
 
     Anomalies span whole ``BVP_WINDOW``-sample windows (no partial-overlap windows),
@@ -279,24 +259,21 @@ def inject_mixed(bvp: np.ndarray, rng: np.random.Generator,
     if n_windows == 0:
         return result.astype(np.float32), win_labels
 
-    sig_range = float(bvp.max() - bvp.min())
     sig_std   = float(bvp.std())
-    min_w  = min(MIN_ANOMALY_WINDOWS, n_windows)
-    max_w  = max(min_w, min(MAX_ANOMALY_WINDOWS, n_windows))
     target = int(n_windows * anomaly_prob)
 
-    attempts = 0
-    while int(win_labels.sum()) < target and attempts < 10_000:
-        attempts += 1
-        length = int(rng.integers(min_w, max_w + 1))
-        start  = int(rng.integers(0, max(1, n_windows - length + 1)))
+    while int(win_labels.sum()) < target:
+        length = random.randint(MIN_ANOMALY_WINDOWS, MAX_ANOMALY_WINDOWS)
+        start  = random.randint(0, n_windows - length + 1)
+
         wins   = slice(start, start + length)
         if win_labels[wins].any():
             continue
 
         seg = slice(start * BVP_WINDOW, (start + length) * BVP_WINDOW)
-        kind = int(rng.integers(0, len(ANOMALY_KINDS)))
-        result[seg] = apply_anomaly(result[seg], kind, rng, sig_range, sig_std)
+        kind = int(random.randrange(len(ANOMALY_KINDS)))
+        result[seg] = apply_anomaly(result[seg], kind, sig_std)
+
         win_labels[wins] = 1.0
 
     return result.astype(np.float32), win_labels
@@ -311,16 +288,13 @@ def inject_single_kind(bvp: np.ndarray, kind: int, rng: np.random.Generator) -> 
     if n_windows == 0:
         return result.astype(np.float32)
 
-    sig_range = float(bvp.max() - bvp.min())
     sig_std   = float(bvp.std())
-    min_w = min(MIN_ANOMALY_WINDOWS, n_windows)
-    max_w = max(min_w, min(MAX_ANOMALY_WINDOWS, n_windows))
 
     w = 0
     while w < n_windows:
-        length = min(int(rng.integers(min_w, max_w + 1)), n_windows - w)
+        length = min(int(rng.integers(MIN_ANOMALY_WINDOWS, MAX_ANOMALY_WINDOWS + 1)), n_windows - w)
         seg = slice(w * BVP_WINDOW, (w + length) * BVP_WINDOW)
-        result[seg] = apply_anomaly(result[seg], kind, rng, sig_range, sig_std)
+        result[seg] = apply_anomaly(result[seg], kind, sig_std)
         w += length
 
     return result.astype(np.float32)
@@ -354,13 +328,12 @@ def create_mixed_signals(subjects_dir: Path, mixed_dir: Path):
     feature-mlp training.
     """
     mixed_dir.mkdir(parents=True, exist_ok=True)
-    rng = np.random.default_rng(SEED)
 
     for subject_dir in get_sorted_paths(subjects_dir):
         subject_id = subject_dir.name
         bvp = np.load(subject_dir / 'bvp.npy')
 
-        mixed_bvp, win_labels = inject_mixed(bvp, rng, ANOMALY_PROB)
+        mixed_bvp, win_labels = inject_mixed(bvp, ANOMALY_PROB)
 
         save_dir = mixed_dir / subject_id
         save_dir.mkdir(parents=True, exist_ok=True)
