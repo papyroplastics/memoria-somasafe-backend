@@ -50,8 +50,8 @@ The 5.2 and 5.3 figures are **plotted from training runs, not by training**. Pro
 runs once, then draw both figures from them:
 
 ```bash
-uv run -m scripts.system.train <model> --loop federated --rounds 15 --eval-subjects 2
-uv run -m scripts.system.train <model> --loop normal    --epochs 15 --eval-subjects 2
+uv run -m scripts.system.train <model> --loop federated --eval-subjects 2
+uv run -m scripts.system.train <model> --loop normal    --eval-subjects 2
 uv run -m scripts.figures.plot_convergence <model>      # both figures, no training
 ```
 

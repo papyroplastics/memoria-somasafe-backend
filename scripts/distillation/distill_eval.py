@@ -8,6 +8,7 @@ recall, and the clean false-positive rate. Writes the metrics to results/<model>
 """
 
 
+from common.config import MODELS_DIR
 import argparse
 import json
 from pathlib import Path
@@ -18,13 +19,13 @@ from common.config import DATASETS_DIR
 from ml.data import ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_WINDOW, WINDOW_SECONDS
 from ml.metrics import classification_report
 from ml.model_list import MODELS
-from ..common.autoencoders import load_autoencoder
+from ..common.post_train import get_report_dir, load_budgets, EVAL_REPORT
+from ml.models.common import AutoencoderTrainer
+from ml.saving import load_trainable_weights
 from ..common.scoring import (
     SCORE_NAMES, subject_thresholds, pooled_predict,
     score_dir_by_subject, score_mixed_by_subject, load_mixed_truth,
 )
-from ..common.post_train import get_report_dir, load_budgets, EVAL_REPORT
-
 
 def evaluate(trainer, data_dir: Path, clean: dict[str, dict[str, np.ndarray]],
              mixed: dict[str, dict[str, np.ndarray]], truth: dict[str, np.ndarray],
@@ -103,8 +104,11 @@ if __name__ == "__main__":
     data_dir = DATASETS_DIR
 
     budgets = load_budgets(args.model)
-    # batch_size=1 to match exactly the thresholds distill_labels/a client would use.
-    trainer = load_autoencoder(args.model, batch_size=1)
+
+    # batch_size=1 to match exactly the thresholds distill_labels would use.
+    trainer = MODELS[args.model].build_trainer(args.model, batch_size=1)
+    trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
+    assert isinstance(trainer, AutoencoderTrainer)
 
     window = trainer.window_size
     if window != BVP_WINDOW:

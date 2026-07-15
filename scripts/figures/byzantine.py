@@ -13,7 +13,7 @@ toggles the filter, so honest training is identical across the two lines.
 Unlike the convergence figures, this one has to train: no train.py run produces a poisoned
 round. Every configuration shares one subject-dataset build (see sweeps.py).
 
-    uv run -m scripts.figures.byzantine cnn-ae --max-malicious 4 --rounds 10 --eval-subjects 2
+    uv run -m scripts.figures.byzantine cnn-ae --max-malicious 4 --eval-subjects 2
 """
 
 import argparse
@@ -58,7 +58,7 @@ def main() -> None:
                         help='Malicious delta L2 as a multiple of the honest mean (default: 10)')
     parser.add_argument('--z-threshold', type=float, default=3.0,
                         help='Outlier filter z-score cutoff (default: 3.0)')
-    parser.add_argument('--rounds', type=int, default=10, help='Global rounds (default: 10)')
+    parser.add_argument('--rounds', type=int, default=5, help='Global rounds (default: 10)')
     parser.add_argument('--local-epochs', type=int, default=2,
                         help='Local epochs per round (default: 2)')
     parser.add_argument('--eval-subjects', type=int, default=2,

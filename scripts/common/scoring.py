@@ -27,10 +27,24 @@ from ml.data import (
 from ml.models.common import AutoencoderTrainer
 
 from . import dsp
-from .autoencoders import window_errors
 
 SCORE_NAMES = ('recon', 'spectral', 'rr')
 
+
+def window_errors(model, signal: np.ndarray, cond: np.ndarray,
+                  window: int, n_windows: int) -> np.ndarray:
+    bs = model.batch_size
+    signal = signal.astype(np.float32)
+    cond = cond.astype(np.float32)
+    n_windows = min(n_windows, len(signal) // window, len(cond))
+    n_windows -= n_windows % bs
+    errors = np.empty(n_windows, dtype=np.float32)
+    for start in range(0, n_windows, bs):
+        wins = np.stack([signal[(start + i) * window:(start + i + 1) * window] for i in range(bs)])
+        conds = cond[start:start + bs]
+        out = model.eval(wins, conds)
+        errors[start:start + bs] = out['error'].numpy()
+    return errors
 
 def score_windows(model, signal: np.ndarray, cond: np.ndarray,
                   window: int, n_windows: int) -> dict[str, np.ndarray]:

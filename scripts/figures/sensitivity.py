@@ -14,7 +14,7 @@ produces), but every run shares one subject-dataset build and identical configur
 trained once (see sweeps.py) — with `--sweep all` the full-pool participants point and the
 default local-epochs point are the same run.
 
-    uv run -m scripts.figures.sensitivity cnn-ae --rounds 10
+    uv run -m scripts.figures.sensitivity cnn-ae --rounds 5
     uv run -m scripts.figures.sensitivity cnn-ae --sweep loso --loso-folds 5
 """
 
@@ -147,7 +147,7 @@ def main() -> None:
     parser.add_argument('model', choices=sorted(MODELS), help='Model to sweep')
     parser.add_argument('--sweep', choices=[*SWEEPS, 'all'], default='all',
                         help='Which sweep to run (default: all)')
-    parser.add_argument('--rounds', type=int, default=10, help='Global rounds (default: 10)')
+    parser.add_argument('--rounds', type=int, default=5, help='Global rounds (default: 10)')
     parser.add_argument('--local-epochs', type=int, default=2,
                         help='Local epochs per round for the non-local-epoch sweeps (default: 2)')
     parser.add_argument('--eval-subjects', type=int, default=2,

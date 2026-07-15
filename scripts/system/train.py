@@ -50,7 +50,7 @@ if __name__ == "__main__":
                         help='Subjects held out whole for evaluation (default: 2). The last '
                              'N subjects; both loops train on the rest and score on these.')
     parser.add_argument('--epochs', type=int, default=5, help='Epochs for the normal loop')
-    parser.add_argument('--rounds', type=int, default=15, help='Global rounds for the federated loop')
+    parser.add_argument('--rounds', type=int, default=5, help='Global rounds for the federated loop')
     parser.add_argument('--local-epochs', type=int, default=2, help='Local epochs per round (federated)')
     parser.add_argument('--batch-size', type=int, default=None,
                         help='Override the model default batch size. Artifacts from a '

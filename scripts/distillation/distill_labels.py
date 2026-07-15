@@ -11,6 +11,9 @@ that train.py consumes via --dataset-dir. For the labeled diagnostics see distil
 """
 
 
+from common.config import MODELS_DIR
+from ml.saving import load_trainable_weights
+from ml.models.common import AutoencoderTrainer
 import argparse
 from pathlib import Path
 
@@ -19,7 +22,6 @@ import numpy as np
 from common.config import RESULTS_DIR, DATASETS_DIR
 from ml.data import MIXED_FEATURE_SUBDIR, FEATURE_STATS_FILE, BVP_WINDOW, WINDOW_SECONDS
 from ml.model_list import MODELS
-from ..common.autoencoders import load_autoencoder
 from ..common.scoring import (
     SCORE_NAMES, subject_thresholds, soft_score, median3,
     score_dir_by_subject, score_mixed_by_subject,
@@ -46,10 +48,13 @@ if __name__ == "__main__":
     result_dir = RESULTS_DIR / args.model
 
     budgets = load_budgets(args.model)
+
     # batch_size=1 so every window is scored (no batch remainder dropped): distilled
     # labels line up 1:1 with the feature windows, and each subject's thresholds are set
     # from its full clean set — the same thing an on-device client does.
-    trainer = load_autoencoder(args.model, batch_size=1)
+    trainer = MODELS[args.model].build_trainer(args.model, batch_size=1)
+    trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
+    assert isinstance(trainer, AutoencoderTrainer)
 
     window = trainer.window_size
     if window != BVP_WINDOW:

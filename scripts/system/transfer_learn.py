@@ -24,7 +24,7 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=3,
                         help='Fine-tuning epochs after the weight transfer')
     parser.add_argument('--eval-subjects', type=int, default=2,
-                        help='Subjects held out whole for evaluation (default: 2)')
+                        help='Subjects held out whole for evaluation')
     args = parser.parse_args()
 
     data_dir = DATASETS_DIR

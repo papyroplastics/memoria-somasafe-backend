@@ -4,6 +4,9 @@ clean signal and every anomaly kind, then a second figure with
 those same windows reconstructed by a trained autoencoder.
 """
 
+from common.config import MODELS_DIR
+from ml.saving import load_trainable_weights
+from ml.models.common import AutoencoderTrainer
 import argparse
 
 import matplotlib.pyplot as plt
@@ -16,7 +19,6 @@ from ml.data import (
     conditional_windows, get_sorted_paths,
 )
 from ..common.post_train import get_report_dir, write_summary
-from ..common.autoencoders import load_autoencoder
 
 KINDS = ('clean', *ANOMALY_KINDS)
 
@@ -44,7 +46,10 @@ if __name__ == "__main__":
 
     rng = np.random.default_rng(args.seed)
 
-    trainer = load_autoencoder(args.model, batch_size=1)
+    trainer = MODELS[args.model].build_trainer(args.model, batch_size=1)
+    trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
+    assert isinstance(trainer, AutoencoderTrainer)
+
     window = trainer.window_size
 
     subjects_dir = DATASETS_DIR / CLEAN_SUBDIR

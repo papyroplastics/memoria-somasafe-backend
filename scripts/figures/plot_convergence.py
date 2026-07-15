@@ -4,8 +4,8 @@
 This script trains nothing: it reads the history and manifest each run already wrote to
 results/<model>/<loop>/ and fails if they are missing. Produce them with:
 
-    uv run -m scripts.system.train <model> --loop federated --rounds 15 --eval-subjects 2
-    uv run -m scripts.system.train <model> --loop normal    --epochs 15 --eval-subjects 2
+    uv run -m scripts.system.train <model> --loop federated --eval-subjects 2
+    uv run -m scripts.system.train <model> --loop normal    --eval-subjects 2
     uv run -m scripts.figures.plot_convergence <model>
 
 The federated run alone gives the convergence curve. With a normal run at the same

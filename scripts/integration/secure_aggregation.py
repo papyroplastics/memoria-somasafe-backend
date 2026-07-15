@@ -21,7 +21,7 @@ import numpy as np
 from sqlmodel import Session
 
 from common.celery_tasks import SECURE_AGG_TASK
-from common.config import SECURE_MIN_MEMBERS
+from common.config import SECURE_MIN_MEMBERS, SEED
 from common.db import (
     GlobalWeights,
     SubmissionType,
@@ -58,7 +58,7 @@ def read_weights(weights_id: int) -> np.ndarray:
         return np.frombuffer(row.weights, dtype=np.float32)
 
 
-def run(base: str, key: str, clients: int, rounds: int, seed: int) -> None:
+def run(base: str, key: str, clients: int, rounds: int) -> None:
     with Session(engine) as session:
         version = get_latest_version(session, key)
         if version is None:
@@ -72,7 +72,7 @@ def run(base: str, key: str, clients: int, rounds: int, seed: int) -> None:
     # Long-term ECDH keypairs, generated once and reused across rounds (the round id
     # in the mask seed keeps each round's masks fresh regardless).
     keypairs = {f"test_{i}": generate_keypair() for i in range(1, clients + 1)}
-    rng = np.random.default_rng(seed)
+    rng = np.random.default_rng(SEED)
 
     print(f"model={key} type=secure clients={clients} rounds={rounds} (no training)")
 
@@ -148,12 +148,11 @@ def main() -> None:
     parser.add_argument("--clients", type=int, default=SECURE_MIN_MEMBERS,
                         help=f"cohort size, one test_N user each (default: {SECURE_MIN_MEMBERS})")
     parser.add_argument("--rounds", type=int, default=1, help="rounds to run (default: 1)")
-    parser.add_argument("--seed", type=int, default=0, help="RNG seed (default: 0)")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL,
                         help=f"gateway base URL (default: {DEFAULT_BASE_URL})")
     args = parser.parse_args()
 
-    run(args.base_url, args.model, args.clients, args.rounds, args.seed)
+    run(args.base_url, args.model, args.clients, args.rounds)
 
 
 if __name__ == "__main__":
