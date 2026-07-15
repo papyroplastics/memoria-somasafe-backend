@@ -102,8 +102,8 @@ class TrainableAutoencoder(TrainableModel):
     default_batch_size = 12
 
     def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int, n_cond: int,
-                 cond_embed_dim, n_outputs, diff_weight, latent_dropout: float,
-                 signal_mean, signal_std, cond_mean, cond_std):
+                 cond_embed_dim, n_outputs, diff_weight, signal_mean, signal_std,
+                 cond_mean, cond_std):
         super().__init__(name=name)
         self.batch_size = batch_size
         self.seq_len = seq_len
@@ -112,7 +112,6 @@ class TrainableAutoencoder(TrainableModel):
         self.cond_embed_dim = cond_embed_dim
         self.n_outputs = n_outputs
         self.diff_weight = diff_weight
-        self.latent_dropout = latent_dropout
         self.signal_shape = (batch_size, seq_len, n_signals)
         self.cond_shape = (batch_size, n_cond)
 
@@ -129,11 +128,6 @@ class TrainableAutoencoder(TrainableModel):
     def _embed_cond(self, cond: tf.Tensor) -> tf.Tensor:
         return self.cond_dense2(self.cond_dense1(cond))
 
-    def _drop_latent(self, z: tf.Tensor, training: bool) -> tf.Tensor:
-        if training and self.latent_dropout > 0.0:
-            return tf.nn.dropout(z, rate=self.latent_dropout)
-        return z
-
     def _bind(self, learning_rate: float, beta1: float, beta2: float, epsilon: float):
         """Bind train/eval/infer/save/restore. Call once all layers exist."""
         self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
@@ -149,12 +143,12 @@ class TrainableAutoencoder(TrainableModel):
         self.train = tf.function(self.train_eager, input_signature=signature)
         self._init_save_restore()
 
-    def _forward(self, signal: tf.Tensor, cond: tf.Tensor, training: bool = False) -> tf.Tensor:
+    def _forward(self, signal: tf.Tensor, cond: tf.Tensor) -> tf.Tensor:
         raise NotImplementedError
 
     def _eval_core(self, signal: tf.Tensor, cond: tf.Tensor):
         """Reconstruction + error from already-normalized signal/cond."""
-        reconstruction = self._forward(signal, cond, training=False)
+        reconstruction = self._forward(signal, cond)
         target = signal[:,:,:self.n_outputs]
         return {'reconstruction': reconstruction,
                 'error': reconstruction_error(reconstruction, target)}
@@ -172,7 +166,7 @@ class TrainableAutoencoder(TrainableModel):
         cond = (cond - self.cond_mean) / self.cond_std
         target = signal[:,:,:self.n_outputs]
         with tf.GradientTape() as tape:
-            reconstruction = self._forward(signal, cond, training=True)
+            reconstruction = self._forward(signal, cond)
             loss = (mse_loss(reconstruction, target)
                     + self.diff_weight * first_difference_loss(reconstruction, target))
         grads = tape.gradient(loss, self.trainable_variables)

@@ -20,12 +20,11 @@ class GRUAutoencoder(TrainableAutoencoder):
                  signal_mean, signal_std, cond_mean, cond_std, n_signals: int = 1,
                  n_cond: int = N_COND, hidden_dim: int = 64, latent_dim: int = 32,
                  learning_rate: float = 1e-3, cond_embed_dim: int = 16, n_outputs: int = 1,
-                 diff_weight: float = 1.0, latent_dropout: float = 0.1,
-                 beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
+                 diff_weight: float = 1.0, beta1: float = 0.9, beta2: float = 0.999,
+                 epsilon: float = 1e-7):
         super().__init__(name=name, batch_size=batch_size, seq_len=seq_len,
                          n_signals=n_signals, n_cond=n_cond, cond_embed_dim=cond_embed_dim,
                          n_outputs=n_outputs, diff_weight=diff_weight,
-                         latent_dropout=latent_dropout,
                          signal_mean=signal_mean, signal_std=signal_std,
                          cond_mean=cond_mean, cond_std=cond_std)
 
@@ -39,7 +38,7 @@ class GRUAutoencoder(TrainableAutoencoder):
 
         self._bind(learning_rate, beta1, beta2, epsilon)
 
-    def _forward(self, signal, cond, training=False):
+    def _forward(self, signal, cond):
         emb = self._embed_cond(cond)
 
         h1 = self.enc_gru1.zero_state(self.batch_size)
@@ -48,7 +47,7 @@ class GRUAutoencoder(TrainableAutoencoder):
             h1 = self.enc_gru1.step(h1, signal[:, t, :])
             h2 = self.enc_gru2.step(h2, h1)
 
-        z = self._drop_latent(self.to_latent(tf.concat([h2, emb], axis=1)), training)
+        z = self.to_latent(tf.concat([h2, emb], axis=1))
 
         dh1 = self.dec_gru1.zero_state(self.batch_size)
         dh2 = self.dec_gru2.zero_state(self.batch_size)

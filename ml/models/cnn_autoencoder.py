@@ -35,13 +35,11 @@ class CNNAutoencoder(TrainableAutoencoder):
                  signal_mean, signal_std, cond_mean, cond_std, n_signals: int = 1,
                  n_cond: int = N_COND, hidden_dim: int = 32, latent_dim: int = 256,
                  cond_embed_dim: int = 16, kernel_size: int = 7, n_outputs: int = 1,
-                 diff_weight: float = 1.0, latent_dropout: float = 0.0,
-                 learning_rate: float = 1e-3,
+                 diff_weight: float = 1.0, learning_rate: float = 1e-3,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
         super().__init__(name=name, batch_size=batch_size, seq_len=seq_len,
                          n_signals=n_signals, n_cond=n_cond, cond_embed_dim=cond_embed_dim,
                          n_outputs=n_outputs, diff_weight=diff_weight,
-                         latent_dropout=latent_dropout,
                          signal_mean=signal_mean, signal_std=signal_std,
                          cond_mean=cond_mean, cond_std=cond_std)
 
@@ -66,11 +64,11 @@ class CNNAutoencoder(TrainableAutoencoder):
 
         self._bind(learning_rate, beta1, beta2, epsilon)
 
-    def _forward(self, signal, cond, training=False):
+    def _forward(self, signal, cond):
         x = self.enc3(self.enc2(self.enc1(signal)))
 
         z = self.to_latent(tf.reshape(x, [-1, self.enc_flat]))
-        z = self._drop_latent(z, training)
+        z = z
 
         emb = self._embed_cond(cond)
         x = relu(self.from_latent(z) + self.from_cond(emb))
