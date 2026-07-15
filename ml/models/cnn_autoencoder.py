@@ -2,7 +2,7 @@ from pathlib import Path
 
 import tensorflow as tf
 
-from ..layers import Conv1D, Dense, FiLM, relu, upsample2
+from ..layers import Conv1D, Dense, relu, upsample2
 from ..preprocessing import N_COND, BVP_WINDOW
 from .common import TrainableAutoencoder, AutoencoderTrainer, autoencoder_norm_params
 
@@ -15,19 +15,28 @@ class CNNAutoencoder(TrainableAutoencoder):
     convolutions. Collapsing time is the point: strided convs alone only shrink the
     time axis, leaving ``(seq_len / 8) * channels`` values — as many numbers as the
     input BVP, enough to copy it verbatim. No recurrence, so it quantizes cleanly for
-    TFLM and avoids the LSTM's 1024-step unroll. The decoder is conditioned with FiLM
-    at every layer (per-channel scale/shift from the embedded ``cond`` vector), and
-    the code is deliberately small with latent dropout, so the decoder leans on the
-    condition to generate the *expected normal* signal rather than copying the input —
-    which is what lets reconstruction error separate anomalies it would otherwise
-    reproduce. Encoder sees ``[BVP, ACC]``; decoder reconstructs BVP only.
-    ``seq_len`` must be divisible by ``2 ** 3``."""
+    TFLM and avoids the LSTM's 1024-step unroll. The condition enters once, joined to
+    the code at the bottleneck, so the decoder reconstructs from ``[z, cond]`` jointly.
+    Encoder and decoder both see BVP only; ACC reaches the model solely as ``cond``'s
+    activity context — as a raw encoder channel it measured as a no-op. ``seq_len`` must
+    be divisible by ``2 ** 3``.
+
+    What makes reconstruction error separate anomalies is how *tightly* the model fits
+    the clean-BVP manifold, not how narrow the code is: a sharper fit makes off-manifold
+    input (blown-up amplitude, elevated rate) miss by relatively more. Detection therefore
+    improves with capacity up to ``latent_dim`` 256 and degrades past it, and starving the
+    code hurts — at 16 it cannot reconstruct clean BVP either and detection collapses with
+    it. The threshold is a quantile of each subject's own clean errors, so the absolute
+    error scale cancels and only the clean/anomalous overlap matters. Bradycardia is
+    undetectable here by construction: a slowed waveform is *easier* to reconstruct, so its
+    error moves the wrong way."""
 
     def __init__(self, name: str, batch_size: int, seq_len: int,
-                 signal_mean, signal_std, cond_mean, cond_std, n_signals: int = 2,
-                 n_cond: int = N_COND, hidden_dim: int = 32, latent_dim: int = 32,
+                 signal_mean, signal_std, cond_mean, cond_std, n_signals: int = 1,
+                 n_cond: int = N_COND, hidden_dim: int = 32, latent_dim: int = 256,
                  cond_embed_dim: int = 16, kernel_size: int = 7, n_outputs: int = 1,
-                 diff_weight: float = 1.0, latent_dropout: float = 0.1, learning_rate: float = 1e-3,
+                 diff_weight: float = 1.0, latent_dropout: float = 0.0,
+                 learning_rate: float = 1e-3,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
         super().__init__(name=name, batch_size=batch_size, seq_len=seq_len,
                          n_signals=n_signals, n_cond=n_cond, cond_embed_dim=cond_embed_dim,
@@ -44,12 +53,15 @@ class CNNAutoencoder(TrainableAutoencoder):
         self.enc_channels = hidden_dim
         self.enc_flat = self.enc_steps * hidden_dim
         self.to_latent = Dense(self.enc_flat, latent_dim)
-        self.from_latent = Dense(latent_dim, self.enc_flat, activation=relu)
+
+        # Concatenating [z, emb] and projecting once is W·[z;emb] = W_z·z + W_c·emb, so
+        # the two projections below are that same layer — split to keep tf.concat out of
+        # the train signature, whose gradient needs the Flex-only ConcatOffset.
+        self.from_latent = Dense(latent_dim, self.enc_flat)
+        self.from_cond = Dense(cond_embed_dim, self.enc_flat)
 
         self.dec1 = Conv1D(hidden_dim, hidden_dim, kernel_size, activation=relu)
-        self.film1 = FiLM(cond_embed_dim, hidden_dim)
         self.dec2 = Conv1D(hidden_dim, hidden_dim, kernel_size, activation=relu)
-        self.film2 = FiLM(cond_embed_dim, hidden_dim)
         self.dec3 = Conv1D(hidden_dim, n_outputs, kernel_size, activation=None)
 
         self._bind(learning_rate, beta1, beta2, epsilon)
@@ -59,11 +71,13 @@ class CNNAutoencoder(TrainableAutoencoder):
 
         z = self.to_latent(tf.reshape(x, [-1, self.enc_flat]))
         z = self._drop_latent(z, training)
-        x = tf.reshape(self.from_latent(z), [-1, self.enc_steps, self.enc_channels])
 
         emb = self._embed_cond(cond)
-        x = self.film1(self.dec1(upsample2(x)), emb)
-        x = self.film2(self.dec2(upsample2(x)), emb)
+        x = relu(self.from_latent(z) + self.from_cond(emb))
+        x = tf.reshape(x, [-1, self.enc_steps, self.enc_channels])
+
+        x = self.dec1(upsample2(x))
+        x = self.dec2(upsample2(x))
         x = self.dec3(upsample2(x))
         return x
 

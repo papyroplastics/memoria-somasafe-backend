@@ -68,7 +68,8 @@ if __name__ == "__main__":
     views = window_views(DATASETS_DIR, sid, window, index)
     t = np.arange(window) / BVP_RATE
 
-    signals = np.stack([views[k][0] for k in KINDS]).astype(np.float32)
+    n_signals = trainer.model.n_signals
+    signals = np.stack([views[k][0][:, :n_signals] for k in KINDS]).astype(np.float32)
     conds = np.stack([views[k][1] for k in KINDS]).astype(np.float32)
     recons = eval_padded(trainer.model, signals, conds)['reconstruction'][:, :, 0]
 

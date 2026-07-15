@@ -292,9 +292,11 @@ class TrainerBuilder(Protocol):
 
 def autoencoder_norm_params(data_root: Path, data_subdir: str = CLEAN_SUBDIR):
     """z-score params baked into an autoencoder so it normalizes its own raw inputs:
-    signal per ``[BVP, ACC]`` channel and cond as ``[static(6), context(2)]``."""
+    signal as ``[BVP]`` and cond as ``[static(6), context(2)]``. ``norm_stats`` also
+    carries ACC, which the autoencoders no longer take as an input channel — it reaches
+    them only as ``cond``'s activity context — so only the BVP column is baked in."""
     subjects_dir = data_root / data_subdir
-    sig_mean, sig_std = norm_stats(subjects_dir)
+    sig_mean, sig_std = (s[:1] for s in norm_stats(subjects_dir))
     stat_mean, stat_std = load_static_norm_params(subjects_dir)
     ctx_mean, ctx_std = load_context_norm_params(subjects_dir)
     cond_mean = np.concatenate([stat_mean, ctx_mean]).astype(np.float32)
@@ -306,7 +308,7 @@ class AutoencoderTrainer(Trainer):
     primary_metric = 'recon_error'
     dataset_tensors = ['signal', 'cond']
     n_eval_inputs = 2
-    contract_version = 2   # norm layout: signal mean/std(2 each), cond mean/std(8 each)
+    contract_version = 2   # norm layout: signal mean/std(1 each), cond mean/std(8 each)
 
     default_shift = BVP_RATE * 3
 
@@ -343,7 +345,7 @@ class AutoencoderTrainer(Trainer):
             recon = self.model.eval(*batch)['reconstruction']
             fig, axs = plt.subplots(1, 2)
             axs[0].plot(batch[0][0].numpy())
-            axs[0].set_title('Input window [BVP, ACC]')
+            axs[0].set_title('Input window [BVP]')
             axs[1].plot(recon[0].numpy())
             axs[1].set_title('Reconstruction [BVP]')
             fig.savefig(result_dir / 'reconstruction.png')

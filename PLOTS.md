@@ -60,7 +60,7 @@ uv run -m scripts.figures.plot_convergence <model>      # both figures, no train
 | `results/<model>/<loop>/training.png` + `training.csv` + `run.yaml` (+ `reconstruction.png` for AEs, eval report) | `scripts.system.train <model> --loop {normal,federated} --eval-subjects K` | 5.2/5.3 (the underlying runs; the source both figures below read) |
 | `results/<model>/federated/convergence.png` + `.csv` + `.yaml` | `scripts.figures.plot_convergence <model>` | **5.2** federated model improves round over round |
 | `results/<model>/centralized_vs_federated/centralized_vs_federated.png` + `.csv` + `.yaml` | `scripts.figures.plot_convergence <model>` (same run; `--skip-overlay` to omit) | **5.3** FedAvg ≈ centralized without centralizing raw data (central claim) |
-| `results/<model>/distill_eval.json` | `scripts.distillation.distill_eval <model>` | **5.4** per-kind recall, clean FPR, per-score thresholds / accuracy·F1 |
+| `results/<model>/distill_eval.json` | `scripts.distillation.distill_eval <model>` | **5.4** per-kind recall, clean FPR, detector vs. spectral baseline / accuracy·F1 |
 | `results/<model>/personalization/personalization[_S*].csv` + `.json` | `scripts.distillation.personalize_test --model feature-mlp --teacher <ae>` | **5.4** personalization marginal-positive; int8 ≈ float |
 | `results/<model>/byzantine/byzantine.png` + `.csv` + `.yaml` | `scripts.figures.byzantine <model> --max-malicious N --rounds R` | **5.5** outlier filter holds the round (and no more) — trains |
 | `results/footprint/footprint.csv` + `.yaml` | `scripts.figures.footprint` | **5.6** system fits the edge (backend rows; phone/ESP32 rows pasted in) |
@@ -76,7 +76,7 @@ weights (`ml.loading` caches them).
 The unsupervised-teacher → student pipeline, end to end:
 
 ```bash
-uv run -m scripts.distillation.distill_calibrate <ae>   # budgets  -> results/<ae>/distill_calibration.json
+uv run -m scripts.distillation.distill_calibrate <ae>   # budget   -> results/<ae>/distill_calibration.json
 uv run -m scripts.distillation.distill_eval      <ae>   # metrics  -> results/<ae>/distill_eval.json
 uv run -m scripts.distillation.distill_labels    <ae>   # teacher  -> results/<ae>/distilled-labels/
 uv run -m scripts.system.train feature-mlp \
@@ -100,8 +100,8 @@ uv run -m scripts.distillation.personalize_test --model feature-mlp --teacher <a
 
 ## Integration verification (methodology, Sec. 5.1 — not report figures)
 
-Evidence the deployed path works; requires the full stack up (api, worker, redis, postgres,
-minio) and a seeded DB (`make db-seed`).
+Evidence the deployed path works; requires the full stack up (api, worker, redis, postgres)
+and a seeded DB (`make db-seed`).
 
 | Output | Command | Purpose |
 |--------|---------|---------|

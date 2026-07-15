@@ -151,22 +151,6 @@ class Conv1D(tf.Module):
         return self.activation(out)
 
 
-class FiLM(tf.Module):
-    def __init__(self, cond_dim: int, n_channels: int):
-        self.to_gamma = Dense(cond_dim, n_channels)
-        self.to_beta = Dense(cond_dim, n_channels)
-
-    def __call__(self, x, cond):
-        # Broadcast via reshape instead of [:, None, :]: its gradient is the builtin
-        # Reshape, while a strided slice's is the Flex-only StridedSliceGrad. The
-        # batch dim is inferred (-1) to stay batch-polymorphic for the int8 calibrator.
-        channels = int(x.shape[-1])
-        gamma = 1.0 + self.to_gamma(cond)          # (B, C)
-        beta = self.to_beta(cond)                  # (B, C)
-        return (x * tf.reshape(gamma, [-1, 1, channels])
-                + tf.reshape(beta, [-1, 1, channels]))
-
-
 def sinusoidal_encoding(length: int, dim: int) -> tf.Tensor:
     pos = np.arange(length)[:, None]
     idx = np.arange(dim)[None, :]

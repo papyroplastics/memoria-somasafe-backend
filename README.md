@@ -31,13 +31,18 @@ make proto    # protoc shared/dataset.proto -> scripts/common/dataset_pb2.py (gi
 
 The codebase splits along its three runtime concerns — the TensorFlow work (`ml/`), the
 async task layer (`worker/`), and the HTTP gateway (`api/`) — plus shared, TF-free infra
-in `common/` (config, DB tables, the model registry) imported by both api and worker.
+in `common/` (config, DB tables, Redis) imported by both api and worker. The model registry
+is *not* here: it builds TensorFlow trainers, so it lives in `ml/model_list.py` and the api
+never imports it.
 
 ```txt
-common/    Shared, TensorFlow-free infra imported by api + worker: env-driven config,
-           the secure-aggregation primitives (secure_agg.py), the zstd transport wrapper
-           (compression.py), and the SQLModel tables (User, AuthSession, Device,
-           ModelDefinition, ModelVersion, GlobalWeights, WeightsArtifact,
+common/    Shared, TensorFlow-free infra imported by api + worker: env-driven config
+           (config.py), the secure-aggregation primitives (secure_agg.py), the zstd
+           transport wrapper (compression.py), the shared Redis client (redis.py) and the
+           two-phase rate-limit primitives over it (ratelimit.py — the worker clears limits
+           after a round, so the keying cannot live in api/), the Celery task-name constants
+           both sides address (celery_tasks.py), and the SQLModel tables (User, AuthSession,
+           Device, ModelDefinition, ModelVersion, GlobalWeights, WeightsArtifact,
            ClientDeltaSubmission, QuantizationJob, QuantizationResult, SecureRound,
            SecureRoundMember, Firmware, FirmwareImage).
 api/       FastAPI gateway (no TensorFlow): routers for auth/device/model (routes/),
@@ -76,6 +81,11 @@ scripts/   CLI entry points, grouped into subpackages by how each relates to the
                            train, over datasets ml.loading builds once), footprint.
 ```
 
+[`TUNING.md`](TUNING.md) records the `cnn-ae` tuning pass and the distillation
+simplification — the sweep data behind the current defaults, the negative results (FiLM and
+latent dropout were dead weight; the raw ACC channel is a no-op), why calibration maximizes
+Youden's J rather than F1, and which anomaly kinds are undetectable by construction.
+
 Evaluation/experiment output (histories, reports, figures, distilled labels) goes to
 `results/<model>/`; the served `.tflite` artifacts stay in `shared/gen/models/<model>/`.
 [`PLOTS.md`](PLOTS.md) catalogs every figure/report file, the command that produces it, and
@@ -111,18 +121,24 @@ overlay runs whose manifests disagree.
 
 Autoencoder variants (LSTM/GRU/CNN/...) share `TrainableAutoencoder` (reconstruction
 train/eval + conditioning) and `AutoencoderTrainer` (windowing + recon-error metrics).
-The encoder sees `[BVP, ACC]` but the decoder reconstructs **BVP only** — ACC is
-exogenous context that explains motion artifacts and is kept out of the anomaly score.
-Every model is **conditioned** on a single `cond` vector — z-scored demographics plus a
-causal *activity context* (trailing-2-min mean/std of the ACC). The context is computed
-from the **raw** ACC; the whole `cond` (and the `[BVP, ACC]` signal) is fed to the model
-**raw**, and the model z-scores it in its `eval`/`train` signatures with baked-in
-constants (`context_norm_params.npy` is just the ACC mean/std, so normalizing it equals
-the old "normalize ACC, then take trailing stats"). The on-device pipeline feeds raw the
-same way. This way the decoder generates the signal *expected for this person at this activity level* rather
-than copying its input; a small bottleneck + latent dropout push it to lean on the
-condition. The objective is reconstruction MSE plus a first-difference (slope) term that
-penalizes a constant "flat line" output.
+They reconstruct **BVP only**, from BVP only: ACC as a raw encoder channel measured as a
+no-op (identical reconstruction error and identical per-kind recall, to three decimals), so
+it reaches the model *solely* through the condition. Every model is **conditioned** on a
+single `cond` vector — z-scored demographics plus a causal *activity context* (trailing-2-min
+mean/std of the ACC). The context is computed from the **raw** ACC; the whole `cond` (and
+the BVP signal) is fed to the model **raw**, and the model z-scores it in its `eval`/`train`
+signatures with baked-in constants (`context_norm_params.npy` is just the ACC mean/std, so
+normalizing it equals the old "normalize ACC, then take trailing stats"). The on-device
+pipeline feeds raw the same way. The objective is reconstruction MSE plus a first-difference
+(slope) term that penalizes a constant "flat line" output.
+
+What makes the error separate anomalies is how **tightly the model fits the clean-BVP
+manifold**, not how narrow the code is — a sharper fit makes off-manifold input miss by
+relatively more. Detection therefore improves with capacity up to `latent_dim` 256 and
+degrades past it, and *starving* the code hurts: at 16 it cannot reconstruct clean BVP
+either and detection collapses with it. Latent dropout hurts for the same reason and is off
+by default. Since each threshold is a quantile of the subject's own clean errors, the
+absolute error scale cancels — only the clean/anomalous overlap matters.
 
 ## Models
 
@@ -156,35 +172,42 @@ also dropped.
 
 ### Autoencoder evaluation and distillation
 
-The detector is an OR of **several scores**, each oriented higher = more anomalous:
-reconstruction MSE, OR'd with two cheap, jDSP-portable rhythm indices (in-band spectral
-entropy, beat-interval coefficient-of-variation). A window is anomalous if any score
-crosses its threshold, and the threshold is **per subject** — each
-score fires at the `1 - budget` quantile of *that subject's own* clean windows, so a
-subject-specific score scale (reconstruction error especially) gives a uniform per-subject
-false-alarm rate instead of one dominated by the noisiest subjects. The work splits into
-three scripts along **what data each is allowed to see** — mirroring deployment, where
-only the budgets are global and everything else is done per-client on unlabeled data:
+The detector is the autoencoder's **reconstruction MSE**, oriented higher = more
+anomalous. Its threshold is **per subject** — it fires at the `1 - budget` quantile of
+*that subject's own* clean windows, so a subject-specific error scale gives a uniform
+per-subject false-alarm rate instead of one dominated by the noisiest subjects. The
+`budget` (the share of clean windows the detector may fire on) is a single global number,
+the only thing calibration picks. Because each threshold is a quantile of the subject's own
+clean scores, the clean false-positive rate a budget buys *is* the budget, so the
+calibration reduces to maximizing `recall(budget) - budget` over a 1-D grid.
 
-- **`distill_calibrate.py` (server: labeled, global)** picks the per-score **budgets** —
-  the only globally-relevant output, and the only thing that reads the synthetic labels.
-  Each budget (the quantile level a client thresholds at) is chosen *independently* as the
-  level that maximizes that score's Youden's J (recall minus clean FPR) on the labeled
-  data, capped at `--max-budget`. Independent (not a shared combined-FPR ceiling) so one
-  score's budget isn't set by another's scale. Writes only the budgets to `results/<model>/`.
+In-band spectral entropy is scored alongside as a hand-crafted **baseline**, thresholded at
+the same budget so its precision/recall are directly comparable. It is not part of the
+detector and never reaches the distilled labels — `distill_eval.py` reports it so the
+learned teacher can be read against a classical index.
+
+The work splits into three scripts along **what data each is allowed to see** — mirroring
+deployment, where only the budget is global and everything else is done per-client on
+unlabeled data:
+
+- **`distill_calibrate.py` (server: labeled, global)** picks the **budget** — the only
+  globally-relevant output, and the only thing that reads the synthetic labels. It is the
+  level maximizing the detector's Youden's J (mixed-set recall minus clean FPR) on the
+  labeled data. Writes the budget (and the whole sweep, for the report) to
+  `results/<model>/`.
 - **`distill_labels.py` (client: unlabeled)** touches only what a real client has — its
   own clean baseline and the mixed signal + on-device features, **never the true labels or
-  the per-anomaly sets**. Reads the budgets, derives each subject's thresholds from its
+  the per-anomaly sets**. Reads the budget, derives each subject's threshold from its
   *own* clean windows, and emits a **soft** `[0,1]` label per window: the clean-CDF rank
-  past each score's threshold, max'd across scores (so `label > 0` reproduces the hard OR),
-  then a size-1 temporal **median filter** (real anomalies span many windows, so a lone
-  flag is a false positive and a lone gap a false negative — cleaned without tuning to the
-  injected span length). Soft targets carry the teacher's confidence — proper knowledge
-  distillation, not just pseudo-labeling.
-- **`distill_eval.py` (science: unrestricted)** replays the same budgets → per-subject
-  thresholds a client uses, then scores the OR detector against the true mixed-window
-  labels and the per-type `anomalous-signals/` sets: OR-combined + per-score
-  precision/recall/F1, per-anomaly-kind recall, clean FPR. Writes the metrics to
+  past that threshold (so `label > 0` reproduces the hard decision), then a size-1 temporal
+  **median filter** (real anomalies span many windows, so a lone flag is a false positive
+  and a lone gap a false negative — cleaned without tuning to the injected span length).
+  Soft targets carry the teacher's confidence — proper knowledge distillation, not just
+  pseudo-labeling.
+- **`distill_eval.py` (science: unrestricted)** replays the same budget → per-subject
+  thresholds a client uses, then scores the detector against the true mixed-window labels
+  and the per-type `anomalous-signals/` sets: precision/recall/F1, per-anomaly-kind recall
+  and clean FPR, for the detector and the spectral baseline alike. Writes the metrics to
   `results/<model>/`.
 
 The labels land in a datasets-shaped tree (`mixed-features/S*/` with the distilled
@@ -262,13 +285,13 @@ The source batch size must be `>=` the default; `transfer_learn` re-exports the
 fine-tuned model under the canonical (unsuffixed) artifact names.
 
 To run the knowledge-distillation round-trip, first calibrate the autoencoder
-(`distill_calibrate.py` picks the per-score budgets), then `distill_labels.py` derives
-each subject's thresholds and emits the soft-label tree; `distill_eval.py` reports the
-detector's per-kind metrics against the ground truth. Then point `feature-mlp` at those
-labels with `--dataset-dir`:
+(`distill_calibrate.py` picks the budget), then `distill_labels.py` derives each subject's
+threshold and emits the soft-label tree; `distill_eval.py` reports the detector's per-kind
+metrics against the ground truth. Then point `feature-mlp` at those labels with
+`--dataset-dir`:
 
 ```bash
-uv run -m scripts.distillation.distill_calibrate cnn-ae                                       # budgets -> results/cnn-ae/
+uv run -m scripts.distillation.distill_calibrate cnn-ae                                       # budget  -> results/cnn-ae/
 uv run -m scripts.distillation.distill_eval cnn-ae                                            # metrics -> results/cnn-ae/
 uv run -m scripts.distillation.distill_labels cnn-ae                                          # teacher -> results/cnn-ae/distilled-labels/
 uv run -m scripts.system.train feature-mlp --dataset-dir results/cnn-ae/distilled-labels \
@@ -587,9 +610,12 @@ trusts what the seed wrote to the DB.
   truth: artifacts had to be uploaded between `flush()` and `commit()`, a failed commit orphaned
   them, the cleanup sweep could delete an object and then fail to null its marker, and the
   download route had to `stat` the bucket because the DB could not say which artifacts existed.
-  In Postgres all of that is one transaction and an FK. The blobs are small enough that nothing
-  pushes back — 419 KB for `cnn-ae`'s trainable `.tflite`, less for the int8 one, a couple of MB
-  per firmware image. A deployment serving many models to many clients would move them behind a
+  In Postgres all of that is one transaction and an FK. The blobs stay within what a database
+  handles comfortably — `cnn-ae`'s trainable `.tflite` is 13 MB (12 MB zstd, the form served),
+  the int8 one 1.2 MB, a couple of MB per firmware image. The trainable artifact grew ~30x when
+  `cnn-ae` moved to `latent_dim` 256 (the two bottleneck projections dominate the parameter
+  count), so it is the figure to re-check if the architecture grows again. A deployment serving
+  many models to many clients would move them behind a
   CDN or object store (the gateway proxies today, so that swap is a storage-layer change, not a
   protocol one); at thesis scale the object store was cost without benefit.
 - **The gateway always proxies.** It reads the blob server-side and returns it, so auth and
@@ -633,7 +659,10 @@ versions are untouched.
 Session semantics (stateful tokens, `api/routes/auth.py` endpoints, argon2 password
 hashing) are documented in [`shared/docs/authentication.md`](shared/docs/authentication.md).
 
-**Rate limiting is per-user, per-resource (`api/lib/ratelimit.py`, Redis db 1).**
+**Rate limiting is per-user, per-resource** (the keying and Redis mechanics in
+`common/ratelimit.py`, the gateway's 429-raising wrappers in `api/lib/ratelimit.py`; on the
+`REDIS_URL` connection, which the device-attestation challenge store shares and which is
+separate from the Celery broker).
 The intent: a client can download + quantize every model once in a single pass,
 but immediate repeats on the same model are rejected with `429` (+ `Retry-After`).
 Each limit is a capped counter over a rolling window (a cooldown is the same with a

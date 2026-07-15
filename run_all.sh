@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
 # Produce every backend result the report cites, from a clean slate: no generated
-# .tflite artifacts and an empty database. Assumes postgres/redis/minio, the api and the
+# .tflite artifacts and an empty database. Assumes postgres/redis, the api and the
 # worker are already up (make db-run / make api-run / make worker-run) and that .env exists.
 #
 #   ./run_all.sh                 # run everything, skipping steps already done

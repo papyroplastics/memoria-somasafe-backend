@@ -40,10 +40,14 @@ def window_signal(signal: np.ndarray, window_size: int, shift: int) -> tf.data.D
 
 def subject_windows(subjects_dir: Path, sid: str, window_size: int, shift: int,
                     anomalous_dir: Path | None = None) -> tf.data.Dataset:
-    """``(signal_window, cond)`` pairs for one subject, both raw — the model z-scores
-    signal and cond in its own signatures."""
+    """``(bvp_window, cond)`` pairs for one subject, both raw — the model z-scores
+    signal and cond in its own signatures.
+
+    The window carries BVP only. ACC reaches the model exclusively through ``cond``'s
+    activity context: as a raw encoder channel it measured as a no-op (identical
+    reconstruction and identical per-kind recall), so it is not fed to the encoder."""
     raw = stacked_signal(subjects_dir, sid, anomalous_dir)
-    ds = window_signal(raw, window_size, shift)
+    ds = window_signal(raw[:, :1], window_size, shift)
     cond = window_cond_vectors(subjects_dir, sid, raw[:, 1], window_size, shift, len(ds))
     return tf.data.Dataset.zip(ds, tf.data.Dataset.from_tensor_slices(cond))
 

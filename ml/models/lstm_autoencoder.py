@@ -12,10 +12,11 @@ class LSTMAutoencoder(TrainableAutoencoder):
 
     Two stacked LSTMCells encode the full-length signal to a latent vector,
     which is fused with the embedded condition and then fed at every decoder
-    step to drive two stacked LSTMCells back to the original length."""
+    step to drive two stacked LSTMCells back to the original length. Encodes BVP only;
+    ACC reaches the model solely as ``cond``'s activity context."""
 
     def __init__(self, name: str, batch_size: int, seq_len: int,
-                 signal_mean, signal_std, cond_mean, cond_std, n_signals: int = 2,
+                 signal_mean, signal_std, cond_mean, cond_std, n_signals: int = 1,
                  n_cond: int = N_COND, hidden_dim: int = 64, latent_dim: int = 32,
                  learning_rate: float = 1e-3, cond_embed_dim: int = 16, n_outputs: int = 1,
                  diff_weight: float = 1.0, latent_dropout: float = 0.1,

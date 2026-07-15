@@ -2,12 +2,12 @@
 Distill window labels from a trained autoencoder — the client-facing step. Touches only
 data a real client would have: its own clean-signal baseline and the mixed signal to be
 labeled (plus the features it computes on-device), never the ground-truth labels or the
-per-anomaly datasets. Reads the global per-score budgets from distill_calibrate.py,
-derives each subject's thresholds from its own clean windows, and emits a soft [0,1]
-anomaly label per window — the clean-CDF rank past each score's threshold, max'd across
-recon / spectral / rr, then temporally median-smoothed — into a datasets-shaped tree
-(mixed-features/S*/ with distilled labels.npy + symlinked features) under results/<model>/
-that train.py consumes via --dataset-dir. For the labeled diagnostics see distill_eval.py.
+per-anomaly datasets. Reads the global budget from distill_calibrate.py, derives each
+subject's threshold from its own clean windows, and emits a soft [0,1] anomaly label per
+window — the clean-CDF rank past that threshold, then temporally median-smoothed — into a
+datasets-shaped tree (mixed-features/S*/ with distilled labels.npy + symlinked features)
+under results/<model>/ that train.py consumes via --dataset-dir. For the labeled
+diagnostics see distill_eval.py.
 """
 
 
@@ -22,8 +22,7 @@ from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
 from ml.saving import load_trainable_weights
 from ..common.scoring import (
-    SCORE_NAMES, load_budgets, subject_thresholds, soft_score, median3,
-    score_dir_by_subject, score_mixed_by_subject,
+    load_budget, soft_score, median3, score_dir_by_subject, score_mixed_by_subject,
 )
 
 
@@ -45,7 +44,7 @@ if __name__ == "__main__":
     data_dir = DATASETS_DIR
     result_dir = RESULTS_DIR / args.model
 
-    budgets = load_budgets(args.model)
+    budget = load_budget(args.model)
 
     trainer = MODELS[args.model].build_trainer(data_dir)
     trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
@@ -53,26 +52,23 @@ if __name__ == "__main__":
 
     print("Scoring mixed-anomaly windows...")
     mixed = score_mixed_by_subject(trainer, data_dir)
-    print("Scoring clean windows (sets each subject's thresholds)...")
+    print("Scoring clean windows (sets each subject's threshold)...")
     clean = score_dir_by_subject(trainer, data_dir, None)
     missing = set(mixed) - set(clean)
     if missing:
         raise SystemExit(f"subjects {sorted(missing)} lack clean windows; "
                          "cannot derive per-subject thresholds.")
 
-    thresholds = subject_thresholds(clean, budgets)
-
-    # Soft labels: clean-CDF rank past each subject's threshold, max over scores, then a
-    # size-1 temporal median filter. Mirror the feature dataset's structure under out_dir
-    # so it can be passed to train.py as --dataset-dir; only labels.npy is written, the
-    # feature arrays and global stats are symlinked back to the real dataset.
+    # Soft labels: clean-CDF rank past the subject's threshold, then a size-1 temporal
+    # median filter. Mirror the feature dataset's structure under out_dir so it can be
+    # passed to train.py as --dataset-dir; only labels.npy is written, the feature arrays
+    # and global stats are symlinked back to the real dataset.
     out_dir = result_dir / args.out_subdir
     out_feature_dir = out_dir / MIXED_FEATURE_SUBDIR
     feature_dir = data_dir / MIXED_FEATURE_SUBDIR
-    print("Writing soft labels (budgets "
-          + ", ".join(f"{n}={budgets[n]:.4f}" for n in SCORE_NAMES) + "):")
+    print(f"Writing soft labels (budget={budget:.4f}):")
     for sid in mixed:
-        soft = median3(soft_score(mixed[sid], clean[sid], budgets))
+        soft = median3(soft_score(mixed[sid], clean[sid], budget))
         save_dir = out_feature_dir / sid
         save_dir.mkdir(parents=True, exist_ok=True)
         np.save(save_dir / 'labels.npy', soft.reshape(-1, 1).astype(np.float32))
@@ -80,6 +76,4 @@ if __name__ == "__main__":
         print(f"  {sid}: {len(soft)} windows, mean soft label {soft.mean():.3f}, "
               f"hard rate {(soft > 0).mean():.1%}")
     relink(out_feature_dir / FEATURE_STATS_FILE, feature_dir / FEATURE_STATS_FILE)
-    np.save(out_dir / 'budgets.npy',
-            np.array([budgets[n] for n in SCORE_NAMES], dtype=np.float32))
     print(f"Wrote distilled-label dataset for {len(mixed)} subjects to {out_dir}/")
