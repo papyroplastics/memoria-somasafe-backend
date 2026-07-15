@@ -5,7 +5,7 @@ import tensorflow as tf
 
 from ..layers import Dense, relu
 from .common import TrainableModel, Trainer
-from ..data import MIXED_FEATURE_SUBDIR, N_FEATURES, get_sorted_paths, load_feature_stats
+from ..preprocessing import MIXED_FEATURE_SUBDIR, N_FEATURES, load_feature_stats
 from ..optimizers import Adam
 
 
@@ -19,6 +19,8 @@ class FeatureMLP(TrainableModel):
     eval/train/save/restore signatures as the other models for LiteRT training
     and FedAvg weight transfer.
     """
+
+    default_batch_size = 1
 
     def __init__(self, name: str, batch_size: int, feat_mean, feat_std,
                  n_features: int = N_FEATURES,
@@ -87,13 +89,11 @@ class FeatureMLPTrainer(Trainer):
     primary_metric = 'accuracy'
     dataset_tensors = ['features', 'labels']
     n_eval_inputs = 1
-    default_batch_size = 1
     contract_version = 1   # norm layout: mean[17] then std[17], LE float32
+    data_subdir = MIXED_FEATURE_SUBDIR
 
-    def __init__(self, model: FeatureMLP, batch_size: int = 1):
+    def __init__(self, model: FeatureMLP):
         self.model: FeatureMLP = model # type: ignore
-        self.batch_size = batch_size
-        self.data_subdir = MIXED_FEATURE_SUBDIR
 
     def norm_param_bytes(self):
         return np.concatenate([self.model.feat_mean.numpy(),
@@ -105,31 +105,8 @@ class FeatureMLPTrainer(Trainer):
 
         return tf.data.Dataset.from_tensor_slices((x, y))
 
-    def representative_dataset(self, dataset=None, data_root=None):
-        # Calibrates the `infer` graph, which takes already-normalized inputs, so yield
-        # z-scored features (matching what the device feeds after normalizing).
-        mean = tf.constant(self.model.feat_mean)
-        std = tf.constant(self.model.feat_std)
-        if dataset is None:
-            if data_root is None:
-                raise ValueError("Either dataset or data_root must be passed")
-
-            rng = np.random.default_rng()
-            data_dir = data_root / self.data_subdir
-            all_x, all_y = [], []
-            for subject_dir in get_sorted_paths(data_dir):
-                x = np.load(subject_dir / 'features.npy').astype(np.float32)
-                y = np.load(subject_dir / 'labels.npy')
-                idx = rng.choice(len(x), size=min(10, len(x)), replace=False)
-                all_x.append(x[idx])
-                all_y.append(y[idx])
-            dataset = tf.data.Dataset.from_tensor_slices((
-                np.concatenate(all_x).astype(np.float32),
-                np.concatenate(all_y).astype(np.float32),
-            )).batch(self.batch_size, drop_remainder=True)
-        else:
-            dataset = dataset.take(150)
-        return dataset.map(lambda x, y: {'features': (x - mean) / std})
+    def normalize_feed(self, features, labels):
+        return {'features': (features - self.model.feat_mean) / self.model.feat_std}
 
     def report(self, result_dir, eval_dataset):
         import matplotlib.pyplot as plt
@@ -171,12 +148,10 @@ class FeatureMLPTrainer(Trainer):
         return {'accuracy': correct / total if total else 0.0}
 
 def get_trainer(data_root: Path, batch_size: int | None = None) -> FeatureMLPTrainer:
-    batch_size = batch_size or FeatureMLPTrainer.default_batch_size
-
     mean, std = load_feature_stats(data_root / MIXED_FEATURE_SUBDIR)
     model = FeatureMLP(
         name='feature_anomaly',
-        batch_size=batch_size,
+        batch_size=batch_size or FeatureMLP.default_batch_size,
         feat_mean=mean, feat_std=std,
     )
-    return FeatureMLPTrainer(model, batch_size=batch_size)
+    return FeatureMLPTrainer(model)

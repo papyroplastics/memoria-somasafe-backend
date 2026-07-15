@@ -18,11 +18,10 @@ round runs `local_epochs` local passes).
 
 import argparse
 
-import matplotlib.pyplot as plt
-
 from ml.model_list import MODELS
-from ..common.post_train import (
-    get_report_dir, read_history_csv, read_run, write_metrics_csv, write_summary)
+from ..common.plots import line_plot
+from ..common.reports import (
+    get_report_dir, read_history_csv, read_run, write_metrics_csv, write_yaml)
 
 # The manifest fields both runs must agree on for the overlay to compare like with like.
 COMPARABLE = ('metric', 'eval_subjects', 'train_subjects', 'batch_size', 'dataset_dir')
@@ -47,56 +46,43 @@ def plot_convergence(model: str, run: dict, values: list[float]) -> None:
     metric = run['metric']
     rounds = list(range(1, len(values) + 1))
 
-    fig, ax = plt.subplots()
-    ax.plot(rounds, values, 'o-')
-    ax.set_xlabel('global round')
-    ax.set_ylabel(metric)
-    ax.set_title(f'{model} — federated convergence')
-
     report_dir = get_report_dir(model, 'federated')
-    fig.savefig(report_dir / 'convergence.png')
-    print(f"saved convergence plot to {report_dir / 'convergence.png'}")
+    line_plot(report_dir / 'convergence.png', rounds, {metric: values},
+              'global round', metric, f'{model} — federated convergence')
     write_metrics_csv([{'round': r, metric: v} for r, v in zip(rounds, values)],
                       report_dir, 'convergence.csv')
-    write_summary(report_dir / 'convergence.yaml',
-        shows=f"Simulated FedAvg convergence of {model}: the held-out metric improves "
-              f"round over round.",
-        x_axis={'name': 'global round', 'range': [1, len(values)]},
-        y_axis={'name': metric, 'better': better_direction(metric)},
-        split={'clients': run['clients'],
-               'eval_subjects': run['eval_subjects'],
-               'holdout': f"leave-{run['eval_subjects']}-subject-out",
-               'local_epochs': run['local_epochs'],
-               'aggregation': 'uniform-weight FedAvg'},
-        headline={'first_round': values[0], 'last_round': values[-1],
-                  'delta': values[-1] - values[0]},
-        source={'run': f'results/{model}/federated/run.yaml', 'seed': run['seed'],
-                'reproducible': True},
-        backs='report Sec. 5.2')
+    write_yaml(report_dir / 'convergence.yaml', {
+        'shows': f"Simulated FedAvg convergence of {model}: the held-out metric improves "
+                 f"round over round.",
+        'x_axis': {'name': 'global round', 'range': [1, len(values)]},
+        'y_axis': {'name': metric, 'better': better_direction(metric)},
+        'split': {'clients': run['clients'],
+                  'eval_subjects': run['eval_subjects'],
+                  'holdout': f"leave-{run['eval_subjects']}-subject-out",
+                  'local_epochs': run['local_epochs'],
+                  'aggregation': 'uniform-weight FedAvg'},
+        'headline': {'first_round': values[0], 'last_round': values[-1],
+                     'delta': values[-1] - values[0]},
+        'source': {'run': f'results/{model}/federated/run.yaml', 'seed': run['seed'],
+                   'reproducible': True},
+        'backs': 'report Sec. 5.2',
+    })
 
 
 def plot_overlay(model: str, fed_run: dict, fed_values: list[float],
                  cen_run: dict, cen_values: list[float]) -> None:
     metric = fed_run['metric']
-    fed_steps = list(range(1, len(fed_values) + 1))
-    cen_steps = list(range(1, len(cen_values) + 1))
-
-    fig, ax = plt.subplots()
-    ax.plot(cen_steps, cen_values, 'o-', label='centralized')
-    ax.plot(fed_steps, fed_values, 's-', label='federated (FedAvg)')
-    ax.set_xlabel('global round / epoch')
-    ax.set_ylabel(metric)
-    ax.set_title(f'{model} — centralized vs. federated')
-    ax.legend()
+    steps = list(range(1, max(len(cen_values), len(fed_values)) + 1))
 
     report_dir = get_report_dir(model, 'centralized_vs_federated')
-    fig.savefig(report_dir / 'centralized_vs_federated.png')
-    print(f"saved overlay to {report_dir / 'centralized_vs_federated.png'}")
+    line_plot(report_dir / 'centralized_vs_federated.png', steps,
+              {'centralized': cen_values, 'federated (FedAvg)': fed_values},
+              'global round / epoch', metric, f'{model} — centralized vs. federated')
     write_metrics_csv(
         [{'step': s,
           f'centralized_{metric}': cen_values[s - 1] if s <= len(cen_values) else '',
           f'federated_{metric}': fed_values[s - 1] if s <= len(fed_values) else ''}
-         for s in range(1, max(len(cen_values), len(fed_values)) + 1)],
+         for s in steps],
         report_dir, 'centralized_vs_federated.csv')
 
     caveats = ['per-step compute differs: each federated round runs '
@@ -107,26 +93,28 @@ def plot_overlay(model: str, fed_run: dict, fed_values: list[float],
             f"federated {len(fed_values)} rounds); compare the final values, not the ends "
             f"of the x axis")
 
-    write_summary(report_dir / 'centralized_vs_federated.yaml',
-        shows=f"Centralized vs. federated {metric} for {model} on the same split: FedAvg "
-              f"reaches comparable quality without ever centralizing raw data.",
-        x_axis={'name': 'global round (federated) / epoch (centralized)',
-                'centralized_range': [1, len(cen_values)],
-                'federated_range': [1, len(fed_values)]},
-        y_axis={'name': metric, 'better': better_direction(metric)},
-        split={'eval_subjects': fed_run['eval_subjects'],
-               'holdout': f"leave-{fed_run['eval_subjects']}-subject-out",
-               'train_subjects': fed_run['train_subjects'],
-               'centralized': f"those {fed_run['train_subjects']} subjects pooled",
-               'federated': f"those subjects as {fed_run['clients']} separate clients, "
-                            f"{fed_run['local_epochs']} local epoch(s)/round"},
-        headline={'centralized_final': cen_values[-1], 'federated_final': fed_values[-1],
-                  'gap_fed_minus_cen': fed_values[-1] - cen_values[-1]},
-        caveats=caveats,
-        source={'federated_run': f'results/{model}/federated/run.yaml',
-                'centralized_run': f'results/{model}/normal/run.yaml',
-                'seed': fed_run['seed'], 'reproducible': True},
-        backs='report Sec. 5.3')
+    write_yaml(report_dir / 'centralized_vs_federated.yaml', {
+        'shows': f"Centralized vs. federated {metric} for {model} on the same split: "
+                 f"FedAvg reaches comparable quality without ever centralizing raw data.",
+        'x_axis': {'name': 'global round (federated) / epoch (centralized)',
+                   'centralized_range': [1, len(cen_values)],
+                   'federated_range': [1, len(fed_values)]},
+        'y_axis': {'name': metric, 'better': better_direction(metric)},
+        'split': {'eval_subjects': fed_run['eval_subjects'],
+                  'holdout': f"leave-{fed_run['eval_subjects']}-subject-out",
+                  'train_subjects': fed_run['train_subjects'],
+                  'centralized': f"those {fed_run['train_subjects']} subjects pooled",
+                  'federated': f"those subjects as {fed_run['clients']} separate clients, "
+                               f"{fed_run['local_epochs']} local epoch(s)/round"},
+        'headline': {'centralized_final': cen_values[-1],
+                     'federated_final': fed_values[-1],
+                     'gap_fed_minus_cen': fed_values[-1] - cen_values[-1]},
+        'caveats': caveats,
+        'source': {'federated_run': f'results/{model}/federated/run.yaml',
+                   'centralized_run': f'results/{model}/normal/run.yaml',
+                   'seed': fed_run['seed'], 'reproducible': True},
+        'backs': 'report Sec. 5.3',
+    })
 
 
 def check_comparable(fed_run: dict, cen_run: dict) -> None:

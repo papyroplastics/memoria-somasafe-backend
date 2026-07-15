@@ -10,9 +10,8 @@ configuration. Three sweeps, each emitting a figure + CSV + companion summary:
                    memorization).
 
 Like byzantine.py these have to train (they sweep configurations no train.py run
-produces), but every run shares one subject-dataset build and identical configurations are
-trained once (see sweeps.py) — with `--sweep all` the full-pool participants point and the
-default local-epochs point are the same run.
+produces), but every run trains a fresh model over the same subject datasets, which are
+built once (ml.loading caches them) since they never depend on the weights.
 
     uv run -m scripts.figures.sensitivity cnn-ae --rounds 5
     uv run -m scripts.figures.sensitivity cnn-ae --sweep loso --loso-folds 5
@@ -20,120 +19,120 @@ default local-epochs point are the same run.
 
 import argparse
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 from common.config import DATASETS_DIR, SEED
+from ml.loading import holdout, pool
 from ml.model_list import MODELS
-from ..common.post_train import get_report_dir, write_metrics_csv, write_summary
-from .sweeps import SubjectPool
+from ml.training import federated_loop
+from ..common.plots import bar_plot, line_plot
+from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 
 
 def better_direction(metric: str) -> str:
     return 'lower' if 'error' in metric else 'higher'
 
 
-def sweep_participants(pool: SubjectPool, args, report_dir):
-    metric = pool.metric
-    clients, held_out = pool.holdout(args.eval_subjects)
+def final_metric(key: str, clients: list, eval_dataset, local_epochs: int,
+                 rounds: int) -> float:
+    """The held-out primary metric after the last round of one federated run. The model
+    is rebuilt per run so a loop that mutates the weights never leaks into the next
+    configuration; the subject datasets come back from ml.loading's cache."""
+    trainer = MODELS[key].build_trainer(DATASETS_DIR)
+    history = federated_loop(trainer, clients, eval_dataset, local_epochs, rounds)
+    return history[-1][2][trainer.primary_metric]
+
+
+def sweep_participants(key, subjects, metric, args, report_dir):
+    clients, held_out = holdout(subjects, args.eval_subjects)
+    eval_dataset = pool(held_out)
     counts = list(range(args.min_participants, len(clients) + 1))
     rows, values = [], []
     for k in counts:
-        v = pool.final_metric(clients[:k], held_out, args.local_epochs, args.rounds)
+        v = final_metric(key, clients[:k], eval_dataset, args.local_epochs, args.rounds)
         values.append(v)
         rows.append({'participants': k, metric: v})
         print(f"participants={k}: {metric}={v:.6f}")
 
-    _line(counts, values, 'participating clients', f'final {metric}',
-          f'{pool.key} — clients per round', report_dir / 'participants.png')
+    line_plot(report_dir / 'participants.png', counts, {metric: values},
+              'participating clients', f'final {metric}',
+              f'{key} — clients per round')
     write_metrics_csv(rows, report_dir, 'participants.csv')
-    write_summary(report_dir / 'participants.yaml',
-        shows=f"Sensitivity of {pool.key} to the number of participating client subjects "
-              f"per round.",
-        x_axis={'name': 'participating clients', 'range': [counts[0], counts[-1]]},
-        y_axis={'name': f'final {metric} after {args.rounds} rounds',
-                'better': better_direction(metric)},
-        split={'eval_subjects': args.eval_subjects,
-               'holdout': f'leave-{args.eval_subjects}-subject-out',
-               'local_epochs': args.local_epochs, 'rounds': args.rounds},
-        headline={'min': min(values), 'max': max(values),
-                  'spread': max(values) - min(values)},
-        source={'seed': SEED, 'reproducible': True},
-        backs='report Sec. 5.7')
+    write_yaml(report_dir / 'participants.yaml', {
+        'shows': f"Sensitivity of {key} to the number of participating client "
+                 f"subjects per round.",
+        'x_axis': {'name': 'participating clients', 'range': [counts[0], counts[-1]]},
+        'y_axis': {'name': f'final {metric} after {args.rounds} rounds',
+                   'better': better_direction(metric)},
+        'split': {'eval_subjects': args.eval_subjects,
+                  'holdout': f'leave-{args.eval_subjects}-subject-out',
+                  'local_epochs': args.local_epochs, 'rounds': args.rounds},
+        'headline': {'min': min(values), 'max': max(values),
+                     'spread': max(values) - min(values)},
+        'source': {'seed': SEED, 'reproducible': True},
+        'backs': 'report Sec. 5.7',
+    })
 
 
-def sweep_local_epochs(pool: SubjectPool, args, report_dir):
-    metric = pool.metric
-    clients, held_out = pool.holdout(args.eval_subjects)
+def sweep_local_epochs(key, subjects, metric, args, report_dir):
+    clients, held_out = holdout(subjects, args.eval_subjects)
+    eval_dataset = pool(held_out)
     epochs = list(range(1, args.max_local_epochs + 1))
     rows, values = [], []
     for e in epochs:
-        v = pool.final_metric(clients, held_out, e, args.rounds)
+        v = final_metric(key, clients, eval_dataset, e, args.rounds)
         values.append(v)
         rows.append({'local_epochs': e, metric: v})
         print(f"local_epochs={e}: {metric}={v:.6f}")
 
-    _line(epochs, values, 'local epochs per round', f'final {metric}',
-          f'{pool.key} — local epochs', report_dir / 'local_epochs.png')
+    line_plot(report_dir / 'local_epochs.png', epochs, {metric: values},
+              'local epochs per round', f'final {metric}',
+              f'{key} — local epochs')
     write_metrics_csv(rows, report_dir, 'local_epochs.csv')
-    write_summary(report_dir / 'local_epochs.yaml',
-        shows=f"Sensitivity of {pool.key} to the number of local epochs per round.",
-        x_axis={'name': 'local epochs per round', 'range': [1, args.max_local_epochs]},
-        y_axis={'name': f'final {metric} after {args.rounds} rounds',
-                'better': better_direction(metric)},
-        split={'clients': len(clients), 'eval_subjects': args.eval_subjects,
-               'holdout': f'leave-{args.eval_subjects}-subject-out',
-               'rounds': args.rounds},
-        headline={'min': min(values), 'max': max(values),
-                  'spread': max(values) - min(values)},
-        source={'seed': SEED, 'reproducible': True},
-        backs='report Sec. 5.7')
+    write_yaml(report_dir / 'local_epochs.yaml', {
+        'shows': f"Sensitivity of {key} to the number of local epochs per round.",
+        'x_axis': {'name': 'local epochs per round', 'range': [1, args.max_local_epochs]},
+        'y_axis': {'name': f'final {metric} after {args.rounds} rounds',
+                   'better': better_direction(metric)},
+        'split': {'clients': len(clients), 'eval_subjects': args.eval_subjects,
+                  'holdout': f'leave-{args.eval_subjects}-subject-out',
+                  'rounds': args.rounds},
+        'headline': {'min': min(values), 'max': max(values),
+                     'spread': max(values) - min(values)},
+        'source': {'seed': SEED, 'reproducible': True},
+        'backs': 'report Sec. 5.7',
+    })
 
 
-def sweep_loso(pool: SubjectPool, args, report_dir):
-    metric = pool.metric
-    folds = len(pool) if args.loso_folds <= 0 else min(args.loso_folds, len(pool))
+def sweep_loso(key, subjects, metric, args, report_dir):
+    folds = len(subjects) if args.loso_folds <= 0 else min(args.loso_folds, len(subjects))
     rows, values = [], []
     for i in range(folds):
-        clients = tuple(j for j in range(len(pool)) if j != i)
-        v = pool.final_metric(clients, (i,), args.local_epochs, args.rounds)
+        clients = [ds for j, ds in enumerate(subjects) if j != i]
+        v = final_metric(key, clients, pool([subjects[i]]), args.local_epochs, args.rounds)
         values.append(v)
         rows.append({'held_out_index': i, metric: v})
         print(f"held-out subject #{i}: {metric}={v:.6f}")
 
     mean, std = float(np.mean(values)), float(np.std(values))
-    fig, ax = plt.subplots()
-    ax.bar(range(folds), values)
-    ax.axhline(mean, color='k', linestyle='--', label=f'mean {mean:.4f}')
-    ax.set_xlabel('held-out subject (fold)')
-    ax.set_ylabel(f'final {metric}')
-    ax.set_title(f'{pool.key} — leave-one-subject-out')
-    ax.legend()
-    fig.savefig(report_dir / 'loso.png')
-    print(f"saved LOSO figure to {report_dir / 'loso.png'}")
+    bar_plot(report_dir / 'loso.png', list(range(folds)), values,
+             'held-out subject (fold)', f'final {metric}',
+             f'{key} — leave-one-subject-out', mean_line=mean)
     write_metrics_csv(rows, report_dir, 'loso.csv')
-    write_summary(report_dir / 'loso.yaml',
-        shows=f"Leave-one-subject-out generalization of {pool.key}: the conclusions hold "
-              f"whichever subject is held out.",
-        x_axis={'name': 'held-out subject (fold)', 'folds': folds},
-        y_axis={'name': f'final {metric} on that unseen subject after {args.rounds} rounds',
-                'better': better_direction(metric)},
-        split={'clients_per_fold': len(pool) - 1, 'eval_subjects': 1,
-               'holdout': 'leave-1-subject-out, rotated',
-               'local_epochs': args.local_epochs, 'rounds': args.rounds},
-        headline={'mean': mean, 'std': std, 'min': min(values), 'max': max(values)},
-        source={'seed': SEED, 'reproducible': True},
-        backs='report Sec. 5.7')
-
-
-def _line(x, y, xlabel, ylabel, title, path):
-    fig, ax = plt.subplots()
-    ax.plot(x, y, 'o-')
-    ax.set_xlabel(xlabel)
-    ax.set_ylabel(ylabel)
-    ax.set_title(title)
-    fig.savefig(path)
-    print(f"saved figure to {path}")
+    write_yaml(report_dir / 'loso.yaml', {
+        'shows': f"Leave-one-subject-out generalization of {key}: the conclusions "
+                 f"hold whichever subject is held out.",
+        'x_axis': {'name': 'held-out subject (fold)', 'folds': folds},
+        'y_axis': {'name': f'final {metric} on that unseen subject after {args.rounds} '
+                           f'rounds',
+                   'better': better_direction(metric)},
+        'split': {'clients_per_fold': len(subjects) - 1, 'eval_subjects': 1,
+                  'holdout': 'leave-1-subject-out, rotated',
+                  'local_epochs': args.local_epochs, 'rounds': args.rounds},
+        'headline': {'mean': mean, 'std': std, 'min': min(values), 'max': max(values)},
+        'source': {'seed': SEED, 'reproducible': True},
+        'backs': 'report Sec. 5.7',
+    })
 
 
 SWEEPS = {'participants': sweep_participants,
@@ -160,13 +159,14 @@ def main() -> None:
                         help='LOSO folds (0 = every subject; default: 0)')
     args = parser.parse_args()
 
-    pool = SubjectPool(args.model, DATASETS_DIR)
+    trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
+    subjects = trainer.subject_datasets(DATASETS_DIR)
     report_dir = get_report_dir(args.model, 'sensitivity')
 
     chosen = list(SWEEPS) if args.sweep == 'all' else [args.sweep]
     for name in chosen:
         print(f"\n=== sweep: {name} ===")
-        SWEEPS[name](pool, args, report_dir)
+        SWEEPS[name](args.model, subjects, trainer.primary_metric, args, report_dir)
 
 
 if __name__ == "__main__":

@@ -11,7 +11,7 @@ Conventions (see `README.md`, "Layout"):
   Served `.tflite` artifacts stay in `shared/gen/models/<model>/` and are **not** results.
 - Every `<name>.png` has a companion **`<name>.yaml`** — a structured summary (what it
   shows, axes/units, subjects/splits, headline numbers, which report section it backs)
-  written via `scripts/common/post_train.py:write_summary`, so the result can be read and
+  written via `scripts/common/reports.py:write_yaml`, so the result can be read and
   cited without opening the image. Numeric results also carry `.csv`/`.json`.
 - Convergence numbers for the report come from the **simulated** loops (reproducible, seeded
   from `scripts/__init__.py`), not the headless HTTP client — that is integration
@@ -66,10 +66,10 @@ uv run -m scripts.figures.plot_convergence <model>      # both figures, no train
 | `results/footprint/footprint.csv` + `.yaml` | `scripts.figures.footprint` | **5.6** system fits the edge (backend rows; phone/ESP32 rows pasted in) |
 | `results/<model>/sensitivity/{participants,local_epochs,loso}.png` + `.csv` + `.yaml` | `scripts.figures.sensitivity <model> [--sweep participants\|local-epochs\|loso\|all]` | **5.7** conclusions robust to configuration (LOSO mean ± std) — trains |
 
-The two sweeps that train (`byzantine`, `sensitivity`) build every subject's dataset **once**
-per process and reuse it across configurations, and memoize identical runs — so
-`sensitivity --sweep all` trains the full-pool participants point and the default
-local-epochs point only once (`scripts/figures/sweeps.py:SubjectPool`).
+The two sweeps that train (`byzantine`, `sensitivity`) rebuild only the *model* per
+configuration — fresh weights, so no run leaks into the next. Every subject's dataset is
+built **once** per process and reused across configurations, since it never depends on the
+weights (`ml.loading` caches them).
 
 ## Distillation round-trip (Sec. 5.8) and its inputs
 

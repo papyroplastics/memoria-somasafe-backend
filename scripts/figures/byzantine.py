@@ -11,21 +11,23 @@ act. The sweep injects the malicious updates into the same `federated_loop` aggr
 toggles the filter, so honest training is identical across the two lines.
 
 Unlike the convergence figures, this one has to train: no train.py run produces a poisoned
-round. Every configuration shares one subject-dataset build (see sweeps.py).
+round. Every configuration trains a fresh model over the same subject datasets, which are
+built once (ml.loading caches them) since they never depend on the weights.
 
     uv run -m scripts.figures.byzantine cnn-ae --max-malicious 4 --eval-subjects 2
 """
 
 import argparse
 
-import matplotlib.pyplot as plt
 import numpy as np
 
 from common.config import DATASETS_DIR, SEED
+from ml.loading import holdout, pool
 from ml.model_list import MODELS
+from ml.training import federated_loop
 from worker.utils.weight_validation import filter_outliers
-from ..common.post_train import get_report_dir, write_metrics_csv, write_summary
-from .sweeps import SubjectPool
+from ..common.plots import line_plot
+from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 
 
 def byzantine_aggregate(n_malicious: int, use_filter: bool, magnitude: float,
@@ -65,9 +67,10 @@ def main() -> None:
                         help='Subjects held out for evaluation (default: 2)')
     args = parser.parse_args()
 
-    pool = SubjectPool(args.model, DATASETS_DIR)
-    metric = pool.metric
-    clients, held_out = pool.holdout(args.eval_subjects)
+    trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
+    metric = trainer.primary_metric
+    clients, held_out = holdout(trainer.subject_datasets(DATASETS_DIR), args.eval_subjects)
+    eval_dataset = pool(held_out)
 
     counts = list(range(0, args.max_malicious + 1))
     rows, no_filter, with_filter = [], [], []
@@ -79,8 +82,12 @@ def main() -> None:
             aggregate = byzantine_aggregate(n, use_filter, args.attack_magnitude,
                                             np.random.default_rng(SEED + n),
                                             args.z_threshold)
-            values[use_filter] = pool.final_metric(clients, held_out, args.local_epochs,
-                                                   args.rounds, aggregate)
+            # Fresh trainer per run so a loop that mutates the weights never leaks into
+            # the next configuration; the subject datasets come back from the cache.
+            trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
+            history = federated_loop(trainer, clients, eval_dataset, args.local_epochs,
+                                     args.rounds, aggregate=aggregate)
+            values[use_filter] = history[-1][2][metric]
         no_filter.append(values[False])
         with_filter.append(values[True])
         rows.append({'malicious': n,
@@ -89,37 +96,33 @@ def main() -> None:
         print(f"malicious={n}: no_filter {metric}={values[False]:.6f}  "
               f"with_filter {metric}={values[True]:.6f}")
 
-    fig, ax = plt.subplots()
-    ax.plot(counts, no_filter, 'o-', label='no filter')
-    ax.plot(counts, with_filter, 's-', label='z-score outlier filter')
-    ax.set_xlabel('malicious clients')
-    ax.set_ylabel(f'final {metric}')
-    ax.set_title(f'{args.model} — Byzantine robustness')
-    ax.legend()
-
     report_dir = get_report_dir(args.model, 'byzantine')
-    fig.savefig(report_dir / 'byzantine.png')
-    print(f"saved sweep to {report_dir / 'byzantine.png'}")
+    line_plot(report_dir / 'byzantine.png', counts,
+              {'no filter': no_filter, 'z-score outlier filter': with_filter},
+              'malicious clients', f'final {metric}',
+              f'{args.model} — Byzantine robustness')
     write_metrics_csv(rows, report_dir, 'byzantine.csv')
-    write_summary(report_dir / 'byzantine.yaml',
-        shows=f"Byzantine robustness of {args.model}: final {metric} vs. number of "
-              f"malicious clients, with and without the server's z-score outlier filter.",
-        x_axis={'name': 'malicious clients', 'range': [0, args.max_malicious]},
-        y_axis={'name': f'final {metric} after {args.rounds} rounds',
-                'better': 'lower' if 'error' in metric else 'higher'},
-        split={'honest_clients': len(clients), 'eval_subjects': args.eval_subjects,
-               'holdout': f'leave-{args.eval_subjects}-subject-out',
-               'local_epochs': args.local_epochs, 'rounds': args.rounds},
-        attack={'kind': 'large random (Gaussian) delta',
-                'magnitude': f'{args.attack_magnitude}x the honest mean L2 norm',
-                'filter': f'z-score cutoff {args.z_threshold}, needs >= 3 submissions to act'},
-        headline={'clean_baseline': {'no_filter': no_filter[0],
-                                     'with_filter': with_filter[0]},
-                  f'at_{args.max_malicious}_malicious': {'no_filter': no_filter[-1],
-                                                         'with_filter': with_filter[-1]}},
-        conclusion='the filter holds the round against gross outliers, and no more',
-        source={'seed': SEED, 'reproducible': True},
-        backs='report Sec. 5.5')
+    write_yaml(report_dir / 'byzantine.yaml', {
+        'shows': f"Byzantine robustness of {args.model}: final {metric} vs. number of "
+                 f"malicious clients, with and without the server's z-score outlier filter.",
+        'x_axis': {'name': 'malicious clients', 'range': [0, args.max_malicious]},
+        'y_axis': {'name': f'final {metric} after {args.rounds} rounds',
+                   'better': 'lower' if 'error' in metric else 'higher'},
+        'split': {'honest_clients': len(clients), 'eval_subjects': args.eval_subjects,
+                  'holdout': f'leave-{args.eval_subjects}-subject-out',
+                  'local_epochs': args.local_epochs, 'rounds': args.rounds},
+        'attack': {'kind': 'large random (Gaussian) delta',
+                   'magnitude': f'{args.attack_magnitude}x the honest mean L2 norm',
+                   'filter': f'z-score cutoff {args.z_threshold}, needs >= 3 submissions '
+                             f'to act'},
+        'headline': {'clean_baseline': {'no_filter': no_filter[0],
+                                        'with_filter': with_filter[0]},
+                     f'at_{args.max_malicious}_malicious': {'no_filter': no_filter[-1],
+                                                            'with_filter': with_filter[-1]}},
+        'conclusion': 'the filter holds the round against gross outliers, and no more',
+        'source': {'seed': SEED, 'reproducible': True},
+        'backs': 'report Sec. 5.5',
+    })
 
 
 if __name__ == "__main__":

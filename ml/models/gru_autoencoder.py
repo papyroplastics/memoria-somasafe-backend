@@ -3,7 +3,7 @@ from pathlib import Path
 import tensorflow as tf
 
 from ..layers import Dense, GRUCell
-from ..data import N_COND
+from ..preprocessing import N_COND, BVP_WINDOW
 from .common import TrainableAutoencoder, AutoencoderTrainer, autoencoder_norm_params
 
 
@@ -61,13 +61,11 @@ class GRUAutoencoder(TrainableAutoencoder):
 
 
 def get_trainer(data_root: Path, batch_size: int | None = None) -> AutoencoderTrainer:
-    batch_size = batch_size or AutoencoderTrainer.default_batch_size
-
     sig_mean, sig_std, cond_mean, cond_std = autoencoder_norm_params(data_root)
     model = GRUAutoencoder(
-        name='dalia_gru_ae', batch_size=batch_size,
-        seq_len=AutoencoderTrainer.default_window_size,
+        name='dalia_gru_ae', batch_size=batch_size or TrainableAutoencoder.default_batch_size,
+        seq_len=BVP_WINDOW,
         signal_mean=sig_mean, signal_std=sig_std,
         cond_mean=cond_mean, cond_std=cond_std,
     )
-    return AutoencoderTrainer(model, batch_size=batch_size)
+    return AutoencoderTrainer(model)

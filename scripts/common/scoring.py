@@ -16,35 +16,66 @@ reconstruction error is structurally blind to; uniform-tempo timewarp is regular
 stays below all three (handled by a later activity-expected-HR check, see the roadmap).
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
 
-from ml.data import (
+import tensorflow as tf
+from ml.preprocessing import (
     CLEAN_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
     conditional_windows, get_sorted_paths,
 )
 from ml.models.common import AutoencoderTrainer
 
 from . import dsp
+from .reports import get_report_dir
 
 SCORE_NAMES = ('recon', 'spectral', 'rr')
+CALIBRATION_REPORT = 'distill_calibration.json'   # budgets, from distill_calibrate
+
+
+def eval_padded(model, *arrays: np.ndarray) -> dict[str, np.ndarray]:
+    """Run ``model.eval`` over arrays whose length need not be a multiple of the model's
+    batch size; returns each output tensor stacked over the rows, in order."""
+    n = len(arrays[0])
+    if n == 0:
+        return {}
+
+    batch_size = model.batch_size
+    pad = (-n) % batch_size
+    if pad:
+        arrays = tuple(np.concatenate([a, np.repeat(a[-1:], pad, axis=0)]) for a in arrays)
+
+    chunks = []
+    for start in range(0, n + pad, batch_size):
+        batch = [tf.constant(a[start:start + batch_size], dtype=tf.float32) for a in arrays]
+        chunks.append({k: np.asarray(v) for k, v in model.eval(*batch).items()})
+    return {k: np.concatenate([c[k] for c in chunks])[:n] for k in chunks[0]}
+
+
+def load_budgets(model_name: str) -> dict[str, float]:
+    """The global per-score budgets picked by distill_calibrate.py."""
+    report_path = get_report_dir(model_name) / CALIBRATION_REPORT
+    if not report_path.exists():
+        raise SystemExit(
+            f"no calibration report at {report_path}. Run distill_calibrate '{model_name}' "
+            f"first to pick the budgets.")
+    return {k: float(v) for k, v in json.loads(report_path.read_text())['budgets'].items()}
 
 
 def window_errors(model, signal: np.ndarray, cond: np.ndarray,
                   window: int, n_windows: int) -> np.ndarray:
-    bs = model.batch_size
-    signal = signal.astype(np.float32)
-    cond = cond.astype(np.float32)
+    """Reconstruction error per non-overlapping window. Every window is scored — the
+    tail short of a full batch is padded out and discarded by ``eval_padded`` — so the
+    errors line up 1:1 with the feature/label grid."""
     n_windows = min(n_windows, len(signal) // window, len(cond))
-    n_windows -= n_windows % bs
-    errors = np.empty(n_windows, dtype=np.float32)
-    for start in range(0, n_windows, bs):
-        wins = np.stack([signal[(start + i) * window:(start + i + 1) * window] for i in range(bs)])
-        conds = cond[start:start + bs]
-        out = model.eval(wins, conds)
-        errors[start:start + bs] = out['error'].numpy()
-    return errors
+    if n_windows <= 0:
+        return np.empty(0, dtype=np.float32)
+    windows = (signal[:n_windows * window]
+               .reshape(n_windows, window, signal.shape[-1]).astype(np.float32))
+    out = eval_padded(model, windows, cond[:n_windows].astype(np.float32))
+    return out['error'].reshape(-1).astype(np.float32)
 
 def score_windows(model, signal: np.ndarray, cond: np.ndarray,
                   window: int, n_windows: int) -> dict[str, np.ndarray]:
@@ -102,7 +133,7 @@ def median3(x: np.ndarray) -> np.ndarray:
 
 def score_dir_by_subject(trainer: AutoencoderTrainer, data_dir: Path,
                          bvp_dir: Path | None) -> dict[str, dict[str, np.ndarray]]:
-    window = trainer.window_size
+    window = trainer.model.seq_len
     subjects_dir = data_dir / CLEAN_SUBDIR
     out: dict[str, dict[str, np.ndarray]] = {}
     for d in get_sorted_paths(subjects_dir):
@@ -115,7 +146,7 @@ def score_dir_by_subject(trainer: AutoencoderTrainer, data_dir: Path,
 
 def score_mixed_by_subject(trainer: AutoencoderTrainer, data_dir: Path
                            ) -> dict[str, dict[str, np.ndarray]]:
-    window = trainer.window_size
+    window = trainer.model.seq_len
     subjects_dir = data_dir / CLEAN_SUBDIR
     mixed_dir = data_dir / MIXED_SUBDIR
     feature_dir = data_dir / MIXED_FEATURE_SUBDIR

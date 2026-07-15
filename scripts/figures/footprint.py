@@ -19,7 +19,7 @@ import argparse
 
 from common.config import DATASETS_DIR, MODELS_DIR, RESULTS_DIR
 from ml.model_list import MODELS
-from ..common.post_train import get_report_dir, write_metrics_csv, write_summary
+from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 
 # Edge-cost rows the phone/firmware supply; pasted into the report table by hand.
 PASTE_IN_ROWS = [
@@ -68,10 +68,10 @@ def main() -> None:
     report_dir = get_report_dir('footprint')
     write_metrics_csv(rows, report_dir, 'footprint.csv')
 
-    write_summary(report_dir / 'footprint.yaml',
-        shows='System footprint table: the edge-cost figures derivable from the models and '
-              'their exported artifacts, one row per model.',
-        columns={
+    write_yaml(report_dir / 'footprint.yaml', {
+        'shows': 'System footprint table: the edge-cost figures derivable from the models '
+                 'and their exported artifacts, one row per model.',
+        'columns': {
             'params': 'flat trainable-weight count',
             'trainable_bytes': 'on-disk float32 trainable .tflite size',
             'quantized_bytes': 'on-disk int8 quantized .tflite size',
@@ -80,13 +80,15 @@ def main() -> None:
                                   'per round',
             'download_bytes': 'the trainable artifact a client pulls',
         },
-        models={r['model']: {k: v for k, v in r.items() if k != 'model'} for r in rows},
-        paste_in_rows={'note': 'measured on the phone/ESP32/server and pasted into the '
-                               'report table, not produced by this script',
-                       'todo': PASTE_IN_ROWS},
-        source={'artifacts': f'{MODELS_DIR}/<model>/',
-                'na_means': 'the artifact was not exported yet (train + seed the model first)'},
-        backs='report Sec. 5.6')
+        'models': {r['model']: {k: v for k, v in r.items() if k != 'model'} for r in rows},
+        'paste_in_rows': {'note': 'measured on the phone/ESP32/server and pasted into the '
+                                  'report table, not produced by this script',
+                          'todo': PASTE_IN_ROWS},
+        'source': {'artifacts': f'{MODELS_DIR}/<model>/',
+                   'na_means': 'the artifact was not exported yet (train + seed the model '
+                               'first)'},
+        'backs': 'report Sec. 5.6',
+    })
     print(f"wrote footprint table to {report_dir}/ (results root {RESULTS_DIR})")
 
 

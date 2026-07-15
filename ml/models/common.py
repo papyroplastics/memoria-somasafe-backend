@@ -4,19 +4,19 @@ from pathlib import Path
 import hashlib
 import numpy as np
 import tensorflow as tf
-from tqdm import tqdm
-
-from common.config import DISABLE_TQDM
 
 from ..optimizers import Adam
 from ..layers import Dense, relu
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
-from ..data import (
-    DatasetUnavailibleError, CLEAN_SUBDIR, BVP_RATE,
-    windowed_conditional, get_sorted_paths, combine_datasets, pool_datasets,
-    stacked_signal, norm_stats, window_cond_vectors,
+from ..preprocessing import (
+    CLEAN_SUBDIR, BVP_RATE, norm_stats,
     load_context_norm_params, load_static_norm_params,
 )
+from ..loading import batched, cached, subject_dirs, subject_windows
+
+# Batches of a run's eval set fed to the int8 converter to fix its tensor scales.
+CALIBRATION_BATCHES = 150
+
 
 class UnboundError(NotImplementedError):
     def __init__(self, message: str):
@@ -44,6 +44,9 @@ class TrainableModel(tf.Module):
     train: tf.types.experimental.PolymorphicFunction = unbound   # type: ignore
     save: tf.types.experimental.PolymorphicFunction = unbound    # type: ignore
     restore: tf.types.experimental.PolymorphicFunction = unbound # type: ignore
+
+    default_batch_size: int
+    batch_size: int
 
     def transfer_from(self, source: 'TrainableModel') -> None:
         """Copy ``source``'s trainable variables into this model for transfer
@@ -95,6 +98,8 @@ class TrainableModel(tf.Module):
 
 
 class TrainableAutoencoder(TrainableModel):
+
+    default_batch_size = 12
 
     def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int, n_cond: int,
                  cond_embed_dim, n_outputs, diff_weight, latent_dropout: float,
@@ -176,10 +181,13 @@ class TrainableAutoencoder(TrainableModel):
 
 
 class Trainer(ABC):
+    """The model-specific half of a training run: how to read this model's data off
+    disk, how to score it, and how to feed the int8 converter. Everything generic —
+    the loops, the splits, the dataset plumbing — lives in ml.training and ml.loading,
+    so any model works under any loop."""
+
     model: TrainableModel
     primary_metric: str
-    default_batch_size: int
-    batch_size: int
     data_subdir: str
     # Names of the tensors each dataset batch yields, in order — used to match
     # dataset arrays to the model's signature inputs by name (see scripts/fed_client.py).
@@ -190,6 +198,41 @@ class Trainer(ABC):
     # Fixes how the device feeds the model: the norm_param_bytes layout and the
     # I/O signature semantics. Part of the signed model bytes (see ml.payload).
     contract_version: int
+
+    @abstractmethod
+    def subject_dataset(self, subject_dir: Path) -> tf.data.Dataset:
+        """One subject's datapoints, unbatched."""
+
+    @abstractmethod
+    def normalize_feed(self, *tensors: tf.Tensor) -> dict[str, tf.Tensor]:
+        """One batch as a feed dict for the int8 converter. Calibrates the ``infer``
+        graph, which takes already-normalized inputs, so the values must be z-scored
+        the way the device feeds them (see saving.optimize_saved_model)."""
+
+    @abstractmethod
+    def norm_param_bytes(self) -> bytes:
+        """The model's z-score params as LE float32, covered by the server's model
+        signature (see ml.payload). Layout is fixed by ``contract_version``; the device
+        applies them as ``(x - mean) / std`` before the int8 (non-normalizing) model."""
+
+    @abstractmethod
+    def eval_metrics(self, datapoints: list, outputs: list[dict]) -> dict[str, float]:
+        """Metrics relevant to this model type (accuracy, recon error, ...) from the
+        aligned lists of evaluated ``datapoints`` (each a full dataset batch tuple) and
+        per-datapoint eval-signature ``outputs``. Kept independent of the runtime that
+        produced the outputs so both the in-process TF path (``ml.training.evaluate``)
+        and the on-device LiteRT path (``scripts/integration/fed_client.py``) share it;
+        output values may be tf tensors or numpy arrays and target tensors are read off
+        ``datapoints``."""
+
+    def report(self, result_dir: Path, eval_dataset: tf.data.Dataset) -> None:
+        """Optional model-specific artifact."""
+        pass
+
+    def dataset_key(self) -> tuple:
+        """Everything besides the data root and the subject that changes the datapoints,
+        so two trainers only share a cached dataset when it means the same thing."""
+        return (type(self).__name__, self.model.batch_size)
 
     def arch_fingerprint(self) -> str:
         """Stable hash of the weight-compatibility boundary: the ordered
@@ -204,99 +247,44 @@ class Trainer(ABC):
         return hashlib.sha256(
             repr(manifest).encode() + self.norm_param_bytes()).hexdigest()[:16]
 
-    @abstractmethod
-    def subject_dataset(self, subject_dir: Path) -> tf.data.Dataset:
-        """Returns the data for a single subject"""
+    def subject_datasets(self, data_root: Path) -> list[tf.data.Dataset]:
+        """Every subject's batched, cached dataset, in subject order. Split it with
+        ml.loading.holdout and merge it with ml.loading.pool."""
+        key = self.dataset_key()
+        return [cached((str(data_root), self.data_subdir, d.name, *key),
+                       lambda d=d: batched(self.subject_dataset(d), self.model.batch_size))
+                for d in subject_dirs(data_root, self.data_subdir)]
 
-    @abstractmethod
-    def norm_param_bytes(self) -> bytes:
-        """The model's z-score params as LE float32, covered by the server's model
-        signature (see ml.payload). Layout is fixed by ``contract_version``; the device
-        applies them as ``(x - mean) / std`` before the int8 (non-normalizing) model."""
+    def representative_dataset(self, dataset: tf.data.Dataset | None = None,
+                               data_root: Path | None = None) -> tf.data.Dataset:
+        """Feed-dict stream for the int8 TFLite converter. Calibrates on ``dataset`` when
+        given (a run's eval set), otherwise on a small sample drawn from ``data_root`` —
+        the worker builds this for every model at startup and must not window the whole
+        dataset to do it."""
+        if dataset is None:
+            if data_root is None:
+                raise ValueError("Either dataset or data_root must be passed")
+            dataset = self.calibration_feed(data_root)
+        else:
+            dataset = dataset.take(CALIBRATION_BATCHES)
+        return dataset.map(self.normalize_feed)
 
-    @abstractmethod
-    def representative_dataset(self, dataset: tf.data.Dataset | None = None, data_root: Path | None = None) -> tf.data.Dataset:
-        """Feed-dict stream for the int8 TFLite converter. Loads from data_root when dataset is None."""
-
-    @abstractmethod
-    def eval_metrics(self, datapoints: list, outputs: list[dict]) -> dict[str, float]:
-        """Metrics relevant to this model type (accuracy, recon error, ...) from the
-        aligned lists of evaluated ``datapoints`` (each a full dataset batch tuple) and
-        per-datapoint eval-signature ``outputs``. Kept independent of the runtime that
-        produced the outputs so both the in-process TF path (``evaluate``) and the
-        on-device LiteRT path (``scripts/fed_client.py``) share it; output values may be
-        tf tensors or numpy arrays and target tensors are read off ``datapoints``."""
-
-    def evaluate(self, dataset: tf.data.Dataset, prefix: str = '') -> dict[str, float]:
-        """Evaluate the model over ``dataset`` and reduce to metrics via ``eval_metrics``.
-        ``prefix`` labels the progress bar (e.g. ``epoch=3/20``)."""
-        datapoints = list(dataset)
-        outputs = [self.model.eval(*dp[:self.n_eval_inputs])
-                   for dp in tqdm(datapoints, desc=f'{prefix} eval'.strip(),
-                                  leave=False, disable=DISABLE_TQDM)]
-        return self.eval_metrics(datapoints, outputs)
-
-    def train_epoch(self, dataset: tf.data.Dataset, prefix: str = '') -> float:
-        """One pass over ``dataset``; returns mean training loss. """
-        batches = len(dataset)
-        total = 0.0
-        for batch in tqdm(dataset, total=batches, desc=f'{prefix} train'.strip(), 
-                          leave=False, disable=DISABLE_TQDM):
-            total += float(self.model.train(*batch)['loss'])
-        return total / batches if batches else 0.0
-
-    def report(self, result_dir: Path, eval_dataset: tf.data.Dataset) -> None:
-        """Optional model-specific artifact."""
-        pass
-
-    def subject_dirs(self, data_root: Path) -> list[Path]:
-        data_dir = data_root / self.data_subdir
-        subject_dirs = get_sorted_paths(data_dir)
-        if not subject_dirs:
-            raise DatasetUnavailibleError(data_dir)
-        return subject_dirs
-
-    def all_subject_datasets(self, data_root: Path) -> list[tf.data.Dataset]:
-        """Every subject's batched, cached dataset, in subject order."""
-        datasets = []
-        for d in self.subject_dirs(data_root):
+    def calibration_feed(self, data_root: Path, per_subject: int = 10) -> tf.data.Dataset:
+        """A few random datapoints from each subject, batched — enough to fix the int8
+        tensor scales without building the full training pipeline. Sampled across every
+        subject rather than off the head of each: all subjects start at rest, so a
+        prefix would calibrate on an at-rest range and clip everything above it."""
+        parts = []
+        for d in subject_dirs(data_root, self.data_subdir):
             ds = self.subject_dataset(d)
-            datasets.append(
-                ds.shuffle(len(ds), reshuffle_each_iteration=False)
-                  .batch(self.batch_size, drop_remainder=True)
-                  .cache())
-        return datasets
+            if len(ds):
+                parts.append(ds.shuffle(len(ds), reshuffle_each_iteration=False)
+                               .take(min(per_subject, len(ds))))
+        merged = parts[0]
+        for part in parts[1:]:
+            merged = merged.concatenate(part)
+        return merged.batch(self.model.batch_size, drop_remainder=True)
 
-    def subject_datasets(
-            self, data_root: Path, eval_subjects: int
-        ) -> tuple[list[tf.data.Dataset], list[tf.data.Dataset]]:
-        """Per-subject datasets for the federated loop, split at *subject* granularity:
-        the last ``eval_subjects`` are held out whole, so a metric measured on them is
-        generalization to an unseen subject rather than to unseen windows of a subject
-        the model already trained on. ``eval_subjects=0`` holds out nothing."""
-        # Checked against the subject dirs before the datasets are built: an out-of-range
-        # argument should fail now, not after windowing every subject.
-        available = len(self.subject_dirs(data_root))
-        if eval_subjects < 0:
-            raise ValueError(f"eval_subjects must be >= 0, got {eval_subjects}")
-        if eval_subjects >= available:
-            raise ValueError(f"eval_subjects {eval_subjects} leaves no training subjects "
-                             f"({available} available)")
-
-        datasets = self.all_subject_datasets(data_root)
-        if eval_subjects == 0:
-            return datasets, []
-        return datasets[:-eval_subjects], datasets[-eval_subjects:]
-
-    def combined_datasets(
-            self, data_root: Path, eval_subjects: int
-        ) -> tuple[tf.data.Dataset, tf.data.Dataset | None]:
-        """The same subject-level split as ``subject_datasets``, pooled into one train and
-        one eval dataset for the normal loop — so a centralized run and a federated run at
-        the same ``eval_subjects`` train on the same data and score on the same held-out
-        subjects, and their curves are comparable."""
-        train, evaluation = self.subject_datasets(data_root, eval_subjects)
-        return pool_datasets(train), combine_datasets(evaluation) if evaluation else None
 
 class TrainerBuilder(Protocol):
     def __call__(self, data_root: Path, batch_size: int | None = None) -> Trainer: ...
@@ -320,19 +308,16 @@ class AutoencoderTrainer(Trainer):
     n_eval_inputs = 2
     contract_version = 2   # norm layout: signal mean/std(2 each), cond mean/std(8 each)
 
-    default_batch_size = 12
-    default_sample_rate = BVP_RATE
-    default_window_size = default_sample_rate * 8
-    default_shift = default_sample_rate * 3
+    default_shift = BVP_RATE * 3
 
-    def __init__(self, model: TrainableAutoencoder, window_size: int = default_window_size,
-                 shift: int = default_shift, batch_size: int = default_batch_size,
+    def __init__(self, model: TrainableAutoencoder, shift: int = default_shift,
                  data_subdir: str = CLEAN_SUBDIR):
         self.model: TrainableAutoencoder = model # type: ignore
-        self.window_size = window_size
         self.shift = shift
-        self.batch_size = batch_size
         self.data_subdir = data_subdir
+
+    def dataset_key(self):
+        return (*super().dataset_key(), self.model.seq_len, self.shift)
 
     def norm_param_bytes(self):
         return np.concatenate([
@@ -341,40 +326,12 @@ class AutoencoderTrainer(Trainer):
         ]).astype('<f4').tobytes()
 
     def subject_dataset(self, subject_dir):
-        return windowed_conditional(subject_dir.parent, subject_dir.name, self.window_size, self.shift)
+        return subject_windows(subject_dir.parent, subject_dir.name,
+                               self.model.seq_len, self.shift)
 
-    def representative_dataset(self, dataset=None, data_root=None):
-        # Calibrates the `infer` graph, which takes already-normalized inputs, so yield
-        # z-scored signal/cond (matching what the device feeds after normalizing).
-        sig_mean = tf.constant(self.model.signal_mean)
-        sig_std = tf.constant(self.model.signal_std)
-        cond_mean = tf.constant(self.model.cond_mean)
-        cond_std = tf.constant(self.model.cond_std)
-        if dataset is None:
-            if data_root is None:
-                raise ValueError("Either dataset or data_root must be passed")
-
-            rng = np.random.default_rng()
-            data_dir = data_root / self.data_subdir
-            all_signals, all_conds = [], []
-            for subject_dir in get_sorted_paths(data_dir):
-                sid = subject_dir.name
-                raw = stacked_signal(data_dir, sid)
-                count = max(0, (len(raw) - self.window_size) // self.shift + 1)
-                if count == 0:
-                    continue
-                cond = window_cond_vectors(data_dir, sid, raw[:, 1], self.window_size, self.shift, count)
-                idx = rng.choice(count, size=min(10, count), replace=False)
-                all_signals.append(np.stack([raw[i * self.shift : i * self.shift + self.window_size] for i in idx]))
-                all_conds.append(cond[idx])
-            dataset = tf.data.Dataset.from_tensor_slices((
-                np.concatenate(all_signals).astype(np.float32),
-                np.concatenate(all_conds).astype(np.float32),
-            )).batch(self.batch_size, drop_remainder=True)
-        else:
-            dataset = dataset.take(150)
-        return dataset.map(lambda s, c: {'signal': (s - sig_mean) / sig_std,
-                                         'cond': (c - cond_mean) / cond_std})
+    def normalize_feed(self, signal, cond):
+        return {'signal': (signal - self.model.signal_mean) / self.model.signal_std,
+                'cond': (cond - self.model.cond_mean) / self.model.cond_std}
 
     def eval_metrics(self, datapoints, outputs):
         errors = np.concatenate([np.asarray(o['error']).reshape(-1) for o in outputs])

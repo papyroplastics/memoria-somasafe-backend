@@ -8,24 +8,25 @@ recall, and the clean false-positive rate. Writes the metrics to results/<model>
 """
 
 
-from common.config import MODELS_DIR
 import argparse
 import json
 from pathlib import Path
 
 import numpy as np
 
-from common.config import DATASETS_DIR
-from ml.data import ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_WINDOW, WINDOW_SECONDS
+from common.config import DATASETS_DIR, MODELS_DIR
+from ml.preprocessing import ANOMALOUS_SUBDIR, ANOMALY_KINDS
 from ml.metrics import classification_report
 from ml.model_list import MODELS
-from ..common.post_train import get_report_dir, load_budgets, EVAL_REPORT
 from ml.models.common import AutoencoderTrainer
 from ml.saving import load_trainable_weights
+from ..common.reports import get_report_dir
 from ..common.scoring import (
-    SCORE_NAMES, subject_thresholds, pooled_predict,
+    SCORE_NAMES, load_budgets, subject_thresholds, pooled_predict,
     score_dir_by_subject, score_mixed_by_subject, load_mixed_truth,
 )
+
+EVAL_REPORT = 'distill_eval.json'   # detector metrics, from this script
 
 def evaluate(trainer, data_dir: Path, clean: dict[str, dict[str, np.ndarray]],
              mixed: dict[str, dict[str, np.ndarray]], truth: dict[str, np.ndarray],
@@ -105,16 +106,9 @@ if __name__ == "__main__":
 
     budgets = load_budgets(args.model)
 
-    # batch_size=1 to match exactly the thresholds distill_labels would use.
-    trainer = MODELS[args.model].build_trainer(args.model, batch_size=1)
+    trainer = MODELS[args.model].build_trainer(data_dir)
     trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
     assert isinstance(trainer, AutoencoderTrainer)
-
-    window = trainer.window_size
-    if window != BVP_WINDOW:
-        raise SystemExit(
-            f"model window ({window} samples) does not match the {WINDOW_SECONDS}s feature "
-            f"window ({BVP_WINDOW} samples) used to build mixed-features. Align the window.")
 
     print("Scoring mixed-anomaly windows...")
     mixed = score_mixed_by_subject(trainer, data_dir)

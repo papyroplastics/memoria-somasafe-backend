@@ -47,8 +47,10 @@ ml/        TensorFlow models + training, imported by worker + scripts, never by 
            model_list.py is the registry (key -> metadata + trainer builder), the single
            source of truth. models/ holds one file per architecture (FeatureMLP,
            CNN/LSTM/GRU autoencoders) built on shared bases in common.py. Everything
-           else (optimizers, saving/export, training loops incl. fed_avg, dataset
-           pipeline, layers, metrics) is model-agnostic and shared across architectures.
+           else is model-agnostic and shared across architectures: preprocessing.py
+           (raw download -> arrays on disk; no TensorFlow) and loading.py (the cached
+           tf.data pipelines over them) split the dataset work, and training.py holds
+           the loops incl. fed_avg, alongside optimizers, saving/export, layers, metrics.
            layers.py in particular reimplements a few ops with custom gradients because
            the stock TF gradients only exist as Flex ops the phone's LiteRT runtime
            can't execute.
@@ -58,7 +60,7 @@ worker/    Celery task layer (TensorFlow loads at startup): celery_app.py wires 
            the TF-free validation/outlier-filtering helpers tasks.py calls into.
 scripts/   CLI entry points, grouped into subpackages by how each relates to the system.
            common/ holds their shared, model-agnostic helpers (api, litert, scoring, dsp,
-           post_train, secure, autoencoders + the generated dataset_pb2); scripts/__init__.py
+           reports, plots, secure + the generated dataset_pb2); scripts/__init__.py
            seeds the RNG on any submodule import.
              system/       essential to the running pipeline: get_dataset, train (exports the
                            served .tflite artifacts + is the source of the federated
@@ -70,8 +72,8 @@ scripts/   CLI entry points, grouped into subpackages by how each relates to the
                            secure_aggregation, queue_aggregation.
              figures/      report result/figure generators (see PLOTS.md): plot_signals,
                            plot_convergence (reads a previous train.py run — Secs. 5.2+5.3 —
-                           and never trains), byzantine + sensitivity (sweeps that do train,
-                           sharing one subject-dataset build via sweeps.py), footprint.
+                           and never trains), byzantine + sensitivity (sweeps that do
+                           train, over datasets ml.loading builds once), footprint.
 ```
 
 Evaluation/experiment output (histories, reports, figures, distilled labels) goes to
@@ -85,16 +87,18 @@ Training is split into three layers so any model can be run under any loop:
   `transfer_from` (copy compatible trainable weights from another instance of the same
   architecture, transferring the overlapping region where a shape differs — used for
   cross-batch-size transfer learning).
-- **Trainer** (`Trainer`): everything model-specific — `subject_datasets` (per-subject
-  splits), `representative_dataset` (int8 calibration feed), `train_epoch`, and
-  `evaluate` (metrics relevant to the model: accuracy for the MLP, reconstruction
-  error for the autoencoders). Each trainer declares a `default_batch_size`, and each
-  model module exposes `get_trainer(data_root, seed, batch_size=None)` (falling back to
-  that default when `batch_size` is `None`).
+- **Trainer** (`Trainer`): only what is model-specific — `subject_dataset` (read one
+  subject off disk), `normalize_feed` (the int8 calibration feed), `norm_param_bytes`
+  and `eval_metrics` (accuracy for the MLP, reconstruction error for the autoencoders).
+  It stores no data and no batch size: `subject_datasets(data_root)` is its single data
+  entry point, returning every subject's batched, cached dataset in subject order, which
+  `ml.loading.holdout` splits and `ml.loading.pool` merges. Each model class declares a
+  `default_batch_size` and each model module exposes `get_trainer(data_root,
+  batch_size=None)` (falling back to that default when `batch_size` is `None`).
 - **Loop** (`training.py`): orchestration only — `normal_loop` and `federated_loop`
-  (simulated FedAvg with an injectable `aggregate` strategy). Loops talk only to the
-  `Trainer` interface, so a `(model, trainer)` pair works with either loop and they
-  can be compared. `train.py` picks the model and loop and handles export + plotting;
+  (simulated FedAvg with an injectable `aggregate` strategy), over the generic
+  `evaluate` / `train_epoch` steps. Loops talk only to the `Trainer` interface, so a
+  `(model, trainer)` pair works with either loop and they can be compared. `train.py` picks the model and loop and handles export + plotting;
   each run writes its history plot + CSV, its `run.yaml` manifest and eval report under
   `results/<model>/<loop>/` (`normal` or `federated`).
 

@@ -22,12 +22,12 @@ import numpy as np
 import tensorflow as tf
 
 from common.config import MODELS_DIR, DATASETS_DIR, RESULTS_DIR
-from ml.data import MIXED_FEATURE_SUBDIR, get_sorted_paths
+from ml.preprocessing import MIXED_FEATURE_SUBDIR, get_sorted_paths
 from ml.metrics import classification_report
 from ml.model_list import MODELS
 from ml.saving import load_trainable_weights, get_optimized_model
 from ..common.litert import infer_int8
-from ..common.post_train import get_report_dir, write_metrics_csv
+from ..common.reports import get_report_dir, write_metrics_csv
 
 VARIANTS = ('global_float', 'global_int8', 'personal_float', 'personal_int8')
 
@@ -62,7 +62,7 @@ def load_subject(data_dir: Path, distilled_dir: Path, sid: str):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('--model', default='feature-mlp', choices=sorted(MODELS),
+    parser.add_argument('model', default='feature-mlp', choices=sorted(MODELS),
                         help='Student model to personalize (default: feature-mlp)')
     parser.add_argument('--teacher', default='cnn-ae',
                         help='Autoencoder whose distilled-labels tree to fine-tune on '

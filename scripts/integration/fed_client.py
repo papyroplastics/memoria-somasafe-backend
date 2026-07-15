@@ -17,8 +17,8 @@ One harness, two aggregation strategies picked by the model's ``submission_type`
 Either way it scores the fresh snapshot on the held-out subjects and writes a
 per-round convergence CSV + plot.
 
-    uv run -m scripts.fed_client --model feature-mlp --rounds 5 --eval-subjects 2
-    uv run -m scripts.fed_client --model cnn-ae     --rounds 5 --eval-subjects 2   # secure
+    uv run -m scripts.fed_client feature-mlp --rounds 5 --eval-subjects 2
+    uv run -m scripts.fed_client cnn-ae     --rounds 5 --eval-subjects 2   # secure
 
 Prereqs: services up (api, worker, redis, postgres), DB seeded with ``--test-users``,
 and the model trained/seeded. There are no local epochs — one submission per client
@@ -41,6 +41,7 @@ from common.secure_agg import (
     quantize,
     ring_sum,
 )
+from ml.loading import holdout
 from ml.model_list import MODELS
 from worker.celery_app import app
 
@@ -57,7 +58,8 @@ from scripts.common.api import (
     wait_for_round,
 )
 from scripts.common.litert import LiteRTClient
-from scripts.common.post_train import get_report_dir, plot_metric, write_metrics_csv, write_summary
+from scripts.common.plots import line_plot
+from scripts.common.reports import get_report_dir, write_metrics_csv, write_yaml
 from scripts.common.secure import seal_round
 
 
@@ -170,7 +172,7 @@ def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
     spec = MODELS[key]
     strategy = _strategy_for(spec.submission_type)
     trainer = spec.build_trainer(DATASETS_DIR)
-    client_datasets, held_out = trainer.subject_datasets(DATASETS_DIR, eval_subjects)
+    client_datasets, held_out = holdout(trainer.subject_datasets(DATASETS_DIR), eval_subjects)
     # Materialize each held-out subject and concatenate at the Python level, so the
     # already-cached subject datasets are never re-combined into a new tf pipeline.
     eval_data = [dp for ds in held_out for dp in list(ds)]
@@ -202,32 +204,35 @@ def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
     score(LiteRTClient(artifact, trainer.dataset_tensors), rounds)
 
     report_dir = get_report_dir(key, strategy.report_subdir)
-    write_metrics_csv(history, report_dir, "convergence.csv")
-    plot_metric(history, "round", trainer.primary_metric, report_dir, "convergence.png")
     metric = trainer.primary_metric
     values = [h[metric] for h in history]
-    write_summary(report_dir / "convergence.yaml",
-        shows=f"Integration-path convergence of {key} ({spec.submission_type.value}), "
-              f"driven over the real HTTP API by the headless "
-              f"{strategy.report_subdir} client.",
-        x_axis={'name': 'global round', 'range': [0, rounds],
-                'note': '0 = initial global weights, '
-                        f'{rounds} = after the last aggregation'},
-        y_axis={'name': metric, 'better': 'lower' if 'error' in metric else 'higher'},
-        split={'clients': f'{len(client_datasets)} training subjects (test_N), one '
-                          f'submission each per round',
-               'eval_subjects': eval_subjects,
-               'holdout': f'leave-{eval_subjects}-subject-out'},
-        headline={'start': values[0], 'end': values[-1], 'delta': values[-1] - values[0]},
-        purpose='integration verification (Sec. 5.1), not a reported convergence curve — '
-                'those come from the simulated federated loop (scripts.system.train '
-                '--loop federated, plotted by scripts.figures.plot_convergence)')
+    write_metrics_csv(history, report_dir, "convergence.csv")
+    line_plot(report_dir / "convergence.png", [h["round"] for h in history],
+              {metric: values}, "round", metric)
+    write_yaml(report_dir / "convergence.yaml", {
+        'shows': f"Integration-path convergence of {key} ({spec.submission_type.value}), "
+                 f"driven over the real HTTP API by the headless "
+                 f"{strategy.report_subdir} client.",
+        'x_axis': {'name': 'global round', 'range': [0, rounds],
+                   'note': '0 = initial global weights, '
+                           f'{rounds} = after the last aggregation'},
+        'y_axis': {'name': metric, 'better': 'lower' if 'error' in metric else 'higher'},
+        'split': {'clients': f'{len(client_datasets)} training subjects (test_N), one '
+                             f'submission each per round',
+                  'eval_subjects': eval_subjects,
+                  'holdout': f'leave-{eval_subjects}-subject-out'},
+        'headline': {'start': values[0], 'end': values[-1],
+                     'delta': values[-1] - values[0]},
+        'purpose': 'integration verification (Sec. 5.1), not a reported convergence curve '
+                   '— those come from the simulated federated loop (scripts.system.train '
+                   '--loop federated, plotted by scripts.figures.plot_convergence)',
+    })
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", default="cnn-ae", choices=sorted(MODELS),
+    parser.add_argument("model", choices=sorted(MODELS),
                         help="model to run the loop for (default: cnn-ae)")
     parser.add_argument("--rounds", type=int, default=5, help="global rounds (default: 5)")
     parser.add_argument("--eval-subjects", type=int, default=2,

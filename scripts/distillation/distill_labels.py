@@ -11,22 +11,20 @@ that train.py consumes via --dataset-dir. For the labeled diagnostics see distil
 """
 
 
-from common.config import MODELS_DIR
-from ml.saving import load_trainable_weights
-from ml.models.common import AutoencoderTrainer
 import argparse
 from pathlib import Path
 
 import numpy as np
 
-from common.config import RESULTS_DIR, DATASETS_DIR
-from ml.data import MIXED_FEATURE_SUBDIR, FEATURE_STATS_FILE, BVP_WINDOW, WINDOW_SECONDS
+from common.config import MODELS_DIR, RESULTS_DIR, DATASETS_DIR
+from ml.preprocessing import MIXED_FEATURE_SUBDIR, FEATURE_STATS_FILE
 from ml.model_list import MODELS
+from ml.models.common import AutoencoderTrainer
+from ml.saving import load_trainable_weights
 from ..common.scoring import (
-    SCORE_NAMES, subject_thresholds, soft_score, median3,
+    SCORE_NAMES, load_budgets, subject_thresholds, soft_score, median3,
     score_dir_by_subject, score_mixed_by_subject,
 )
-from ..common.post_train import load_budgets
 
 
 def relink(link: Path, target: Path):
@@ -49,19 +47,9 @@ if __name__ == "__main__":
 
     budgets = load_budgets(args.model)
 
-    # batch_size=1 so every window is scored (no batch remainder dropped): distilled
-    # labels line up 1:1 with the feature windows, and each subject's thresholds are set
-    # from its full clean set — the same thing an on-device client does.
-    trainer = MODELS[args.model].build_trainer(args.model, batch_size=1)
+    trainer = MODELS[args.model].build_trainer(data_dir)
     trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
     assert isinstance(trainer, AutoencoderTrainer)
-
-    window = trainer.window_size
-    if window != BVP_WINDOW:
-        raise SystemExit(
-            f"model window ({window} samples) does not match the {WINDOW_SECONDS}s feature "
-            f"window ({BVP_WINDOW} samples) used to build mixed-features; the autoencoder "
-            f"would produce a mismatched number of labels. Align the model's window size.")
 
     print("Scoring mixed-anomaly windows...")
     mixed = score_mixed_by_subject(trainer, data_dir)

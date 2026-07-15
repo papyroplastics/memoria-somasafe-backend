@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from pathlib import Path
 
 from common.db import SubmissionType
 from ml.models import (

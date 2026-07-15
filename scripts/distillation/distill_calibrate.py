@@ -9,19 +9,20 @@ labels and reports the detector's metrics.
 """
 
 
-from common.config import MODELS_DIR
-from ml.saving import load_trainable_weights
 import argparse
 import json
 import numpy as np
 
-from common.config import DATASETS_DIR
+from common.config import DATASETS_DIR, MODELS_DIR
 from ml.model_list import MODELS
 from ml.metrics import classification_report
 from ml.models.common import AutoencoderTrainer
+from ml.saving import load_trainable_weights
 
-from ..common.post_train import get_report_dir, CALIBRATION_REPORT
-from ..common.scoring import SCORE_NAMES, clean_threshold, score_dir_by_subject, score_mixed_by_subject, load_mixed_truth
+from ..common.reports import get_report_dir
+from ..common.scoring import (
+    CALIBRATION_REPORT, SCORE_NAMES, clean_threshold, score_dir_by_subject,
+    score_mixed_by_subject, load_mixed_truth)
 
 # Candidate per-score budgets (the share of clean windows a score may fire on = the
 # quantile level its threshold sits at). Each score's budget is picked independently,

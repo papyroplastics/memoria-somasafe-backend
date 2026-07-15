@@ -2,9 +2,10 @@
 
 import numpy as np
 
-from ml.data import BVP_RATE
+from ml.preprocessing import BVP_RATE
 
-# Plausible heart-rate band (~42–210 bpm); matches the spectral feature band in ml.data.
+# Plausible heart-rate band (~42–210 bpm); matches the spectral feature band in
+# ml.preprocessing.
 PHYS_LO_HZ = 0.7
 PHYS_HI_HZ = 3.5
 

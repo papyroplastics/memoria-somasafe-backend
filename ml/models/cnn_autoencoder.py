@@ -3,7 +3,7 @@ from pathlib import Path
 import tensorflow as tf
 
 from ..layers import Conv1D, Dense, FiLM, relu, upsample2
-from ..data import N_COND
+from ..preprocessing import N_COND, BVP_WINDOW
 from .common import TrainableAutoencoder, AutoencoderTrainer, autoencoder_norm_params
 
 class CNNAutoencoder(TrainableAutoencoder):
@@ -25,7 +25,7 @@ class CNNAutoencoder(TrainableAutoencoder):
 
     def __init__(self, name: str, batch_size: int, seq_len: int,
                  signal_mean, signal_std, cond_mean, cond_std, n_signals: int = 2,
-                 n_cond: int = N_COND, hidden_dim: int = 32, latent_dim: int = 8,
+                 n_cond: int = N_COND, hidden_dim: int = 32, latent_dim: int = 64,
                  cond_embed_dim: int = 16, kernel_size: int = 7, n_outputs: int = 1,
                  diff_weight: float = 1.0, latent_dropout: float = 0.1, learning_rate: float = 1e-3,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
@@ -67,13 +67,11 @@ class CNNAutoencoder(TrainableAutoencoder):
 
 
 def get_trainer(data_root: Path, batch_size: int | None = None) -> AutoencoderTrainer:
-    batch_size = batch_size or AutoencoderTrainer.default_batch_size
-
     sig_mean, sig_std, cond_mean, cond_std = autoencoder_norm_params(data_root)
     model = CNNAutoencoder(
-        name='dalia_cnn_ae', batch_size=batch_size,
-        seq_len=AutoencoderTrainer.default_window_size,
+        name='dalia_cnn_ae', batch_size=batch_size or TrainableAutoencoder.default_batch_size,
+        seq_len=BVP_WINDOW,
         signal_mean=sig_mean, signal_std=sig_std,
         cond_mean=cond_mean, cond_std=cond_std,
     )
-    return AutoencoderTrainer(model, batch_size=batch_size)
+    return AutoencoderTrainer(model)

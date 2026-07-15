@@ -1,18 +1,16 @@
-"""Dataset processing and loading for the PPG-DaLiA anomaly-detection pipeline.
+"""Dataset processing for the PPG-DaLiA anomaly-detection pipeline.
 
-Owns everything between the raw download and the tensors the trainers consume:
-the per-stage build functions (raw extraction, synthetic-anomaly injection,
-feature extraction), the windowing/normalization helpers used at load time, and
-the shared constants. ``scripts/get_dataset.py`` is a thin CLI that downloads the
-archive and sequences these stages; the model trainers and ``distill_labels.py``
-call the load helpers here.
+Owns everything between the raw download and the numpy arrays on disk: the
+per-stage build functions (raw extraction, synthetic-anomaly injection, feature
+extraction), the normalization params they save, and the shared constants.
+``scripts/system/get_dataset.py`` is a thin CLI that downloads the archive and
+sequences these stages. Deliberately free of TensorFlow — ``ml.loading`` builds
+the tf.data pipelines on top of these arrays.
 """
 
 import pickle as pkl
 from pathlib import Path
 import numpy as np
-import pandas as pd
-import tensorflow as tf
 
 from common.config import SEED
 
@@ -176,11 +174,11 @@ def build_context_pass(subjects_dir: Path):
     8-second grid -> ``S*/context.npy`` (raw, un-normalized; consumers normalize at
     load with ``context_norm_params.npy``).
 
-    This is the precomputed counterpart of the at-load context in ``window_cond_vectors``
-    for the no-overlap case: it's consumed by ``conditional_windows`` and exported by
-    ``scripts/export_subject_data.py`` so the phone can store context per window. The
-    shifted ``windowed_conditional`` path does not use it (it samples context at
-    arbitrary window ends and so recomputes)."""
+    The precomputed counterpart of the at-load context in ``window_cond_vectors``, for
+    the no-overlap case only: consumed by ``conditional_windows`` and exported by
+    ``scripts/system/export_subject_data.py`` so the phone can store context per window.
+    The shifted ``ml.loading.subject_windows`` path samples context at arbitrary window
+    ends, so it recomputes instead."""
     # Self-heal context norm params for datasets whose Stage 1 predates them.
     if not (subjects_dir / CONTEXT_NORM_PARAMS_FILE).exists():
         _, _, acc_mean, acc_std = load_norm_params(subjects_dir)   # acc_std already + EPS
@@ -419,7 +417,7 @@ def build_feature_dataset(signal_dir: Path, subjects_dir: Path, feature_dir: Pat
     fully anomalous); the clean signals carry no labels file, so every window is normal
     (label 0). Features are stored per subject under S*/ raw (un-normalized), mirroring
     what the device echoes; the global z-score stats are saved at the top level
-    (feature_stats.npy) and applied at load time (see FeatureMLPTrainer.subject_dataset).
+    (feature_stats.npy) and baked into the model as its z-score constants.
     """
     feature_dir.mkdir(parents=True, exist_ok=True)
 
@@ -477,27 +475,12 @@ def build_feature_dataset(signal_dir: Path, subjects_dir: Path, feature_dir: Pat
 
 
 # ---------------------------------------------------------------------------
-# Load-time helpers (windowing + normalization)
+# Load-time helpers (normalization params + raw signal assembly)
 # ---------------------------------------------------------------------------
 
-def window_signal(
-        signal: np.ndarray, window_size: int, shift: int
-    ) -> tf.data.Dataset:
-    """Window a ``(T, n_signals)`` array into ``(window_size, n_signals)`` frames.
-
-    Returns the windowed dataset and its (asserted) cardinality.
-    """
-    count = (len(signal) - window_size) // shift + 1
-    ds = (tf.data.Dataset.from_tensor_slices(signal)
-          .window(size=window_size, shift=shift, drop_remainder=True)
-          .flat_map(lambda w: w.batch(window_size, drop_remainder=True))
-          .apply(tf.data.experimental.assert_cardinality(count)))
-    return ds
-
-
 def load_norm_params(subjects_dir: Path) -> tuple[float, float, float, float]:
-    """Read the global BVP/ACC (mean, std) saved by Stage 1, guarding against a
-    zero std. Returns (bvp_mean, bvp_std, acc_mean, acc_std)."""
+    """Global BVP/ACC (mean, std) from Stage 1 as (bvp_mean, bvp_std, acc_mean,
+    acc_std), guarded against a zero std."""
     params = np.load(subjects_dir / NORM_PARAMS_FILE)
     bvp_mean, bvp_std = float(params[0][0]), float(params[0][1])
     acc_mean, acc_std = float(params[1][0]), float(params[1][1])
@@ -505,7 +488,6 @@ def load_norm_params(subjects_dir: Path) -> tuple[float, float, float, float]:
 
 
 def norm_stats(subjects_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Per-channel ``(mean, std)`` for the stacked ``[BVP, ACC]`` signal."""
     bvp_mean, bvp_std, acc_mean, acc_std = load_norm_params(subjects_dir)
     mean = np.array([bvp_mean, acc_mean], dtype=np.float32)
     std  = np.array([bvp_std, acc_std], dtype=np.float32)
@@ -513,29 +495,23 @@ def norm_stats(subjects_dir: Path) -> tuple[np.ndarray, np.ndarray]:
 
 
 def load_feature_stats(feature_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Per-feature ``(mean, std)`` saved by Stage 4, applied to the raw on-disk
-    features at load time."""
     stats = np.load(feature_dir / FEATURE_STATS_FILE)
     return stats[0].astype(np.float32), stats[1].astype(np.float32)
 
 
 def load_context_norm_params(subjects_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Per-context-dim ``(mean, std)`` saved by Stage 1, applied to the raw activity
-    context (trailing mean/std of the raw ACC) at load time."""
     params = np.load(subjects_dir / CONTEXT_NORM_PARAMS_FILE)
     return params[0].astype(np.float32), params[1].astype(np.float32)
 
 
 def load_static_norm_params(subjects_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    """Per-demographic ``(mean, std)`` saved by Stage 1, baked into the model so it
-    z-scores the raw 6-d static vector (part of the cond) in its own signatures."""
     params = np.load(subjects_dir / STATIC_NORM_PARAMS_FILE)
     return params[0].astype(np.float32), params[1].astype(np.float32)
 
 
 def load_static_raw(subjects_dir: Path, sid: str) -> np.ndarray:
-    """Raw demographics vector. ``static.npy`` is stored z-scored (Stage 1); since the
-    model now owns cond normalization, de-normalize it back to raw for the load path."""
+    """``static.npy`` is stored z-scored (Stage 1); the model owns cond normalization
+    now, so de-normalize back to raw for the load path."""
     norm = np.load(subjects_dir / sid / 'static.npy').astype(np.float32)
     mean, std = load_static_norm_params(subjects_dir)
     return (norm * std + mean).astype(np.float32)
@@ -590,35 +566,6 @@ def window_cond_vectors(subjects_dir: Path, sid: str, raw_acc: np.ndarray,
     ctx_raw = np.stack([ctx_mean[ends], ctx_std[ends]], axis=1)              # (count, N_CONTEXT)
     static_rep = np.broadcast_to(static, (count, len(static)))
     return np.concatenate([static_rep, ctx_raw], axis=1).astype(np.float32)
-
-
-def windowed_conditional(subjects_dir: Path, sid: str, window_size: int, shift: int,
-                         anomalous_dir: Path | None = None) -> tf.data.Dataset:
-    """Windowed *raw* ``[BVP, ACC]`` frames paired with their per-window raw
-    conditioning vector, for one subject.
-
-    Nothing is normalized here — the model z-scores signal and cond in its own
-    signatures. Yields ``(signal_window, cond)`` tuples."""
-    raw = stacked_signal(subjects_dir, sid, anomalous_dir)
-    ds = window_signal(raw, window_size, shift)
-    cond = window_cond_vectors(subjects_dir, sid, raw[:, 1], window_size, shift, len(ds))
-    cond_ds = tf.data.Dataset.from_tensor_slices(cond)
-    return tf.data.Dataset.zip(ds, cond_ds)
-
-def combine_datasets(datasets: list[tf.data.Dataset]) -> tf.data.Dataset:
-    """Merge per-subject datasets."""
-    count = sum([len(ds) for ds in datasets])
-
-    return (tf.data.Dataset
-            .sample_from_datasets(datasets, rerandomize_each_iteration=False)
-            .apply(tf.data.experimental.assert_cardinality(count)))
-
-
-def pool_datasets(datasets: list[tf.data.Dataset]) -> tf.data.Dataset:
-    """Merge per-subject datasets into the single stream a centralized loop trains on,
-    shuffled so gradient steps are not ordered by subject."""
-    pooled = combine_datasets(datasets)
-    return pooled.shuffle(len(pooled), reshuffle_each_iteration=False)
 
 
 def conditional_windows(subjects_dir: Path, sid: str, window_size: int,

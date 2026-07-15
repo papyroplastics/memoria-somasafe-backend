@@ -21,6 +21,7 @@ import numpy as np
 from sqlmodel import Session
 
 from common.celery_tasks import SECURE_AGG_TASK
+from ml.model_list import MODELS
 from common.config import SECURE_MIN_MEMBERS, SEED
 from common.db import (
     GlobalWeights,
@@ -143,7 +144,7 @@ def run(base: str, key: str, clients: int, rounds: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--model", default="cnn-ae",
+    parser.add_argument('model', default="cnn-ae", choices=sorted(MODELS), 
                         help="secure-typed model to aggregate for (default: cnn-ae)")
     parser.add_argument("--clients", type=int, default=SECURE_MIN_MEMBERS,
                         help=f"cohort size, one test_N user each (default: {SECURE_MIN_MEMBERS})")

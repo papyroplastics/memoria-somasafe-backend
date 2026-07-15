@@ -4,21 +4,21 @@ clean signal and every anomaly kind, then a second figure with
 those same windows reconstructed by a trained autoencoder.
 """
 
-from common.config import MODELS_DIR
-from ml.saving import load_trainable_weights
-from ml.models.common import AutoencoderTrainer
 import argparse
 
 import matplotlib.pyplot as plt
 import numpy as np
 
-from common.config import DATASETS_DIR
+from common.config import DATASETS_DIR, MODELS_DIR
+from ..common.scoring import eval_padded
 from ml.model_list import MODELS
-from ml.data import (
+from ml.models.common import AutoencoderTrainer
+from ml.preprocessing import (
     CLEAN_SUBDIR, ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_RATE,
     conditional_windows, get_sorted_paths,
 )
-from ..common.post_train import get_report_dir, write_summary
+from ml.saving import load_trainable_weights
+from ..common.reports import get_report_dir, write_yaml
 
 KINDS = ('clean', *ANOMALY_KINDS)
 
@@ -46,11 +46,11 @@ if __name__ == "__main__":
 
     rng = np.random.default_rng(args.seed)
 
-    trainer = MODELS[args.model].build_trainer(args.model, batch_size=1)
+    trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
     trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
     assert isinstance(trainer, AutoencoderTrainer)
 
-    window = trainer.window_size
+    window = trainer.model.seq_len
 
     subjects_dir = DATASETS_DIR / CLEAN_SUBDIR
     subject_dirs = get_sorted_paths(subjects_dir)
@@ -68,6 +68,10 @@ if __name__ == "__main__":
     views = window_views(DATASETS_DIR, sid, window, index)
     t = np.arange(window) / BVP_RATE
 
+    signals = np.stack([views[k][0] for k in KINDS]).astype(np.float32)
+    conds = np.stack([views[k][1] for k in KINDS]).astype(np.float32)
+    recons = eval_padded(trainer.model, signals, conds)['reconstruction'][:, :, 0]
+
     fig_in, axs_in = plt.subplots(len(KINDS), 1, sharex=True, figsize=(8, 2 * len(KINDS)))
     fig_rec, axs_rec = plt.subplots(len(KINDS), 1, sharex=True, figsize=(8, 2 * len(KINDS)))
     fig_in.suptitle(f'{sid} window {index} — normalized BVP')
@@ -76,16 +80,11 @@ if __name__ == "__main__":
     bvp_mean = trainer.model.signal_mean.numpy()[0]
     bvp_std = trainer.model.signal_std.numpy()[0]
 
-    for ax_in, ax_rec, kind in zip(axs_in, axs_rec, KINDS):
-        sig, cond = views[kind]
-        bvp = sig[:, 0]
-        recon = trainer.model.eval(
-            sig[None].astype(np.float32),
-            cond[None].astype(np.float32),
-        )['reconstruction'][0, :, 0].numpy()
+    for i, (ax_in, ax_rec, kind) in enumerate(zip(axs_in, axs_rec, KINDS)):
+        bvp = views[kind][0][:, 0]
         # eval() reconstructs in z-scored space; denormalize back to raw BVP units
         # so it's comparable to the raw `bvp` it's plotted against.
-        recon = recon * bvp_std + bvp_mean
+        recon = recons[i] * bvp_std + bvp_mean
 
         ax_in.plot(t, bvp)
         ax_in.set_ylabel(kind)
@@ -110,20 +109,22 @@ if __name__ == "__main__":
     axes = {'x_axis': {'name': 'seconds', 'range': [0, 8], 'sample_rate_hz': BVP_RATE},
             'y_axis': {'name': 'raw BVP amplitude', 'units': 'sensor units'}}
 
-    write_summary(report_dir / 'signals.yaml',
-        shows=f"Raw BVP signal windows for subject {sid}: one 8 s window per row, the same "
-              f"window under the clean signal and each synthetic anomaly kind.",
-        rows={'order': 'top to bottom', 'kinds': list(KINDS)},
+    write_yaml(report_dir / 'signals.yaml', {
+        'shows': f"Raw BVP signal windows for subject {sid}: one 8 s window per row, the "
+                 f"same window under the clean signal and each synthetic anomaly kind.",
+        'rows': {'order': 'top to bottom', 'kinds': list(KINDS)},
         **axes,
-        sample=sample,
-        note='only BVP carries the anomaly; ACC stays the subject\'s clean signal',
-        backs='report Sec. 4.1 (illustrative)')
-    write_summary(report_dir / 'signals_reconstructed.yaml',
-        shows=f"The same {len(KINDS)} windows with the {args.model} autoencoder's "
-              f"reconstruction (denormalized to raw BVP units) overlaid on the input: the "
-              f"conditioned autoencoder tracks clean rhythm and departs on "
-              f"integrity/rhythm anomalies.",
-        rows={'order': 'top to bottom', 'kinds': list(KINDS)},
+        'sample': sample,
+        'note': "only BVP carries the anomaly; ACC stays the subject's clean signal",
+        'backs': 'report Sec. 4.1 (illustrative)',
+    })
+    write_yaml(report_dir / 'signals_reconstructed.yaml', {
+        'shows': f"The same {len(KINDS)} windows with the {args.model} autoencoder's "
+                 f"reconstruction (denormalized to raw BVP units) overlaid on the input: "
+                 f"the conditioned autoencoder tracks clean rhythm and departs on "
+                 f"integrity/rhythm anomalies.",
+        'rows': {'order': 'top to bottom', 'kinds': list(KINDS)},
         **axes,
-        sample=sample,
-        backs='report Sec. 4.1 (illustrative)')
+        'sample': sample,
+        'backs': 'report Sec. 4.1 (illustrative)',
+    })

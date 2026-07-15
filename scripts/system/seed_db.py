@@ -45,7 +45,7 @@ from common.db import (
     init_db,
     utcnow,
 )
-from ml.data import CLEAN_SUBDIR, get_sorted_paths
+from ml.preprocessing import CLEAN_SUBDIR, get_sorted_paths
 from ml.model_list import MODELS
 from ml.payload import sign_blob, sign_model
 from ml.saving import load_trainable_weights

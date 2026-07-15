@@ -13,25 +13,25 @@ import argparse
 from pathlib import Path
 import tensorflow as tf
 
-from ml.data import combine_datasets, pool_datasets
+from ml.loading import holdout, pool
 from ml.models.common import Trainer
 from ml.saving import save_artifacts
 from ml.training import normal_loop, federated_loop, History
 from ml.model_list import MODELS
 from common.config import MODELS_DIR, DATASETS_DIR, SEED
-from ..common.post_train import (
-    plot_history, write_history_csv, get_report_dir, write_run)
+from ..common.plots import plot_history
+from ..common.reports import RUN_MANIFEST, get_report_dir, write_history_csv, write_yaml
 
 LOOP_OPTIONS = ['normal', 'federated']
 
 
 def run_loop(trainer: Trainer, data_dir: Path, loop: str, eval_subjects: int,
              steps: int, local_epochs: int) -> tuple[History, tf.data.Dataset, int]:
-    train_subjects, held_out = trainer.subject_datasets(data_dir, eval_subjects)
-    eval_dataset = combine_datasets(held_out)
+    train_subjects, held_out = holdout(trainer.subject_datasets(data_dir), eval_subjects)
+    eval_dataset = pool(held_out)
 
     if loop == 'normal':
-        history = normal_loop(trainer, pool_datasets(train_subjects), eval_dataset, steps)
+        history = normal_loop(trainer, pool(train_subjects), eval_dataset, steps)
 
     elif loop == 'federated':
         history = federated_loop(trainer, train_subjects, eval_dataset, local_epochs, steps)
@@ -87,8 +87,9 @@ if __name__ == "__main__":
 
     # Both the tag and a non-default batch size keep a run's artifacts off the canonical
     # names, so a variant never clobbers the model the system actually serves.
+    batch_size = trainer.model.batch_size
     parts = ([args.tag] if args.tag else []) + (
-        [str(trainer.batch_size)] if trainer.batch_size != trainer.default_batch_size else [])
+        [str(batch_size)] if batch_size != type(trainer.model).default_batch_size else [])
     postfix = ''.join(f'_{p}' for p in parts)
     save_artifacts(trainer, result_dir, eval_dataset, postfix)
     plot_history(history, trainer.primary_metric, report_dir)
@@ -96,7 +97,7 @@ if __name__ == "__main__":
     trainer.report(report_dir, eval_dataset)
 
     _, final_loss, final_metrics = history[-1]
-    write_run(report_dir, {
+    write_yaml(report_dir / RUN_MANIFEST, {
         'model': args.model,
         'loop': args.loop,
         'tag': args.tag,
@@ -107,7 +108,7 @@ if __name__ == "__main__":
         'clients': n_train_subjects if args.loop == 'federated' else None,
         'train_subjects': n_train_subjects,
         'eval_subjects': args.eval_subjects,
-        'batch_size': trainer.batch_size,
+        'batch_size': batch_size,
         'dataset_dir': args.dataset_dir,
         'seed': SEED,
         'history': 'training.csv',
