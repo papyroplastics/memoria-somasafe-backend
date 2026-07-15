@@ -8,7 +8,7 @@ import base64
 import requests
 
 from common.db import SubmissionType
-from common.storage import decompress
+from common.compression import decompress
 
 DEFAULT_BASE_URL = "http://localhost:8000"
 WEIGHTS_ID_HEADER = "X-Weights-ID"

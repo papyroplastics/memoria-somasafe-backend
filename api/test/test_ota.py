@@ -1,8 +1,8 @@
 """Tests for the /ota routes (api.routes.ota).
 
 Firmware rows are inserted directly (random version strings, a random high
-interface number) with their images uploaded to the object store, so the
-tests don't depend on a firmware image having been exported and seeded.
+interface number) along with their images, so the tests don't depend on a
+firmware image having been exported and seeded.
 """
 
 import base64
@@ -12,8 +12,8 @@ from datetime import timedelta
 import pytest
 from sqlmodel import select
 
-from common.db import Firmware, Session, engine, utcnow
-from common.storage import decompress, delete_object, firmware_key, put_compressed
+from common.compression import compress, decompress
+from common.db import Firmware, FirmwareImage, Session, engine, utcnow
 
 SIGNATURE_HEADER = "X-Firmware-Signature"
 
@@ -25,24 +25,24 @@ SIGNATURE = b"not-a-real-der-signature"
 @pytest.fixture
 def firmwares():
     """Two throwaway signed builds on their own interface, the older one a day
-    older. Rows and on-disk images are removed on teardown."""
+    older. Deleting the rows on teardown takes their images with them."""
     interface = 1000 + secrets.randbelow(1_000_000)
     suffix = secrets.token_hex(4)
     new_version, old_version = f"9.9.1-{suffix}", f"9.9.0-{suffix}"
+    builds = ((old_version, BLOB_OLD, [1], timedelta(days=1)),
+              (new_version, BLOB_NEW, [1, 2], timedelta(0)))
     with Session(engine) as session:
-        session.add(Firmware(version=old_version, interface_version=interface,
-                             supported_contracts=[1], size=len(BLOB_OLD),
-                             signature=SIGNATURE,
-                             created_at=utcnow() - timedelta(days=1)))
-        session.add(Firmware(version=new_version, interface_version=interface,
-                             supported_contracts=[1, 2], size=len(BLOB_NEW),
-                             signature=SIGNATURE))
+        for version, blob, contracts, age in builds:
+            firmware = Firmware(
+                version=version, interface_version=interface,
+                supported_contracts=contracts, size=len(blob),
+                signature=SIGNATURE, created_at=utcnow() - age)
+            session.add(firmware)
+            session.flush()
+            session.add(FirmwareImage(firmware_id=firmware.id,
+                                      data=compress(blob)))
         session.commit()
-    put_compressed(firmware_key(old_version), BLOB_OLD)
-    put_compressed(firmware_key(new_version), BLOB_NEW)
     yield interface, new_version, old_version
-    for version in (old_version, new_version):
-        delete_object(firmware_key(version))
     with Session(engine) as session:
         for fw in session.exec(
                 select(Firmware).where(Firmware.interface_version == interface)):

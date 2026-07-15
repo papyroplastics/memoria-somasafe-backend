@@ -1,8 +1,22 @@
+"""SQLModel tables, plus the blob tables the gateway serves from.
+
+Every blob the gateway hands out (model artifacts, firmware images, per-user
+quantization results) lives in its own table keyed by the row that owns it, so a
+handler locates one from the row it already loaded. They are split out rather
+than kept as columns because the owning rows are read constantly and the blobs
+almost never: aggregation loads GlobalWeights for its weights, /ota/versions
+lists Firmware rows, and neither should drag a .tflite along.
+
+Blobs are stored and served zstd-compressed; the client decompresses.
+Signatures in the DB cover the *raw* bytes, so compression happens after signing
+and the client verifies after decompressing.
+"""
+
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import JSON, BigInteger, Column, UniqueConstraint
+from sqlalchemy import DDL, JSON, BigInteger, Column, UniqueConstraint, event
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from common.config import DATABASE_URL
@@ -33,6 +47,15 @@ class SubmissionType(str, Enum):
     raw = "raw"
     quantize = "quantize"
     secure = "secure"
+
+
+class Artifact(str, Enum):
+    """A serving artifact baked from a GlobalWeights snapshot: the
+    LiteRT-trainable .tflite the app fine-tunes, and the signed int8 .tflite the
+    firmware runs. Doubles as the path parameter of /model/download/{artifact}."""
+
+    trainable = "trainable"
+    quantized = "quantized"
 
 
 class SecureRoundStatus(str, Enum):
@@ -129,17 +152,17 @@ class ModelVersion(IntPKModel, table=True):
 
 class GlobalWeights(IntPKModel, table=True):
     """A snapshot of a model version's global weights. The trainable/quantized
-    serving artifacts baked from these weights live in object storage, keyed
-    by this row (common.storage), not in the DB; only their signature is
-    kept here. Seeded from the trained tflite files and appended to by
-    aggregation, which re-exports both artifacts (and signs the quantized one,
-    see ml.payload) each round. The active weights of a version are its latest
-    **valid** row; ``created_at`` is the weight version clients compare against
-    to decide when to re-pull. ``valid`` doubles as a hand-operated kill switch
-    (flip it to roll back a bad round — the previous row's artifacts come back
-    with it) and is set to false by aggregation itself when an artifact export
-    fails. ``mse_threshold`` is the allowed submission error computed by that
-    round (None on seeded rows, which skips the check in weight validation)."""
+    serving artifacts baked from these weights are WeightsArtifact rows keyed by
+    this one, written in the same transaction; only their signature is kept here.
+    Seeded from the trained tflite files and appended to by aggregation, which
+    re-exports both artifacts (and signs the quantized one, see ml.payload) each
+    round. The active weights of a version are its latest **valid** row;
+    ``created_at`` is the weight version clients compare against to decide when
+    to re-pull. ``valid`` doubles as a hand-operated kill switch (flip it to roll
+    back a bad round — the previous row's artifacts come back with it) and is set
+    to false by aggregation itself when an artifact export fails.
+    ``mse_threshold`` is the allowed submission error computed by that round
+    (None on seeded rows, which skips the check in weight validation)."""
 
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version_id: int = Field(foreign_key="modelversion.id", index=True)
@@ -149,6 +172,19 @@ class GlobalWeights(IntPKModel, table=True):
     mse_threshold: float | None = None
     artifact_signature: bytes | None = None   # DER ECDSA over the canonical model bytes
     created_at: datetime = Field(default_factory=utcnow, index=True)
+
+
+class WeightsArtifact(SQLModel, table=True):
+    """One serving artifact of a GlobalWeights snapshot. Row existence *is* the
+    presence check the download route makes — a snapshot may legitimately carry a
+    trainable artifact and no quantized one (the seed skips the quantized artifact
+    for a model with no int8 export), so which artifacts exist is data rather than
+    something a handler has to assume."""
+
+    weights_id: int = Field(foreign_key="globalweights.id", primary_key=True,
+                            ondelete="CASCADE")
+    artifact: Artifact = Field(primary_key=True)
+    data: bytes                # zstd-compressed .tflite, served as stored
 
 
 class ClientDeltaSubmission(IntPKModel, table=True):
@@ -214,19 +250,16 @@ class SecureRoundMember(SQLModel, table=True):
 
 
 class QuantizationJob(SQLModel, table=True):
-    """Tracks one quantization request end to end. The int8 .tflite result
-    itself lives in object storage (common.storage.quantize_result_key, keyed
-    by this row's own uuid4 id — already unguessable); ``result_size`` is the
-    ephemeral marker of its presence there, and ``signature`` the server's
-    ECDSA over its canonical model bytes (ml.payload). Both are nulled by the
-    cleanup sweep once served (after a grace period) or once expired
-    (unclaimed) — the sweep also deletes the object itself."""
+    """Tracks one quantization request end to end. The int8 .tflite result is a
+    QuantizationResult row keyed by this one; ``signature`` is the server's ECDSA
+    over its canonical model bytes (ml.payload). The result row is dropped and
+    the signature nulled by the cleanup sweep once served (after a grace period)
+    or once expired (unclaimed)."""
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     submission_id: int = Field(foreign_key="clientdeltasubmission.id")
     model_key: str
     status: JobStatus = Field(default=JobStatus.pending)
-    result_size: int | None = None
     signature: bytes | None = None
     error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
@@ -235,16 +268,27 @@ class QuantizationJob(SQLModel, table=True):
     served_at: datetime | None = None
 
 
+class QuantizationResult(SQLModel, table=True):
+    """A job's personalized int8 .tflite, held until the cleanup sweep drops it.
+    Kept out of QuantizationJob so the sweep can select expiring jobs without
+    loading the very blobs it is about to delete."""
+
+    job_id: uuid.UUID = Field(foreign_key="quantizationjob.id", primary_key=True,
+                              ondelete="CASCADE")
+    data: bytes                # zstd-compressed int8 .tflite, served as stored
+
+
 class Firmware(IntPKModel, table=True):
     """A published firmware build, seeded from a `shared/gen/firmware/{version}`
     export (`firmware/scripts/export_image.py`) and served by the /ota routes.
-    The image itself lives in object storage, keyed by ``version``
-    (common.storage); only its ``size`` (raw image bytes) and ``signature`` are
-    kept here. ``interface_version`` is the BLE contract an app build must share
-    to talk to it; ``supported_contracts`` are the model contract versions it
-    can consume; ``signature`` (never null — an unverifiable image is useless to
-    the device) is the server's ECDSA over the raw image bytes, verified by the
-    device against its factory srv_pub before booting the image."""
+    The image itself is a FirmwareImage row keyed by this one; only its ``size``
+    (raw image bytes) and ``signature`` are kept here, so /ota/versions can list
+    builds without reading any images. ``interface_version`` is the BLE contract
+    an app build must share to talk to it; ``supported_contracts`` are the model
+    contract versions it can consume; ``signature`` (never null — an unverifiable
+    image is useless to the device) is the server's ECDSA over the raw image
+    bytes, verified by the device against its factory srv_pub before booting the
+    image."""
 
     version: str = Field(unique=True, index=True)  # arbitrary <=32-byte build string
     interface_version: int = Field(index=True)
@@ -252,6 +296,24 @@ class Firmware(IntPKModel, table=True):
     size: int                                      # raw (uncompressed) image size
     signature: bytes                               # DER ECDSA over the raw image
     created_at: datetime = Field(default_factory=utcnow)
+
+
+class FirmwareImage(SQLModel, table=True):
+    """A published build's image. Deleting the Firmware row takes this with it,
+    which is what re-publishing a changed build under an existing version does."""
+
+    firmware_id: int = Field(foreign_key="firmware.id", primary_key=True,
+                             ondelete="CASCADE")
+    data: bytes                # zstd-compressed raw image, served as stored
+
+
+# The blob columns already hold zstd output, so TOAST's compression pass can only
+# burn CPU failing to shrink them: keep them out of line and uncompressed.
+for _blob_model in (WeightsArtifact, QuantizationResult, FirmwareImage):
+    event.listen(
+        _blob_model.__table__, "after_create",  # type: ignore[attr-defined]
+        DDL(f"ALTER TABLE {_blob_model.__tablename__} "
+            f"ALTER COLUMN data SET STORAGE EXTERNAL"))
 
 
 engine = create_engine(DATABASE_URL)
@@ -292,6 +354,12 @@ def get_version_weights(session: Session, version_id: int) -> GlobalWeights | No
                GlobalWeights.valid == True)  # noqa: E712 — SQL expression
         .order_by(GlobalWeights.created_at.desc())  # type: ignore[attr-defined]
     ).first()
+
+
+def get_weights_artifact(session: Session, weights_id: int,
+                         artifact: Artifact) -> WeightsArtifact | None:
+    """One baked artifact of a snapshot, or ``None`` if it was never exported."""
+    return session.get(WeightsArtifact, (weights_id, artifact))
 
 
 def get_latest_weights(session: Session, key: str) -> GlobalWeights | None:

@@ -1,7 +1,6 @@
 import base64
 import uuid
 from datetime import datetime
-from enum import Enum
 
 import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Request
@@ -21,11 +20,13 @@ from common.config import (
     SUBMIT_DAILY_WINDOW_SECONDS,
 )
 from common.db import (
+    Artifact,
     GlobalWeights,
     JobStatus,
     ModelDefinition,
     ModelVersion,
     QuantizationJob,
+    QuantizationResult,
     SubmissionType,
     User,
     ClientDeltaSubmission,
@@ -35,11 +36,11 @@ from common.db import (
     get_model_def,
     get_session,
     get_version_weights,
+    get_weights_artifact,
     list_model_defs,
     utcnow,
 )
 from common.ratelimit import RateLimit
-from common.storage import fetch_raw, object_exists, quantize_result_key, weights_artifact_key
 from api.lib.ratelimit import check_limit, record_usage
 from api.lib.session import get_current_user
 from api.lib.challenge import require_device_owner
@@ -54,11 +55,6 @@ WEIGHTS_TIMESTAMP_HEADER = "X-Weights-Timestamp"
 SIGNATURE_HEADER = "X-Model-Signature"
 CONTRACT_VERSION_HEADER = "X-Contract-Version"
 NORM_PARAMS_HEADER = "X-Norm-Params"
-
-
-class Artifact(str, Enum):
-    trainable = "trainable"
-    quantized = "quantized"
 
 
 class ModelInfo(BaseModel):
@@ -248,7 +244,13 @@ def _settled_result(session: Session, job_id: uuid.UUID, user: User) -> Response
         return JSONResponse(status_code=422,
                             content={"status": job.status.value, "error": job.error})
 
-    payload = fetch_raw(quantize_result_key(job.id))
+    # A done job whose result the sweep already reaped reads as expired, not as
+    # a server error (the status flips in the same transaction as the delete, so
+    # this only races a concurrent sweep).
+    result = session.get(QuantizationResult, job.id)
+    if result is None:
+        raise HTTPException(status_code=404, detail="Result not found or expired")
+
     job.served_at = utcnow()
     session.add(job)
     session.commit()
@@ -262,7 +264,7 @@ def _settled_result(session: Session, job_id: uuid.UUID, user: User) -> Response
     if job.signature is not None:
         headers[SIGNATURE_HEADER] = base64.b64encode(job.signature).decode()
 
-    return Response(content=payload, media_type="application/octet-stream",
+    return Response(content=result.data, media_type="application/octet-stream",
                     headers=headers)
 
 
@@ -309,17 +311,14 @@ def download_model(artifact: Artifact, key: str, version: int | None = None,
     if weights is None:
         raise HTTPException(status_code=404, detail=f"No weights for model '{key}'")
 
-    object_key = weights_artifact_key(weights.model_key, weights.version_id,
-                                      weights.id, artifact.value)
-    if not object_exists(object_key):
+    baked = get_weights_artifact(session, weights.id, artifact)
+    if baked is None:
         raise HTTPException(status_code=404,
                             detail=f"No {artifact.value} artifact for model '{key}'")
 
     # The cooldown is spent only once we actually serve the artifact, so the
     # cheap rejections above (unknown version/weights/artifact) don't count.
     try:
-        blob = fetch_raw(object_key)  # zstd-compressed; the client decompresses
-
         headers = {
             FINGERPRINT_HEADER: ver.fingerprint,
             MODEL_VERSION_HEADER: str(ver.version),
@@ -334,7 +333,8 @@ def download_model(artifact: Artifact, key: str, version: int | None = None,
             if weights.artifact_signature is not None:
                 headers[SIGNATURE_HEADER] = base64.b64encode(weights.artifact_signature).decode()
 
-        return Response(content=blob, media_type="application/octet-stream",
+        # zstd-compressed as stored; the client decompresses.
+        return Response(content=baked.data, media_type="application/octet-stream",
                         headers=headers)
     finally:
         record_usage(RateLimit.model_download, user.id, key, DOWNLOAD_COOLDOWN_SECONDS)

@@ -7,9 +7,14 @@ from pydantic import BaseModel
 from sqlmodel import Session
 
 from common.config import OTA_DOWNLOAD_COOLDOWN_SECONDS
-from common.db import User, get_firmware, get_session, list_firmware
+from common.db import (
+    FirmwareImage,
+    User,
+    get_firmware,
+    get_session,
+    list_firmware,
+)
 from common.ratelimit import RateLimit
-from common.storage import fetch_raw, firmware_key
 from api.lib.challenge import require_device_owner
 from api.lib.ratelimit import check_limit, record_usage
 from api.lib.session import get_current_user
@@ -47,7 +52,8 @@ def download_firmware(interface: int, version: str,
     require_device_owner(session, user)
 
     firmware = get_firmware(session, interface, version)
-    if firmware is None:
+    image = None if firmware is None else session.get(FirmwareImage, firmware.id)
+    if firmware is None or image is None:
         raise HTTPException(status_code=404,
                             detail=f"No firmware '{version}' for interface {interface}")
 
@@ -59,9 +65,9 @@ def download_firmware(interface: int, version: str,
             "Content-Disposition":
                 f'attachment; filename="somasafe-firmware-{version}.bin"',
         }
-        # zstd-compressed in storage; the client decompresses, then verifies the
+        # zstd-compressed as stored; the client decompresses, then verifies the
         # signature (which covers the raw image) before forwarding it to the device.
-        return Response(content=fetch_raw(firmware_key(firmware.version)),
+        return Response(content=image.data,
                         media_type="application/octet-stream", headers=headers)
     finally:
         record_usage(RateLimit.ota_download, user.id, str(interface),

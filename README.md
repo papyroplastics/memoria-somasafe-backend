@@ -35,9 +35,11 @@ in `common/` (config, DB tables, the model registry) imported by both api and wo
 
 ```txt
 common/    Shared, TensorFlow-free infra imported by api + worker: env-driven config,
-           the secure-aggregation primitives (secure_agg.py), and the SQLModel tables
-           (User, AuthSession, Device, ModelDefinition, ModelVersion, GlobalWeights,
-           ClientDeltaSubmission, QuantizationJob, SecureRound, SecureRoundMember, Firmware).
+           the secure-aggregation primitives (secure_agg.py), the zstd transport wrapper
+           (compression.py), and the SQLModel tables (User, AuthSession, Device,
+           ModelDefinition, ModelVersion, GlobalWeights, WeightsArtifact,
+           ClientDeltaSubmission, QuantizationJob, QuantizationResult, SecureRound,
+           SecureRoundMember, Firmware, FirmwareImage).
 api/       FastAPI gateway (no TensorFlow): routers for auth/device/model (routes/),
            rate-limiting + attestation-challenge helpers (lib/), and a pytest suite
            mirroring the routers (test/).
@@ -274,18 +276,18 @@ the app's on-device feature/context recovery and its handling of missing samples
 
 The server is a FastAPI **gateway** in front of a Celery **worker**; the gateway never
 runs ML work directly. Both run on the host with `uv` (`make api-run`, `make worker-run`);
-only the external services — PostgreSQL, Redis, and MinIO — run in containers via
+only the external services — PostgreSQL and Redis — run in containers via
 `compose.yaml` (`make db-run`, podman). Credentials and connection settings are read from a
 `.env` file (`common/config.py` loads it via `python-dotenv`, and `compose.yaml` uses it for
 variable substitution); copy `example.env` to `.env` and adjust as needed — there are no
-hardcoded defaults, so the gateway/worker refuse to start without it. Those three are bound to `127.0.0.1` since only the
+hardcoded defaults, so the gateway/worker refuse to start without it. Both are bound to `127.0.0.1` since only the
 host-run processes reach them; the API itself binds `0.0.0.0` so the phone can reach it over
 the LAN. The gateway and worker do not need a shared filesystem — they only need to reach the
-same MinIO bucket, which is what makes the worker actually distributable (Celery's premise)
+same database, which is what makes the worker actually distributable (Celery's premise)
 instead of implicitly assuming a co-located disk.
 
-- **Gateway (`api/`, no TensorFlow):** serves the model artifacts (fetched from the MinIO
-  object store and streamed back, keyed by the active `GlobalWeights` row), accepts
+- **Gateway (`api/`, no TensorFlow):** serves the model artifacts (read from the DB and
+  returned as stored, keyed by the active `GlobalWeights` row), accepts
   weight-delta uploads, persists them, enqueues worker jobs, and exposes a result endpoint the
   client polls. Fast to start since it never imports TF.
 - **Worker (`worker/tasks.py`):** restores uploaded weights into the model, converts it to
@@ -386,11 +388,12 @@ FedAvg round per initialized model:
    The result is stored as a new `GlobalWeights` row along with the next round's
    `mse_threshold` (a margin over the worst deviation accepted this round).
 6. **Artifact baking:** the averaged weights are restored into the cached model and both
-   serving artifacts are re-exported and uploaded to MinIO keyed by the new row —
+   serving artifacts are re-exported as `WeightsArtifact` rows keyed by the new snapshot —
    the LiteRT-trainable `.tflite` and the signed int8 `.tflite` — so a client always pulls a
-   file with the current global parameters already inside. If an export fails the row is stored
-   with `valid = false` and no objects: clients keep pulling the previous snapshot and the
-   window's submissions stay consumed.
+   file with the current global parameters already inside. They commit in the same transaction
+   as the snapshot, so a visible row always has its artifacts. If an export fails the row is
+   stored with `valid = false` and no artifacts: clients keep pulling the previous snapshot and
+   the window's submissions stay consumed.
 7. **Rate-limit reset:** on a successful round the model's download/submission counters are
    cleared for every user (`ratelimit.clear_model_limits`), so clients can immediately
    re-pull the new weights and submit again without waiting out the download cooldown or the
@@ -513,32 +516,48 @@ trusts what the seed wrote to the DB.
   (e.g. `queue_aggregation`/`fed_client` block on the aggregation summary instead of polling
   `GlobalWeights`); results expire after `RESULT_TTL_SECONDS`.
 - **Redis** is the Celery broker.
-- **MinIO (S3-compatible object storage)** holds every served blob — model artifacts, firmware
-  images, and per-user quantization results (`common/storage.py`) — at keys derived purely from
-  the owning DB row (`models/<key>/<version_id>/<weights_id>/{trainable,quantized}.tflite.zst`,
-  `firmware/<version>/firmware.bin.zst`, `quantize-results/<job_id>.tflite.zst`), so a handler
-  locates an object from the row it already loaded — no filename column, assuming the bucket and
-  DB stay in sync (the seed script repopulates it from scratch). This replaced an earlier local-disk
-  design (`serve/` tree) once the worker stopped being assumed to share a filesystem with the API —
-  Celery is a distributed-computing tool, so pretending its workers and the gateway share a mount
-  was the wrong assumption from the start. The API always proxies: it fetches the object
-  server-side and streams it back, so auth and per-user rate limiting are unchanged and MinIO is
-  never exposed to the client directly (no presigned URLs). The DB keeps only what the server
-  itself reads: the raw float32 `weights` on `GlobalWeights` (aggregation math), the
-  artifact/firmware `signature`, firmware `size`, and — for quantization jobs — `result_size` as
-  a presence marker for the object in MinIO (the job's own `uuid4` id doubles as its unguessable
-  object key, so no separate random token was needed). Rollback is still a `valid` flag flip; the
-  previous row's objects are untouched.
+- **Every served blob lives in PostgreSQL too**, each in its own table keyed by the row that
+  owns it: `WeightsArtifact` (a snapshot's trainable/quantized `.tflite`, keyed by
+  `GlobalWeights` + artifact), `FirmwareImage` (keyed by `Firmware`) and `QuantizationResult`
+  (keyed by `QuantizationJob`). A handler locates a blob from the row it already loaded, and
+  row existence *is* the presence check — a snapshot may legitimately have a trainable artifact
+  and no quantized one. They are separate tables rather than columns because the owning rows are
+  read constantly and the blobs almost never: aggregation loads `GlobalWeights` for its weights
+  and `/ota/versions` lists `Firmware` rows, neither of which should drag a `.tflite` along.
+  Blob columns are `STORAGE EXTERNAL` since zstd output is not worth a TOAST compression pass.
+- **Why not object storage.** This replaced a local-disk design (`serve/` tree) once the worker
+  stopped being assumed to share a filesystem with the API — Celery is a distributed-computing
+  tool, so pretending its workers and the gateway share a mount was wrong from the start. The
+  obvious fix looked like MinIO, and an earlier revision used it; but the database is *already*
+  the shared state both processes reach (the worker reads `GlobalWeights.weights` to aggregate,
+  the gateway reads rows on every request), so it satisfies the distributability requirement
+  without a second store. What a bucket adds at this scale is a second, untransacted source of
+  truth: artifacts had to be uploaded between `flush()` and `commit()`, a failed commit orphaned
+  them, the cleanup sweep could delete an object and then fail to null its marker, and the
+  download route had to `stat` the bucket because the DB could not say which artifacts existed.
+  In Postgres all of that is one transaction and an FK. The blobs are small enough that nothing
+  pushes back — 419 KB for `cnn-ae`'s trainable `.tflite`, less for the int8 one, a couple of MB
+  per firmware image. A deployment serving many models to many clients would move them behind a
+  CDN or object store (the gateway proxies today, so that swap is a storage-layer change, not a
+  protocol one); at thesis scale the object store was cost without benefit.
+- **The gateway always proxies.** It reads the blob server-side and returns it, so auth and
+  per-user rate limiting apply to every byte served, and no storage layer is ever exposed to the
+  client. This is what forecloses presigned URLs regardless of backend: the download cooldown is
+  spent only once an artifact is actually served (see "Auth & rate limiting"), which a URL handed
+  out ahead of time cannot account for, and the response headers carry the signature and contract
+  metadata the client needs alongside the bytes. Rollback is still a `valid` flag flip; the
+  previous snapshot's artifacts are untouched.
 - **Everything served is zstd-compressed.** Blobs are stored compressed and served as-is; the
   client decompresses (any zstd library, a few lines). Signatures cover the *raw* bytes, so the
   server compresses after signing and the client verifies after decompressing — compression is
-  a pure transport wrapper, invisible to the signing scheme.
+  a pure transport wrapper, invisible to the signing scheme (`common/compression.py`).
 
-**Result lifecycle.** A `done` result is streamed on request and stamped `served_at`. A Celery
-beat sweep (`cleanup_results`, in-process via `celery worker -B`) deletes the result object from
-MinIO and nulls the row's `result_size` (and `signature`) once a served result is older than
+**Result lifecycle.** A `done` result is served on request and stamped `served_at`. A Celery
+beat sweep (`cleanup_results`, in-process via `celery worker -B`) deletes the `QuantizationResult`
+row and nulls the job's `signature` once a served result is older than
 `SERVE_GRACE_SECONDS` (5 min) or an unclaimed one is older than `RESULT_TTL_SECONDS` (1 h),
-flipping the job to `expired`. Weight submissions are never reaped.
+flipping the job to `expired`. The sweep joins against the result table rather than selecting it,
+so it never loads the blobs it is about to drop. Weight submissions are never reaped.
 
 ## Auth & rate limiting
 
@@ -595,8 +614,9 @@ interface yields `[]`); `GET /ota/download/{interface}/{version}` streams the ra
 with the server's ECDSA signature over it in `X-Firmware-Signature`, which the app
 forwards to the device for verification against its factory `srv_pub`.
 
-Images live in MinIO (zstd-compressed, keyed by version), like the model
-artifacts; the `Firmware` row keeps only the raw `size` and the mandatory `signature`.
+Images live in `FirmwareImage` rows (zstd-compressed, keyed by the `Firmware` row), like the
+model artifacts; the `Firmware` row itself keeps only the raw `size` and the mandatory
+`signature`, so listing versions never reads an image.
 `scripts/seed_db.py` publishes them: it scans a directory of exports (`--firmware-dir`,
 default `shared/gen/firmware/`, populated by `make export-image` in `firmware/`), signs
 each image with `SERVER_PRIVATE_KEY_FILE` (a build it can't sign is skipped — the signature

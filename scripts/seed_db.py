@@ -25,19 +25,22 @@ from common.config import (
     SEED_USER,
     SERVER_PRIVATE_KEY_FILE,
 )
+from common.compression import compress
 from common.db import (
+    Artifact,
     Device,
     Firmware,
+    FirmwareImage,
     GlobalWeights,
     ModelDefinition,
     ModelVersion,
     User,
+    WeightsArtifact,
     engine,
     get_latest_version,
     init_db,
     utcnow,
 )
-from common.storage import ensure_bucket, firmware_key, put_compressed, weights_artifact_key
 from ml.data import CLEAN_SUBDIR, get_sorted_paths
 from ml.model_list import MODELS
 from ml.payload import sign_blob, sign_model
@@ -116,12 +119,14 @@ def seed_models(session: Session) -> None:
                 artifact_signature=signature,
             )
             session.add(gw)
-            session.flush()  # need the row id the stored artifacts are keyed by
-            put_compressed(weights_artifact_key(key, version.id, gw.id,
-                                                "trainable"), trainable_bytes)
+            session.flush()  # need the row id the artifacts are keyed by
+            session.add(WeightsArtifact(weights_id=gw.id,
+                                        artifact=Artifact.trainable,
+                                        data=compress(trainable_bytes)))
             if quantized is not None:
-                put_compressed(weights_artifact_key(key, version.id, gw.id,
-                                                    "quantized"), quantized)
+                session.add(WeightsArtifact(weights_id=gw.id,
+                                            artifact=Artifact.quantized,
+                                            data=compress(quantized)))
             print(f"  + initial weights for '{key}' v{spec.version} ({weights.size} weights)")
     session.commit()
 
@@ -160,15 +165,17 @@ def seed_firmware(session: Session, firmware_dir: Path) -> None:
         created_at = datetime.fromisoformat(metadata["created_at"])
         if created_at.tzinfo is not None:
             created_at = created_at.astimezone(timezone.utc).replace(tzinfo=None)
-        session.add(Firmware(
+        firmware = Firmware(
             version=version,
             interface_version=metadata["interface_version"],
             supported_contracts=metadata["supported_contracts"],
             size=len(blob),
             signature=signature,
             created_at=created_at,
-        ))
-        put_compressed(firmware_key(version), blob)
+        )
+        session.add(firmware)
+        session.flush()  # need the row id the image is keyed by
+        session.add(FirmwareImage(firmware_id=firmware.id, data=compress(blob)))
         print(f"  + firmware '{version}' (interface {metadata['interface_version']}, "
               f"contracts {metadata['supported_contracts']}, {len(blob)} bytes)")
     session.commit()
@@ -270,7 +277,6 @@ def main() -> None:
         parser.error(f"{args.factory_nvs} does not exist.")
 
     init_db()
-    ensure_bucket()
     with Session(engine) as session:
         seed_models(session)
         seed_firmware(session, args.firmware_dir)

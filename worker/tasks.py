@@ -4,7 +4,7 @@ from datetime import timedelta, datetime
 import numpy as np
 import tensorflow as tf
 from celery.signals import worker_process_init
-from sqlalchemy import and_, or_
+from sqlalchemy import and_, delete, or_
 from sqlmodel import Session, select
 
 from worker.celery_app import app
@@ -31,14 +31,17 @@ from common.config import (
     SERVER_PRIVATE_KEY_FILE,
 )
 from common.db import (
+    Artifact,
     GlobalWeights,
     JobStatus,
     QuantizationJob,
+    QuantizationResult,
     SecureRound,
     SecureRoundMember,
     SecureRoundStatus,
     SubmissionType,
     ClientDeltaSubmission,
+    WeightsArtifact,
     engine,
     get_latest_version,
     get_latest_weights,
@@ -46,15 +49,9 @@ from common.db import (
     utcnow,
 )
 
+from common.compression import compress
 from common.ratelimit import clear_model_limits
 from common.secure_agg import dequantize, ring_sum
-from common.storage import (
-    delete_object,
-    ensure_bucket,
-    put_compressed,
-    quantize_result_key,
-    weights_artifact_key,
-)
 
 from ml.model_list import MODELS
 from ml.payload import sign_model
@@ -75,7 +72,6 @@ _models: dict[str, tuple] = {}
 
 @worker_process_init.connect
 def _load_models(**_) -> None:
-    ensure_bucket()
     for key in MODELS:
         try:
             trainer = MODELS[key].build_trainer(DATASETS_DIR)
@@ -138,7 +134,7 @@ def quantize_submission(job_id: str) -> None:
             optimized = bytes(get_optimized_model(model, rep_dataset))
             job.signature = sign_model(optimized, contract_version, norm_bytes,
                                        SERVER_PRIVATE_KEY_FILE)
-            job.result_size = put_compressed(quantize_result_key(job.id), optimized)
+            session.add(QuantizationResult(job_id=job.id, data=compress(optimized)))
             job.status = JobStatus.done
         except Exception as exc:  # surfaced to the client via the result endpoint
             job.status = JobStatus.failed
@@ -191,13 +187,15 @@ def _bake_and_store(session: Session, key: str, latest, new_weights: np.ndarray,
     )
     session.add(snapshot)
     if export_error is None:
-        # Flush to get the row id the artifacts are keyed by, then upload them
-        # (signature covers the raw bytes, so compression is downstream).
-        session.flush()
-        put_compressed(weights_artifact_key(key, latest.id, snapshot.id,
-                                            "trainable"), trainable)
-        put_compressed(weights_artifact_key(key, latest.id, snapshot.id,
-                                            "quantized"), quantized)
+        # Artifacts commit with the snapshot they were baked from, so a visible
+        # row always has them (signature covers the raw bytes — compress after).
+        session.flush()  # for the row id the artifacts are keyed by
+        session.add(WeightsArtifact(weights_id=snapshot.id,
+                                    artifact=Artifact.trainable,
+                                    data=compress(trainable)))
+        session.add(WeightsArtifact(weights_id=snapshot.id,
+                                    artifact=Artifact.quantized,
+                                    data=compress(quantized)))
     session.commit()
     if export_error is None:
         clear_model_limits(key)
@@ -368,15 +366,18 @@ def secure_aggregation(round_id: int) -> str:
 @app.task(name=CLEANUP_TASK)
 def cleanup_results() -> int:
     """Drop results for jobs that were served (after a grace window) or never
-    claimed (after the TTL): the stored object is deleted and the row's
-    ``result_size`` marker nulled. Weight submissions are left untouched."""
+    claimed (after the TTL): the result row is deleted and the signature nulled.
+    Weight submissions are left untouched. The join keeps the sweep off the
+    blobs themselves — it only ever reads job columns."""
     now = utcnow()
     grace_cutoff = now - timedelta(seconds=SERVE_GRACE_SECONDS)
     ttl_cutoff = now - timedelta(seconds=RESULT_TTL_SECONDS)
     cleaned = 0
     with Session(engine) as session:
-        stmt = select(QuantizationJob).where(
-            QuantizationJob.result_size.is_not(None),  # type: ignore
+        stmt = select(QuantizationJob).join(
+            QuantizationResult,
+            QuantizationResult.job_id == QuantizationJob.id,  # type: ignore
+        ).where(
             or_(
                 and_(
                     QuantizationJob.served_at.is_not(None),  # type: ignore
@@ -385,12 +386,14 @@ def cleanup_results() -> int:
                 QuantizationJob.created_at < ttl_cutoff,
             ),
         )
-        for job in session.exec(stmt):
-            delete_object(quantize_result_key(job.id))
-            job.result_size = None
-            job.signature = None
-            job.status = JobStatus.expired
-            session.add(job)
-            cleaned += 1
+        jobs = list(session.exec(stmt))
+        if jobs:
+            session.execute(delete(QuantizationResult).where(
+                QuantizationResult.job_id.in_([job.id for job in jobs])))  # type: ignore
+            for job in jobs:
+                job.signature = None
+                job.status = JobStatus.expired
+                session.add(job)
+            cleaned = len(jobs)
         session.commit()
     return cleaned

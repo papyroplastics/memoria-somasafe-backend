@@ -23,15 +23,6 @@ WEEK = 7 * DAY
 MODELS_DIR = Path(os.environ.get("MODELS_DIR", "shared/gen/models"))
 DATASETS_DIR = Path(os.environ.get("DATASETS_DIR", "shared/gen/datasets"))
 
-# MinIO/S3 bucket the gateway serves model/firmware/quantize-result blobs from,
-# keyed by DB row so an object key is reconstructable from the row alone (see
-# common/storage.py). The seed script populates it; aggregation appends to it.
-S3_ENDPOINT_URL = _require("S3_ENDPOINT_URL")
-S3_ACCESS_KEY = _require("S3_ACCESS_KEY")
-S3_SECRET_KEY = _require("S3_SECRET_KEY")
-S3_BUCKET = _require("S3_BUCKET")
-S3_SECURE = os.environ.get("S3_SECURE", "false") == "true"
-
 # ECDSA P-256 private key the worker signs quantized-model payloads with; its public
 # half must be the srv_pub provisioned in the device's factory NVS (see shared/make_keys.sh
 # and firmware/scripts/gen_factory_nvs.py).
