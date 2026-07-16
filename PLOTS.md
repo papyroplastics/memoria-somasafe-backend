@@ -62,9 +62,9 @@ uv run -m scripts.figures.plot_convergence <model>      # both figures, no train
 | `results/<model>/federated/convergence.png` + `.csv` + `.yaml` | `scripts.figures.plot_convergence <model>` | **5.2** federated model improves round over round |
 | `results/<model>/centralized_vs_federated/centralized_vs_federated.png` + `.csv` + `.yaml` | `scripts.figures.plot_convergence <model>` (same run; `--skip-overlay` to omit) | **5.3** FedAvg ≈ centralized without centralizing raw data (central claim) |
 | `results/<model>/distill_eval.json` | `scripts.distillation.distill_eval <model>` | **5.4** per-kind recall, clean FPR, detector vs. spectral baseline / accuracy·F1 |
-| `results/<model>/calibration.png` + `.csv` + `.yaml` | `scripts.figures.plot_calibration <model>` (reads a previous `distill_calibrate`; never calibrates) | **5.4** recall/FPR vs. budget with the selected operating point — makes the chosen budget auditable |
+| `results/<model>/calibration.png` + `.csv` + `.yaml` | `scripts.figures.plot_calibration <model>` (reads a previous `distill_calibrate`; never calibrates) | **5.4** recall/empirical FPR vs. expected FPR with the selected operating point — makes the chosen expected FPR auditable |
 | `results/<model>/personalization/personalization[_S*].csv` + `.json` | `scripts.distillation.personalize_test --model feature-mlp --teacher <ae>` | **5.4** personalization marginal-positive; int8 ≈ float |
-| `results/<model>/byzantine/byzantine.png` + `.csv` + `.yaml` | `scripts.figures.byzantine <model> --max-malicious N --rounds R` | **5.5** outlier filter holds the round (and no more) — trains |
+| `results/<model>/byzantine/byzantine.png` + `.csv` + `.yaml` | `scripts.figures.byzantine <model> --max-malicious N --rounds R [--aggregator trimmed-mean\|average]` | **5.5** outlier filter holds the round (and no more) — trains |
 | `results/footprint/footprint.csv` + `.yaml` | `scripts.figures.footprint` | **5.6** system fits the edge (backend rows; phone/ESP32 rows pasted in) |
 | `results/<model>/sensitivity/{participants,local_epochs,loso}.png` + `.csv` + `.yaml` | `scripts.figures.sensitivity <model> [--sweep participants\|local-epochs\|loso\|all]` | **5.7** conclusions robust to configuration (LOSO mean ± std) — trains |
 
@@ -73,12 +73,20 @@ configuration — fresh weights, so no run leaks into the next. Every subject's 
 built **once** per process and reused across configurations, since it never depends on the
 weights (`ml.loading` caches them).
 
+`byzantine` runs its own federated loop rather than `train.py`'s, since it has to append the
+malicious clients' updates each round. `--aggregator` picks the rule applied to the
+survivors: `trimmed-mean` (default, what the deployed server runs — `--trim` sets the
+fraction dropped per side) or the plain `average`. Weighted averaging is not an option:
+under this threat model an attacker just claims a huge dataset size, so it is unsound rather
+than merely weak. Each aggregator is swept with the z-score filter on and off, which is the
+figure's two lines.
+
 ## Distillation round-trip (Sec. 5.8) and its inputs
 
 The unsupervised-teacher → student pipeline, end to end:
 
 ```bash
-uv run -m scripts.distillation.distill_calibrate <ae>   # budget   -> results/<ae>/distill_calibration.json
+uv run -m scripts.distillation.distill_calibrate <ae>   # exp. FPR -> results/<ae>/distill_calibration.json
 uv run -m scripts.distillation.distill_eval      <ae>   # metrics  -> results/<ae>/distill_eval.json
 uv run -m scripts.distillation.distill_labels    <ae>   # teacher  -> results/<ae>/distilled-labels/
 uv run -m scripts.system.train feature-mlp \
@@ -109,7 +117,6 @@ and a seeded DB (`make db-seed`).
 |--------|---------|---------|
 | `results/<model>/fed_client/convergence.{png,csv,yaml}` (dense) or `results/<model>/secure_fed_client/…` (secure) | `scripts.integration.fed_client --model <model> --rounds R --eval-subjects K` | drive the whole federated flow over the real HTTP API for every subject |
 | — (asserts masked sum = plaintext mean) | `scripts.integration.secure_aggregation --clients N --rounds R` | secure-endpoint correctness probe |
-| — (prints per-model round summary) | `scripts.integration.queue_aggregation [<model>]` | queue a FedAvg round by hand for testing |
 
 ## Footprint paste-in rows
 

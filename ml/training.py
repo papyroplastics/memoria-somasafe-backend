@@ -11,11 +11,27 @@ from .models.common import Trainer
 History = list[tuple[int, float, dict[str, float]]]
 
 
-def fed_avg(vectors: Sequence[tf.Tensor | np.ndarray],
-            sizes: Sequence[int] | None = None) -> np.ndarray:
+def average(vectors: Sequence[tf.Tensor | np.ndarray]) -> np.ndarray:
+    return np.stack([np.asarray(vector) for vector in vectors]).mean(axis=0)
+
+
+def weighted_average(vectors: Sequence[tf.Tensor | np.ndarray],
+                     sizes: Sequence[int]) -> np.ndarray:
     stacked = np.stack([np.asarray(vector) for vector in vectors])
-    weights = None if sizes is None else np.asarray(sizes, dtype=stacked.dtype)
-    return np.average(stacked, axis=0, weights=weights)
+    return np.average(stacked, axis=0,
+                      weights=np.asarray(sizes, dtype=stacked.dtype))
+
+
+def trimmed_mean(vectors: Sequence[tf.Tensor | np.ndarray],
+                 trim: float) -> np.ndarray:
+    """Coordinate-wise mean after dropping the `trim` fraction of smallest and largest
+    values at each coordinate. `trim` must leave at least one value standing."""
+    if not 0.0 <= trim < 0.5:
+        raise ValueError(f"trim must be in [0, 0.5), got {trim}")
+    stacked = np.sort(np.stack([np.asarray(vector) for vector in vectors]), axis=0)
+    k = int(len(stacked) * trim)
+    kept = stacked[k:len(stacked) - k] if k else stacked
+    return kept.mean(axis=0)
 
 
 def evaluate(trainer: Trainer, dataset: tf.data.Dataset, prefix: str = '') -> dict[str, float]:
@@ -56,7 +72,7 @@ def normal_loop(trainer: Trainer, train_dataset: tf.data.Dataset,
 
 def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Dataset],
                    eval_dataset: tf.data.Dataset, local_epochs: int,
-                   rounds: int, aggregate=fed_avg) -> History:
+                   rounds: int) -> History:
     model = trainer.model
     sizes = [len(ds) for ds in subject_train_datasets]
     global_weights = model.save()['weights']
@@ -74,7 +90,7 @@ def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Datase
                 loss = train_epoch(trainer, train_ds, prefix)
             client_deltas.append(np.asarray(model.save()['weights']) - base)
 
-        global_weights = (base + aggregate(client_deltas, sizes)).astype(base.dtype)
+        global_weights = (base + weighted_average(client_deltas, sizes)).astype(base.dtype)
         model.restore(tf.constant(global_weights))
 
         metrics = evaluate(trainer, eval_dataset, round_prefix)

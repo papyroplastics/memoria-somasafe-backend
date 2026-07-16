@@ -70,7 +70,7 @@ step "download + preprocess PPG-DaLiA" "$DATASETS/clean-features" "${run[@]}" sc
 # --- 2. training ------------------------------------------------------------------
 # Both loops export to the same shared/gen/models/<model>/trainable.tflite, so the
 # federated run goes last: the artifact the DB is seeded from is the federated one, and
-# the deployed path continues FedAvg from there.
+# the deployed path continues FL from there.
 for model in $MODELS; do
     step "train $model (centralized)" "$RESULTS/$model/normal/run.yaml" \
         "${run[@]}" scripts.system.train "$model" --loop normal \
@@ -108,7 +108,7 @@ step "signal + reconstruction figures" "$RESULTS/$AE/signals_reconstructed.png" 
 # synthetic ground truth. It is --tag'd so it lands beside the direct-label run rather
 # than on top of it: the canonical trainable.tflite stays the direct-label student (the
 # one the DB serves), and the distilled variant is what personalize_test fine-tunes.
-step "calibrate detector budgets ($AE)" "$RESULTS/$AE/distill_calibration.json" \
+step "calibrate detector expected FPR ($AE)" "$RESULTS/$AE/distill_calibration.json" \
     "${run[@]}" scripts.distillation.distill_calibrate "$AE"
 step "evaluate detector vs ground truth ($AE)" "$RESULTS/$AE/distill_eval.json" \
     "${run[@]}" scripts.distillation.distill_eval "$AE"

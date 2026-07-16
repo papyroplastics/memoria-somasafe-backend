@@ -2,7 +2,7 @@
 Distill window labels from a trained autoencoder — the client-facing step. Touches only
 data a real client would have: its own clean-signal baseline and the mixed signal to be
 labeled (plus the features it computes on-device), never the ground-truth labels or the
-per-anomaly datasets. Reads the global budget from distill_calibrate.py, derives each
+per-anomaly datasets. Reads the global expected FPR from distill_calibrate.py, derives each
 subject's threshold from its own clean windows, and emits a soft [0,1] anomaly label per
 window — the clean-CDF rank past that threshold, then temporally median-smoothed — into a
 datasets-shaped tree (mixed-features/S*/ with distilled labels.npy + symlinked features)
@@ -22,7 +22,7 @@ from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
 from ml.saving import load_trainable_weights
 from ..common.scoring import (
-    load_budget, soft_score, median3, score_dir_by_subject, score_mixed_by_subject,
+    load_expected_fpr, soft_score, median3, score_dir_by_subject, score_mixed_by_subject,
 )
 
 
@@ -44,7 +44,7 @@ if __name__ == "__main__":
     data_dir = DATASETS_DIR
     result_dir = RESULTS_DIR / args.model
 
-    budget = load_budget(args.model)
+    expected_fpr = load_expected_fpr(args.model)
 
     trainer = MODELS[args.model].build_trainer(data_dir)
     trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
@@ -66,9 +66,9 @@ if __name__ == "__main__":
     out_dir = result_dir / args.out_subdir
     out_feature_dir = out_dir / MIXED_FEATURE_SUBDIR
     feature_dir = data_dir / MIXED_FEATURE_SUBDIR
-    print(f"Writing soft labels (budget={budget:.4f}):")
+    print(f"Writing soft labels (expected_fpr={expected_fpr:.4f}):")
     for sid in mixed:
-        soft = median3(soft_score(mixed[sid], clean[sid], budget))
+        soft = median3(soft_score(mixed[sid], clean[sid], expected_fpr))
         save_dir = out_feature_dir / sid
         save_dir.mkdir(parents=True, exist_ok=True)
         np.save(save_dir / 'labels.npy', soft.reshape(-1, 1).astype(np.float32))

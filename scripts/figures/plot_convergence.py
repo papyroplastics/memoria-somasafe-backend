@@ -11,7 +11,7 @@ results/<model>/<loop>/ and fails if they are missing. Produce them with:
 The federated run alone gives the convergence curve. With a normal run at the same
 --eval-subjects, the overlay is drawn too: both loops held out the same subjects and
 trained on the same rest, so the curves are comparable and the gap between them is the
-claim — FedAvg reaches comparable quality without ever centralizing raw data. The x axis
+claim — FL reaches comparable quality without ever centralizing raw data. The x axis
 is the global round / centralized epoch; the compute per step differs (each federated
 round runs `local_epochs` local passes).
 """
@@ -52,7 +52,7 @@ def plot_convergence(model: str, run: dict, values: list[float]) -> None:
     write_metrics_csv([{'round': r, metric: v} for r, v in zip(rounds, values)],
                       report_dir, 'convergence.csv')
     write_yaml(report_dir / 'convergence.yaml', {
-        'shows': f"Simulated FedAvg convergence of {model}: the held-out metric improves "
+        'shows': f"Simulated FL convergence of {model}: the held-out metric improves "
                  f"round over round.",
         'x_axis': {'name': 'global round', 'range': [1, len(values)]},
         'y_axis': {'name': metric, 'better': better_direction(metric)},
@@ -60,7 +60,7 @@ def plot_convergence(model: str, run: dict, values: list[float]) -> None:
                   'eval_subjects': run['eval_subjects'],
                   'holdout': f"leave-{run['eval_subjects']}-subject-out",
                   'local_epochs': run['local_epochs'],
-                  'aggregation': 'uniform-weight FedAvg'},
+                  'aggregation': 'weighted average'},
         'headline': {'first_round': values[0], 'last_round': values[-1],
                      'delta': values[-1] - values[0]},
         'source': {'run': f'results/{model}/federated/run.yaml', 'seed': run['seed'],
@@ -76,7 +76,7 @@ def plot_overlay(model: str, fed_run: dict, fed_values: list[float],
 
     report_dir = get_report_dir(model, 'centralized_vs_federated')
     line_plot(report_dir / 'centralized_vs_federated.png', steps,
-              {'centralized': cen_values, 'federated (FedAvg)': fed_values},
+              {'centralized': cen_values, 'federated': fed_values},
               'global round / epoch', metric, f'{model} — centralized vs. federated')
     write_metrics_csv(
         [{'step': s,
@@ -95,7 +95,7 @@ def plot_overlay(model: str, fed_run: dict, fed_values: list[float],
 
     write_yaml(report_dir / 'centralized_vs_federated.yaml', {
         'shows': f"Centralized vs. federated {metric} for {model} on the same split: "
-                 f"FedAvg reaches comparable quality without ever centralizing raw data.",
+                 f"FL reaches comparable quality without ever centralizing raw data.",
         'x_axis': {'name': 'global round (federated) / epoch (centralized)',
                    'centralized_range': [1, len(cen_values)],
                    'federated_range': [1, len(fed_values)]},

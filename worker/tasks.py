@@ -26,6 +26,7 @@ from common.celery_tasks import (
 from common.config import (
     DATASETS_DIR,
     FED_MIN_SUBMISSIONS,
+    FED_TRIM_RATIO,
     RESULT_TTL_SECONDS,
     SERVE_GRACE_SECONDS,
     SERVER_PRIVATE_KEY_FILE,
@@ -56,7 +57,7 @@ from common.secure_agg import dequantize, ring_sum
 from ml.model_list import MODELS
 from ml.payload import sign_model
 from ml.saving import get_optimized_model, get_trainable_model
-from ml.training import fed_avg
+from ml.training import trimmed_mean
 
 # Per-process cache of (model, representative_dataset, fingerprint, contract_version,
 # norm_bytes), built once per forked worker child so TensorFlow and the calibration
@@ -212,7 +213,7 @@ def _aggregate_model(session: Session, key: str) -> str:
         return "skipped: no seeded version matching the running code"
 
     # Aggregation strategy is chosen by the version's submission type. Today raw
-    # and quantize are byte-identical dense vectors and share the FedAvg path
+    # and quantize are byte-identical dense vectors and share the aggregation path
     # below; sparse/DP formats will branch here.
     if latest.submission_type not in (SubmissionType.raw, SubmissionType.quantize):
         return f"skipped: no aggregation strategy for '{latest.submission_type.value}'"
@@ -257,10 +258,11 @@ def _aggregate_model(session: Session, key: str) -> str:
                        for sub in valid])
     kept = deltas[filter_outliers(deltas)]
 
-    # FedAvg over deltas: new global = reference global + mean of the accepted
-    # updates. With a shared base this is identical to averaging absolute weights.
+    # aggregation over deltas: new global = reference global + trimmed mean of the
+    # accepted updates. With a shared base this is identical to aggregating absolute
+    # weights.
     reference_weights = np.frombuffer(reference.weights, dtype=np.float32)
-    new_weights = (reference_weights + fed_avg(kept)).astype(np.float32)
+    new_weights = (reference_weights + trimmed_mean(kept, FED_TRIM_RATIO)).astype(np.float32)
 
     # Bake the new weights into fresh serving artifacts. A failed export
     # invalidates the round: clients keep pulling the previous snapshot, and the

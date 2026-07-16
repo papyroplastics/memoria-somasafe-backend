@@ -64,7 +64,7 @@ from scripts.common.secure import seal_round
 
 
 class DenseStrategy:
-    """raw / quantize: plaintext deltas, averaged by the daily FedAvg task."""
+    """raw / quantize: plaintext deltas, averaged by the daily FL task."""
 
     report_subdir = "fed_client"
 

@@ -1,12 +1,12 @@
 """
 Evaluate the autoencoder anomaly detector against the synthetic ground truth — the
-scientific / testing step, with no restriction on what data it reads. Uses the same budget
-(distill_calibrate.py) and per-subject thresholds a client would (distill_labels.py), then
-scores the detector against the true mixed-window labels and the per-type
-anomalous-signals/ sets: precision/recall/F1, per-anomaly-kind recall, and the clean
-false-positive rate. The spectral baseline is measured the same way alongside it, so the
-learned teacher can be read against a hand-crafted index. Writes the metrics to
-results/<model>/.
+scientific / testing step, with no restriction on what data it reads. Uses the same
+expected FPR (distill_calibrate.py) and per-subject thresholds a client would
+(distill_labels.py), then scores the detector against the true mixed-window labels and the
+per-type anomalous-signals/ sets: precision/recall/F1, per-anomaly-kind recall, and the
+empirical clean false-positive rate. The spectral baseline is measured the same way
+alongside it, so the learned teacher can be read against a hand-crafted index. Writes the
+metrics to results/<model>/.
 """
 
 
@@ -24,7 +24,7 @@ from ml.models.common import AutoencoderTrainer
 from ml.saving import load_trainable_weights
 from ..common.reports import get_report_dir
 from ..common.scoring import (
-    SCORE_NAMES, DETECTOR, BASELINE, load_budget, subject_thresholds, pooled_flags,
+    SCORE_NAMES, DETECTOR, BASELINE, load_expected_fpr, subject_thresholds, pooled_flags,
     score_dir_by_subject, score_mixed_by_subject, load_mixed_truth,
 )
 
@@ -66,9 +66,9 @@ def evaluate(trainer, data_dir: Path, clean: dict[str, dict[str, np.ndarray]],
     }
 
 
-def print_metrics(results: dict, budget: float):
+def print_metrics(results: dict, expected_fpr: float):
     d = results['detector']
-    print(f"\nbudget={budget:.4f}")
+    print(f"\nexpected_fpr={expected_fpr:.4f}")
     print(f"detector ({DETECTOR}): accuracy={d['accuracy']:.4f} precision={d['precision']:.4f} "
           f"recall={d['recall']:.4f} f1={d['f1']:.4f} clean_fpr={d['clean_fpr']:.4f}")
     b = results['baseline']
@@ -92,7 +92,7 @@ if __name__ == "__main__":
 
     data_dir = DATASETS_DIR
 
-    budget = load_budget(args.model)
+    expected_fpr = load_expected_fpr(args.model)
 
     trainer = MODELS[args.model].build_trainer(data_dir)
     trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
@@ -108,13 +108,14 @@ if __name__ == "__main__":
         raise SystemExit(f"subjects {sorted(missing)} lack clean windows; "
                          "cannot derive per-subject thresholds.")
 
-    thresholds = subject_thresholds(clean, budget)
+    thresholds = subject_thresholds(clean, expected_fpr)
 
     print("Scoring per-type anomalous windows + evaluating...")
     results = evaluate(trainer, data_dir, clean, mixed, truth, thresholds)
-    print_metrics(results, budget)
+    print_metrics(results, expected_fpr)
 
     report_dir = get_report_dir(args.model)
     eval_path = report_dir / EVAL_REPORT
-    eval_path.write_text(json.dumps({'model': args.model, 'budget': budget, **results}, indent=2))
+    eval_path.write_text(json.dumps(
+        {'model': args.model, 'expected_fpr': expected_fpr, **results}, indent=2))
     print(f"\nWrote detector metrics to {eval_path}")

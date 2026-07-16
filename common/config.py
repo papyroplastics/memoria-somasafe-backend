@@ -54,6 +54,9 @@ SEED = int(os.environ.get("SEED", 1234))
 FED_AGG_INTERVAL_SECONDS = int(os.environ.get("FED_AGG_INTERVAL_SECONDS", DAY))
 # Minimum valid submissions a model needs in the window for a round to run.
 FED_MIN_SUBMISSIONS = int(os.environ.get("FED_MIN_SUBMISSIONS", 1))
+# Fraction of values the trimmed-mean aggregator drops from each side of every
+# coordinate. Must be in [0, 0.5); below 1/n it trims nothing and is a plain mean.
+FED_TRIM_RATIO = float(os.environ.get("FED_TRIM_RATIO", 0.1))
 
 # --- Secure aggregation (see worker.tasks.secure_aggregation) ---
 # Per-coordinate clipping bound B: each client clips its delta to +/-B before

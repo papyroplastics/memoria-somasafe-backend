@@ -1,7 +1,7 @@
 """Pure protocol tests for common.secure_agg — no server, no TensorFlow.
 
 They pin the two properties the whole scheme rests on: the pairwise masks cancel
-exactly across the full cohort, and what survives is the plaintext FedAvg mean up
+exactly across the full cohort, and what survives is the plaintext average up
 to quantization error. The dropout case documents *why* a missing member fails the
 round rather than degrading gracefully.
 """

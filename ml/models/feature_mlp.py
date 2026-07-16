@@ -10,15 +10,7 @@ from ..optimizers import Adam
 
 
 class FeatureMLP(TrainableModel):
-    """Supervised binary anomaly classifier over hand-crafted window features.
-
-    Option A of the lightweight roadmap: a small Dense-only network mapping an
-    on-device-cheap feature vector to a single anomaly logit. Dense-only so it
-    stays fully int8-quantizable for TFLM on the ESP32, and trained on
-    synthetic anomalies so it yields a clean accuracy curve. Keeps the same
-    eval/train/save/restore signatures as the other models for LiteRT training
-    and FedAvg weight transfer.
-    """
+    """Supervised binary anomaly classifier over hand-crafted window features. """
 
     default_batch_size = 1
 

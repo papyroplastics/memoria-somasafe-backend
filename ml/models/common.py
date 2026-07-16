@@ -25,7 +25,7 @@ def unbound(*_, **__):
 
 
 class TrainableModel(tf.Module):
-    """Base class for all LiteRT-trainable / FedAvg-compatible models.
+    """Base class for all LiteRT-trainable FL-compatible models.
 
     Subclasses must:
       1. Create all trainable layers/variables.

@@ -1,18 +1,22 @@
 """Per-window anomaly scoring shared by the distillation scripts.
 
 The detector is the autoencoder's reconstruction MSE (``recon``), thresholded per
-subject: the threshold is the ``1 - budget`` quantile of that subject's own clean-window
-scores, so a subject-specific error scale gives a uniform per-subject false-alarm rate
-instead of one dominated by the noisiest subjects. ``budget`` — the share of clean windows
-the detector may fire on — is a single global number, the only thing calibration picks.
+subject: the threshold is the ``1 - expected_fpr`` quantile of that subject's own
+clean-window scores, so a subject-specific error scale gives a uniform per-subject
+false-alarm rate instead of one dominated by the noisiest subjects. The server calibrates
+the ``expected_fpr`` — a single global number, the only thing calibration picks — and each
+client derives its own threshold from it. Because each threshold is a quantile of the
+subject's own clean scores, that fraction of clean windows lies above it by definition: the
+parameter *is* the false-alarm rate, not a proxy for it. The rate measured on a given set
+is its *empirical* FPR (``clean_fpr``).
 
 ``spectral`` (in-band spectral entropy) is a classical DSP index carried alongside as a
 *baseline*, thresholded the same way so its precision/recall are directly comparable.
 It is not part of the detector and never reaches the distilled labels: distill_eval.py
 reports it so the learned teacher can be read against a hand-crafted one.
 
-See ../../../shared/docs/anomalies-and-distillation.md for why the budget is calibrated
-on Youden's J and why the clean false-positive rate a budget buys *is* the budget.
+See ../../../shared/docs/anomalies-and-distillation.md for why the expected FPR is
+calibrated on Youden's J.
 """
 
 import json
@@ -34,7 +38,7 @@ DETECTOR = 'recon'       # the autoencoder score the detector and the labels are
 BASELINE = 'spectral'    # hand-crafted DSP index, reported by distill_eval as a comparison
 SCORE_NAMES = (DETECTOR, BASELINE)
 
-CALIBRATION_REPORT = 'distill_calibration.json'   # the budget, from distill_calibrate
+CALIBRATION_REPORT = 'distill_calibration.json'   # the expected FPR, from distill_calibrate
 
 
 def eval_padded(model, *arrays: np.ndarray) -> dict[str, np.ndarray]:
@@ -56,14 +60,14 @@ def eval_padded(model, *arrays: np.ndarray) -> dict[str, np.ndarray]:
     return {k: np.concatenate([c[k] for c in chunks])[:n] for k in chunks[0]}
 
 
-def load_budget(model_name: str) -> float:
-    """The global budget picked by distill_calibrate.py."""
+def load_expected_fpr(model_name: str) -> float:
+    """The global expected FPR picked by distill_calibrate.py."""
     report_path = get_report_dir(model_name) / CALIBRATION_REPORT
     if not report_path.exists():
         raise SystemExit(
             f"no calibration report at {report_path}. Run distill_calibrate '{model_name}' "
-            f"first to pick the budget.")
-    return float(json.loads(report_path.read_text())['budget'])
+            f"first to pick the expected FPR.")
+    return float(json.loads(report_path.read_text())['expected_fpr'])
 
 
 def window_errors(model, signal: np.ndarray, window: int, n_windows: int) -> np.ndarray:
@@ -88,14 +92,14 @@ def score_windows(model, signal: np.ndarray, window: int,
     return {DETECTOR: recon, BASELINE: spectral}
 
 
-def clean_threshold(clean_score: np.ndarray, budget: float) -> float:
-    return float(np.quantile(clean_score, 1.0 - budget))
+def clean_threshold(clean_score: np.ndarray, expected_fpr: float) -> float:
+    return float(np.quantile(clean_score, 1.0 - expected_fpr))
 
 
 def subject_thresholds(clean: dict[str, dict[str, np.ndarray]],
-                       budget: float) -> dict[str, dict[str, float]]:
-    """Each subject's per-score threshold at the shared global budget."""
-    return {sid: {n: clean_threshold(sc[n], budget) for n in SCORE_NAMES}
+                       expected_fpr: float) -> dict[str, dict[str, float]]:
+    """Each subject's per-score threshold at the shared global expected FPR."""
+    return {sid: {n: clean_threshold(sc[n], expected_fpr) for n in SCORE_NAMES}
             for sid, sc in clean.items()}
 
 
@@ -108,15 +112,15 @@ def pooled_flags(scores: dict[str, dict[str, np.ndarray]],
 
 
 def soft_score(mixed_scores: dict[str, np.ndarray], clean_scores: dict[str, np.ndarray],
-               budget: float) -> np.ndarray:
+               expected_fpr: float) -> np.ndarray:
     """The teacher's soft [0,1] label: how far past its threshold the detector score
     ranks in the subject's own clean CDF, so ``label > 0`` reproduces the hard decision."""
     n = len(mixed_scores[DETECTOR])
-    if budget <= 0.0:
+    if expected_fpr <= 0.0:
         return np.zeros(n, dtype=np.float32)
     clean_sorted = np.sort(clean_scores[DETECTOR])
     cdf = np.searchsorted(clean_sorted, mixed_scores[DETECTOR], side='right') / len(clean_sorted)
-    return np.clip((cdf - (1.0 - budget)) / budget, 0.0, 1.0).astype(np.float32)
+    return np.clip((cdf - (1.0 - expected_fpr)) / expected_fpr, 0.0, 1.0).astype(np.float32)
 
 
 def median3(x: np.ndarray) -> np.ndarray:

@@ -5,7 +5,7 @@ models, trains them on PPG-DaLiA, and exports artifacts (`SavedModel` +
 trainable/quantized `.tflite`) that feed the on-device Android training and the
 ESP32 inference paths. Every model is written as a custom `tf.Module` with
 explicit `eval` / `train` / `save` / `restore` signatures so the same graph is
-LiteRT-trainable on-device and its flattened weights can move through FedAvg.
+LiteRT-trainable on-device and its flattened weights can be averaged.
 
 ## Role in the full thesis system
 
@@ -55,7 +55,8 @@ ml/        TensorFlow models + training, imported by worker + scripts, never by 
            else is model-agnostic and shared across architectures: preprocessing.py
            (raw download -> arrays on disk; no TensorFlow) and loading.py (the cached
            tf.data pipelines over them) split the dataset work, and training.py holds
-           the loops incl. fed_avg, alongside optimizers, saving/export, layers, metrics.
+           the loops plus the aggregation rules (average, weighted_average,
+           trimmed_mean), alongside optimizers, saving/export, layers, metrics.
            layers.py in particular reimplements a few ops with custom gradients because
            the stock TF gradients only exist as Flex ops the phone's LiteRT runtime
            can't execute.
@@ -101,9 +102,11 @@ Training is split into three layers so any model can be run under any loop:
   `default_batch_size` and each model module exposes `get_trainer(data_root,
   batch_size=None)` (falling back to that default when `batch_size` is `None`).
 - **Loop** (`training.py`): orchestration only — `normal_loop` and `federated_loop`
-  (simulated FedAvg with an injectable `aggregate` strategy), over the generic
+  (simulated FedAvg, aggregating each round's client deltas with `weighted_average`),
+  over the generic
   `evaluate` / `train_epoch` steps. Loops talk only to the `Trainer` interface, so a
-  `(model, trainer)` pair works with either loop and they can be compared. `train.py` picks the model and loop and handles export + plotting;
+  `(model, trainer)` pair works with either loop and they can be compared. 
+  `train.py` picks the model and loop and handles export + plotting;
   each run writes its history plot + CSV, its `run.yaml` manifest and eval report under
   `results/<model>/<loop>/` (`normal` or `federated`).
 
@@ -160,39 +163,49 @@ also dropped.
 
 ### Autoencoder evaluation and distillation
 
+Two case studies that put the architecture to use, not parts of the deployed system:
+**FPR calibration** turns the autoencoder's reconstruction error into an actual detector by
+fixing the one number a client needs to derive a threshold, and **label distillation** shows
+how a model with comparable behaviour reaches a light wearable — the heavy unsupervised
+teacher emits soft labels that train a small supervised MLP the ESP32 can run.
+
 The detector is the autoencoder's **reconstruction MSE**, oriented higher = more
-anomalous. Its threshold is **per subject** — it fires at the `1 - budget` quantile of
+anomalous. Its threshold is **per subject** — it fires at the `1 - expected_fpr` quantile of
 *that subject's own* clean windows, so a subject-specific error scale gives a uniform
-per-subject false-alarm rate instead of one dominated by the noisiest subjects. The
-`budget` (the share of clean windows the detector may fire on) is a single global number,
-the only thing calibration picks. Because each threshold is a quantile of the subject's own
-clean scores, the clean false-positive rate a budget buys *is* the budget, so the
-calibration reduces to maximizing `recall(budget) - budget` over a 1-D grid.
+per-subject false-alarm rate instead of one dominated by the noisiest subjects. **The server
+calibrates the expected FPR; the client computes the threshold.** The `expected_fpr` — the
+rate at which the detector fires on clean signal — is a single global number, the only thing
+calibration picks. Because each threshold is a quantile of the subject's own clean scores,
+that fraction of clean windows lies above it by definition: the parameter *is* the
+false-alarm rate rather than a proxy for it, so calibration reduces to maximizing
+`recall(f) - f` over a 1-D grid. The rate measured on a given set is its **empirical FPR**
+(`clean_fpr`); it matches `f` exactly on the subjects whose own clean windows set the
+thresholds, and only lands near it on an unseen subject — hence *expected*.
 
 In-band spectral entropy is scored alongside as a hand-crafted **baseline**, thresholded at
-the same budget so its precision/recall are directly comparable. It is not part of the
+the same expected FPR so its precision/recall are directly comparable. It is not part of the
 detector and never reaches the distilled labels — `distill_eval.py` reports it so the
 learned teacher can be read against a classical index.
 
 The work splits into three scripts along **what data each is allowed to see** — mirroring
-deployment, where only the budget is global and everything else is done per-client on
+deployment, where only the expected FPR is global and everything else is done per-client on
 unlabeled data:
 
-- **`distill_calibrate.py` (server: labeled, global)** picks the **budget** — the only
+- **`distill_calibrate.py` (server: labeled, global)** picks the **expected FPR** — the only
   globally-relevant output, and the only thing that reads the synthetic labels. It is the
-  level maximizing the detector's Youden's J (mixed-set recall minus clean FPR) on the
-  labeled data. Writes the budget (and the whole sweep, for the report) to
+  level maximizing the detector's Youden's J (mixed-set recall minus empirical clean FPR) on
+  the labeled data. Writes the expected FPR (and the whole sweep, for the report) to
   `results/<model>/`.
 - **`distill_labels.py` (client: unlabeled)** touches only what a real client has — its
   own clean baseline and the mixed signal + on-device features, **never the true labels or
-  the per-anomaly sets**. Reads the budget, derives each subject's threshold from its
+  the per-anomaly sets**. Reads the expected FPR, derives each subject's threshold from its
   *own* clean windows, and emits a **soft** `[0,1]` label per window: the clean-CDF rank
   past that threshold (so `label > 0` reproduces the hard decision), then a size-1 temporal
   **median filter** (real anomalies span many windows, so a lone flag is a false positive
   and a lone gap a false negative — cleaned without tuning to the injected span length).
   Soft targets carry the teacher's confidence — proper knowledge distillation, not just
   pseudo-labeling.
-- **`distill_eval.py` (science: unrestricted)** replays the same budget → per-subject
+- **`distill_eval.py` (science: unrestricted)** replays the same expected FPR → per-subject
   thresholds a client uses, then scores the detector against the true mixed-window labels
   and the per-type `anomalous-signals/` sets: precision/recall/F1, per-anomaly-kind recall
   and clean FPR, for the detector and the spectral baseline alike. Writes the metrics to
@@ -273,13 +286,13 @@ The source batch size must be `>=` the default; `transfer_learn` re-exports the
 fine-tuned model under the canonical (unsuffixed) artifact names.
 
 To run the knowledge-distillation round-trip, first calibrate the autoencoder
-(`distill_calibrate.py` picks the budget), then `distill_labels.py` derives each subject's
-threshold and emits the soft-label tree; `distill_eval.py` reports the detector's per-kind
-metrics against the ground truth. Then point `feature-mlp` at those labels with
+(`distill_calibrate.py` picks the expected FPR), then `distill_labels.py` derives each
+subject's threshold and emits the soft-label tree; `distill_eval.py` reports the detector's
+per-kind metrics against the ground truth. Then point `feature-mlp` at those labels with
 `--dataset-dir`:
 
 ```bash
-uv run -m scripts.distillation.distill_calibrate cnn-ae                                       # budget  -> results/cnn-ae/
+uv run -m scripts.distillation.distill_calibrate cnn-ae                                       # exp. FPR -> results/cnn-ae/
 uv run -m scripts.distillation.distill_eval cnn-ae                                            # metrics -> results/cnn-ae/
 uv run -m scripts.distillation.distill_labels cnn-ae                                          # teacher -> results/cnn-ae/distilled-labels/
 uv run -m scripts.system.train feature-mlp --dataset-dir results/cnn-ae/distilled-labels \
@@ -419,10 +432,10 @@ aggregation consumes. Only the job's quantized `result` (+ its signature) is eph
 ### Federated aggregation
 
 A beat task (`federated_aggregation`, every `FED_AGG_INTERVAL_SECONDS`, default 24 h) runs one
-FedAvg round per initialized model:
+aggregation round per initialized model:
 
 0. **Strategy:** chosen by the latest version's `submission_type`. `raw` and `quantize` are
-   byte-identical dense vectors and share the FedAvg path below; sparse/DP formats will
+   byte-identical dense vectors and share the aggregation path below; sparse/DP formats will
    branch here. A model whose type has no strategy is skipped.
 1. **Window:** submissions created after the model's newest `GlobalWeights` snapshot
    (valid or not, so updates consumed by a later-invalidated round are never re-aggregated),
@@ -440,12 +453,21 @@ FedAvg round per initialized model:
 4. **Outlier filter:** each submission's L2 distance from the element-wise mean is z-scored;
    rows above the cutoff are dropped (needs ≥ 3 submissions to be meaningful, otherwise all
    are kept).
-5. **Averaging:** `ml.training.fed_avg` — the same function the simulated `federated_loop`
-   uses, so simulation matches deployment — averages the accepted deltas with uniform
-   weighting (submissions carry no sample counts), and the mean is added onto the reference
-   global weights (identical to averaging absolute weights when every client shares a base).
-   The result is stored as a new `GlobalWeights` row along with the next round's
+5. **Aggregation:** `ml.training.trimmed_mean` reduces the accepted deltas to one update,
+   dropping the `FED_TRIM_RATIO` fraction (default 0.1) of smallest and largest values at
+   each coordinate before averaging the rest; the result is added onto the reference global
+   weights (identical to aggregating absolute weights when every client shares a base). The
+   result is stored as a new `GlobalWeights` row along with the next round's
    `mse_threshold` (a margin over the worst deviation accepted this round).
+
+   Weighting by dataset size — the "Avg" in textbook FedAvg, and what the simulated
+   `federated_loop` does with its known-honest clients — is deliberately **not** what the
+   server does: a submission carries no trustworthy sample count, so an attacker claiming an
+   enormous dataset would simply dictate the global model. Uniform weighting removes that
+   lever, and the trimmed mean removes the next one, since a single extreme coordinate is
+   discarded instead of dragging the mean with it. `ml.training` exposes all three rules
+   (`average`, `weighted_average`, `trimmed_mean`) and `scripts.figures.byzantine`
+   `--aggregator` compares the two that are sound here.
 6. **Artifact baking:** the averaged weights are restored into the cached model and both
    serving artifacts are re-exported as `WeightsArtifact` rows keyed by the new snapshot —
    the LiteRT-trainable `.tflite` and the signed int8 `.tflite` — so a client always pulls a
@@ -519,15 +541,18 @@ to be frozen before anyone masks:
    member (the `(round_id, user_id)` primary key is the structural guard the protocol
    demands — a second vector under the same masks would leak a difference).
 4. **Aggregate** (`worker.tasks.secure_aggregation`) — sums the masked vectors in the ring
-   (every pairwise mask cancels), dequantizes to the FedAvg mean delta, adds it onto `W`,
-   and bakes a new `GlobalWeights` + serving artifacts via the same path FedAvg uses. If any
+   (every pairwise mask cancels), dequantizes to the uniform mean delta, adds it onto `W`,
+   and bakes a new `GlobalWeights` + serving artifacts via the same path the dense round
+   uses. The mean is the only rule the masking admits: a trimmed mean would need to compare
+   individual updates coordinate-wise, which is exactly what the server cannot see. If any
    member never submitted, the **round fails wholesale** (masks only cancel over the full
    roster) — no partial recovery. The daily `federated_aggregation` beat skips `secure`
    models (it has no strategy for them); a secure round only runs when its task is queued.
 
 **What secure aggregation costs.** The server never sees an individual update, so the
-per-submission MSE gate, the z-scored outlier filter, and the per-client validity verdict
-are all **structurally impossible** here — this is inherent to the scheme, not a gap. Only
+per-submission MSE gate, the z-scored outlier filter, the trimmed mean and the per-client
+validity verdict are all **structurally impossible** here — every one of them needs to look
+at updates individually. This is inherent to the scheme, not a gap. Only
 client-side clipping to `B` and an aggregate-level sanity check (finite, mean delta within
 the clip bound) remain. It buys privacy against an honest-but-curious server, not
 robustness.
