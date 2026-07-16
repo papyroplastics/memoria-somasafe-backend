@@ -6,19 +6,25 @@ from ml.training import History
 
 
 def line_plot(path: Path, x: list, series: dict[str, list], xlabel: str, ylabel: str,
-              title: str | None = None, marker: str = 'o-') -> None:
+              title: str | None = None, marker: str = 'o-',
+              vline: tuple[float, str] | None = None, logx: bool = False) -> None:
     """One or more series against a shared x axis. A single series is drawn unlabeled
-    (no legend); several get a legend keyed by name."""
+    (no legend); several get a legend keyed by name. ``vline`` marks an x position with
+    a labelled dashed rule (e.g. the operating point a sweep selected)."""
     fig, ax = plt.subplots()
     markers = [marker, 's-', '^-', 'd-']
     for i, (name, values) in enumerate(series.items()):
         ax.plot(x[:len(values)], values, markers[i % len(markers)],
                 label=name if len(series) > 1 else None)
+    if vline is not None:
+        ax.axvline(vline[0], color='k', linestyle='--', linewidth=1, label=vline[1])
+    if logx:
+        ax.set_xscale('log')
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
     if title:
         ax.set_title(title)
-    if len(series) > 1:
+    if len(series) > 1 or vline is not None:
         ax.legend()
     fig.savefig(path)
     plt.close(fig)

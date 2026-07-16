@@ -96,7 +96,7 @@ def reset_weights(session: Session, key: str) -> None:
           f"{len(rounds)} secure round(s)")
 
 
-def seed_models(session: Session, reset: bool = False) -> None:
+def seed_models(session: Session, reseed: bool = False) -> None:
     for key, spec in MODELS.items():
         tflite = MODELS_DIR / key / "trainable.tflite"
         if not tflite.exists():
@@ -106,24 +106,43 @@ def seed_models(session: Session, reset: bool = False) -> None:
         trainer = spec.build_trainer(DATASETS_DIR)
         fingerprint = trainer.arch_fingerprint()
 
-        if session.get(ModelDefinition, key) is None:
+        definition = session.get(ModelDefinition, key)
+        if definition is None:
             session.add(ModelDefinition(
                 key=key, name=spec.name,
                 firmware_id=spec.firmware_id,
             ))
             print(f"  + model '{key}'")
+        elif reseed:
+            definition.name = spec.name
+            definition.firmware_id = spec.firmware_id
 
         latest = get_latest_version(session, key)
-        if latest is not None and spec.version < latest.version:
+        if not reseed and latest is not None and spec.version < latest.version:
             raise SystemExit(
                 f"model '{key}': registry version {spec.version} is older than the "
                 f"seeded v{latest.version}")
         if latest is not None and spec.version == latest.version:
-            if latest.fingerprint != fingerprint:
-                raise SystemExit(
-                    f"model '{key}': fingerprint changed ({latest.fingerprint} -> "
-                    f"{fingerprint}) but the registry still says v{spec.version} — "
-                    f"bump ModelSpec.version")
+            if not reseed:
+                if latest.fingerprint != fingerprint:
+                    raise SystemExit(
+                        f"model '{key}': fingerprint changed ({latest.fingerprint} -> "
+                        f"{fingerprint}) but the registry still says v{spec.version} — "
+                        f"bump ModelSpec.version, or re-seed it with --reseed")
+            else:
+                # Update rather than delete + recreate: ModelVersion.id is referenced by
+                # GlobalWeights, ClientDeltaSubmission and SecureRound, and (model_key,
+                # version) is unique — so replacing the row in place is the only way to
+                # re-seed a moved fingerprint under an unchanged version.
+                if latest.fingerprint != fingerprint:
+                    print(f"  ~ model '{key}' v{spec.version} re-seeded "
+                          f"[{latest.fingerprint} -> {fingerprint}]")
+                latest.fingerprint = fingerprint
+                latest.weight_count = trainer.model.total_weight_size
+                latest.contract_version = trainer.contract_version
+                latest.submission_type = spec.submission_type
+                latest.norm_params = trainer.norm_param_bytes()
+                latest.min_app_version = spec.min_app_version
             version = latest
         else:
             version = ModelVersion(
@@ -138,7 +157,7 @@ def seed_models(session: Session, reset: bool = False) -> None:
             session.flush()
             print(f"  + model '{key}' v{spec.version} [{fingerprint}]")
 
-        if reset:
+        if reseed:
             reset_weights(session, key)
 
         has_weights = session.exec(
@@ -307,11 +326,14 @@ def main() -> None:
     parser.add_argument("--test-users", action="store_true",
                         help="create a test_N user (owning a placeholder device) per "
                              "dataset subject, for the headless federated harness")
-    parser.add_argument("--reset-weights", action="store_true",
-                        help="drop each seeded model's weight snapshots (and the "
-                             "submissions, quantization jobs and secure rounds based on "
-                             "them) and re-seed from the artifacts now on disk — use "
-                             "after retraining a model that is already seeded")
+    parser.add_argument("--reseed", action="store_true",
+                        help="re-seed every model from the artifacts now on disk, "
+                             "ignoring the idempotency checks: each model's weight "
+                             "snapshots (and the submissions, quantization jobs and "
+                             "secure rounds based on them) are dropped, and an existing "
+                             "version's row is overwritten in place — including a moved "
+                             "architecture fingerprint, which otherwise aborts. Use "
+                             "after retraining or changing a model that is already seeded")
     args = parser.parse_args()
 
     if not args.factory_nvs.exists():
@@ -319,7 +341,7 @@ def main() -> None:
 
     init_db()
     with Session(engine) as session:
-        seed_models(session, reset=args.reset_weights)
+        seed_models(session, reseed=args.reseed)
         seed_firmware(session, args.firmware_dir)
         user = seed_users(session)
         seed_device(session, args.factory_nvs, user if args.assign_device else None)

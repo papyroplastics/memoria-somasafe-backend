@@ -16,10 +16,11 @@ Conventions (see `README.md`, "Layout"):
 - Convergence numbers for the report come from the **simulated** loops (reproducible, seeded
   from `scripts/__init__.py`), not the headless HTTP client — that is integration
   verification only.
-- **The figure scripts split into two kinds.** `plot_convergence` *reads* a previous
-  `scripts.system.train` run (its `results/<model>/<loop>/run.yaml` manifest + `training.csv`)
-  and fails if there is none — it never trains. `byzantine` and `sensitivity` *do* train,
-  because they sweep configurations no single `train.py` run produces.
+- **The figure scripts split into two kinds.** `plot_convergence` and `plot_calibration`
+  *read* a previous run (`results/<model>/<loop>/run.yaml` + `training.csv`, and
+  `distill_calibration.json` respectively) and fail if there is none — they never compute.
+  `byzantine` and `sensitivity` *do* train, because they sweep configurations no single
+  `train.py` run produces.
 - **Every loop holds out whole subjects** (`--eval-subjects N`, default 2: the last N).
   A metric is therefore generalization to an *unseen subject*, and a centralized and a
   federated run at the same `--eval-subjects` train on the same data and score on the same
@@ -61,6 +62,7 @@ uv run -m scripts.figures.plot_convergence <model>      # both figures, no train
 | `results/<model>/federated/convergence.png` + `.csv` + `.yaml` | `scripts.figures.plot_convergence <model>` | **5.2** federated model improves round over round |
 | `results/<model>/centralized_vs_federated/centralized_vs_federated.png` + `.csv` + `.yaml` | `scripts.figures.plot_convergence <model>` (same run; `--skip-overlay` to omit) | **5.3** FedAvg ≈ centralized without centralizing raw data (central claim) |
 | `results/<model>/distill_eval.json` | `scripts.distillation.distill_eval <model>` | **5.4** per-kind recall, clean FPR, detector vs. spectral baseline / accuracy·F1 |
+| `results/<model>/calibration.png` + `.csv` + `.yaml` | `scripts.figures.plot_calibration <model>` (reads a previous `distill_calibrate`; never calibrates) | **5.4** recall/FPR vs. budget with the selected operating point — makes the chosen budget auditable |
 | `results/<model>/personalization/personalization[_S*].csv` + `.json` | `scripts.distillation.personalize_test --model feature-mlp --teacher <ae>` | **5.4** personalization marginal-positive; int8 ≈ float |
 | `results/<model>/byzantine/byzantine.png` + `.csv` + `.yaml` | `scripts.figures.byzantine <model> --max-malicious N --rounds R` | **5.5** outlier filter holds the round (and no more) — trains |
 | `results/footprint/footprint.csv` + `.yaml` | `scripts.figures.footprint` | **5.6** system fits the edge (backend rows; phone/ESP32 rows pasted in) |

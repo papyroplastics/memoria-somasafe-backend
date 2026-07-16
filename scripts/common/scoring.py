@@ -10,6 +10,9 @@ the detector may fire on — is a single global number, the only thing calibrati
 *baseline*, thresholded the same way so its precision/recall are directly comparable.
 It is not part of the detector and never reaches the distilled labels: distill_eval.py
 reports it so the learned teacher can be read against a hand-crafted one.
+
+See ../../../shared/docs/anomalies-and-distillation.md for why the budget is calibrated
+on Youden's J and why the clean false-positive rate a budget buys *is* the budget.
 """
 
 import json
@@ -20,7 +23,7 @@ import numpy as np
 import tensorflow as tf
 from ml.preprocessing import (
     CLEAN_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
-    conditional_windows, get_sorted_paths,
+    get_sorted_paths, load_signal, window_count,
 )
 from ml.models.common import AutoencoderTrainer
 
@@ -63,26 +66,22 @@ def load_budget(model_name: str) -> float:
     return float(json.loads(report_path.read_text())['budget'])
 
 
-def window_errors(model, signal: np.ndarray, cond: np.ndarray,
-                  window: int, n_windows: int) -> np.ndarray:
+def window_errors(model, signal: np.ndarray, window: int, n_windows: int) -> np.ndarray:
     """Reconstruction error per non-overlapping window. Every window is scored — the
     tail short of a full batch is padded out and discarded by ``eval_padded`` — so the
-    errors line up 1:1 with the feature/label grid.
-
-    ``signal`` is the raw ``[BVP, ACC]`` stack; only its leading ``model.n_signals``
-    channels are fed, matching what ``ml.loading.subject_windows`` trains on."""
-    n_windows = min(n_windows, len(signal) // window, len(cond))
+    errors line up 1:1 with the feature/label grid."""
+    n_windows = min(n_windows, len(signal) // window)
     if n_windows <= 0:
         return np.empty(0, dtype=np.float32)
-    windows = (signal[:n_windows * window, :model.n_signals]
+    windows = (signal[:n_windows * window]
                .reshape(n_windows, window, model.n_signals).astype(np.float32))
-    out = eval_padded(model, windows, cond[:n_windows].astype(np.float32))
+    out = eval_padded(model, windows)
     return out['error'].reshape(-1).astype(np.float32)
 
 
-def score_windows(model, signal: np.ndarray, cond: np.ndarray,
-                  window: int, n_windows: int) -> dict[str, np.ndarray]:
-    recon = window_errors(model, signal, cond, window, n_windows)
+def score_windows(model, signal: np.ndarray, window: int,
+                  n_windows: int) -> dict[str, np.ndarray]:
+    recon = window_errors(model, signal, window, n_windows)
     bvp = signal[:, 0]
     spectral = np.array([dsp.spectral_entropy(bvp[w * window:(w + 1) * window])
                          for w in range(len(recon))], dtype=np.float32)
@@ -130,21 +129,25 @@ def median3(x: np.ndarray) -> np.ndarray:
 
 def score_dir_by_subject(trainer: AutoencoderTrainer, data_dir: Path,
                          bvp_dir: Path | None) -> dict[str, dict[str, np.ndarray]]:
+    """Score every subject's non-overlapping windows. ``bvp_dir`` is the signal source —
+    a per-kind anomalous-signals directory, or ``None`` for the clean signals."""
     window = trainer.model.seq_len
-    subjects_dir = data_dir / CLEAN_SUBDIR
+    signal_dir = bvp_dir if bvp_dir is not None else data_dir / CLEAN_SUBDIR
     out: dict[str, dict[str, np.ndarray]] = {}
-    for d in get_sorted_paths(subjects_dir):
+    for d in get_sorted_paths(data_dir / CLEAN_SUBDIR):
         sid = d.name
-        signal, cond = conditional_windows(subjects_dir, sid, window, anomalous_dir=bvp_dir)
-        if len(cond) > 0:
-            out[sid] = score_windows(trainer.model, signal, cond, window, len(cond))
+        signal = load_signal(signal_dir, sid)
+        count = window_count(signal, window)
+        if count > 0:
+            out[sid] = score_windows(trainer.model, signal, window, count)
     return out
 
 
 def score_mixed_by_subject(trainer: AutoencoderTrainer, data_dir: Path
                            ) -> dict[str, dict[str, np.ndarray]]:
+    """The mixed set, scored on the feature grid: the window count comes from
+    ``mixed-features`` so the scores line up 1:1 with the ground-truth labels."""
     window = trainer.model.seq_len
-    subjects_dir = data_dir / CLEAN_SUBDIR
     mixed_dir = data_dir / MIXED_SUBDIR
     feature_dir = data_dir / MIXED_FEATURE_SUBDIR
 
@@ -155,9 +158,9 @@ def score_mixed_by_subject(trainer: AutoencoderTrainer, data_dir: Path
     scores: dict[str, dict[str, np.ndarray]] = {}
     for d in subject_dirs:
         sid = d.name
-        signal, cond = conditional_windows(subjects_dir, sid, window, anomalous_dir=mixed_dir)
+        signal = load_signal(mixed_dir, sid)
         n_windows = len(np.load(feature_dir / sid / 'features.npy'))
-        scores[sid] = score_windows(trainer.model, signal, cond, window, n_windows)
+        scores[sid] = score_windows(trainer.model, signal, window, n_windows)
     return scores
 
 

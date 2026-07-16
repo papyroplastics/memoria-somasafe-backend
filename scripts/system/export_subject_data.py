@@ -10,8 +10,7 @@ F of the windows' signal data / ML result) leave real capture-like sequence hole
 ``--clean`` exports the clean signal dataset instead of mixed; its features/labels come
 from the ``clean-features`` dataset (all windows normal, score 0), precomputed by
 scripts/get_dataset.py so the phone can skip the slow on-device extraction, so
-``--missing-features`` works with ``--clean`` too. ``--include-context`` embeds each
-window's raw 2-d activity context; otherwise the phone computes context at import.
+``--missing-features`` works with ``--clean`` too.
 """
 
 import argparse
@@ -21,8 +20,8 @@ import numpy as np
 
 from common.config import DATASETS_DIR
 from ml.preprocessing import (
-    MIXED_SUBDIR, CLEAN_SUBDIR, MIXED_FEATURE_SUBDIR, CLEAN_FEATURE_SUBDIR, CONTEXT_FILE,
-    BVP_WINDOW, ACC_WINDOW, WINDOW_SECONDS, load_static_norm_params,
+    MIXED_SUBDIR, CLEAN_SUBDIR, MIXED_FEATURE_SUBDIR, CLEAN_FEATURE_SUBDIR,
+    BVP_WINDOW, ACC_WINDOW, WINDOW_SECONDS,
 )
 from ..common import dataset_pb2 as pb
 
@@ -44,22 +43,16 @@ def present_mask(count: int, fraction: float, rng: np.random.Generator) -> np.nd
 
 def export_subject(subject: int, datasets_dir: Path, out_path: Path,
                    clean: bool = False,
-                   include_context: bool = False,
                    missing_samples: float | None = None,
                    missing_features: float | None = None):
     sid = f'S{subject}'
     signal_subdir = CLEAN_SUBDIR if clean else MIXED_SUBDIR
     feature_subdir = CLEAN_FEATURE_SUBDIR if clean else MIXED_FEATURE_SUBDIR
-    bvp_path   = datasets_dir / signal_subdir        / sid / 'bvp.npy'
-    acc_path   = datasets_dir / CLEAN_SUBDIR      / sid / 'acc.npy'
-    feat_path  = datasets_dir / feature_subdir       / sid / 'features.npy'
-    label_path = datasets_dir / feature_subdir       / sid / 'labels.npy'
-    ctx_path   = datasets_dir / CLEAN_SUBDIR       / sid / CONTEXT_FILE
-    static_path = datasets_dir / CLEAN_SUBDIR      / sid / 'static.npy'
-    required = [bvp_path, acc_path, static_path, feat_path, label_path]
-    if include_context:
-        required.append(ctx_path)
-    for path in required:
+    bvp_path   = datasets_dir / signal_subdir   / sid / 'bvp.npy'
+    acc_path   = datasets_dir / CLEAN_SUBDIR    / sid / 'acc.npy'
+    feat_path  = datasets_dir / feature_subdir  / sid / 'features.npy'
+    label_path = datasets_dir / feature_subdir  / sid / 'labels.npy'
+    for path in [bvp_path, acc_path, feat_path, label_path]:
         if not path.exists():
             raise FileNotFoundError(f"{path} not found. Run scripts/get_dataset.py first.")
 
@@ -67,27 +60,15 @@ def export_subject(subject: int, datasets_dir: Path, out_path: Path,
     acc      = np.load(acc_path).astype(np.float32)
     features = np.load(feat_path).astype(np.float32)                 # (N, 17) raw
     labels   = np.load(label_path).astype(np.float32).reshape(-1)
-    context  = np.load(ctx_path).astype(np.float32) if include_context else None  # (N, 2) raw
-
-    # Recover the subject's raw 6-d demographics by de-normalizing the stored static
-    # vector: static.npy is z-scored, so raw = norm * std + mean. Ships raw so the phone
-    # feeds it straight into the model, which z-scores the cond vector itself.
-    stat_mean, stat_std = load_static_norm_params(datasets_dir / CLEAN_SUBDIR)
-    static_norm = np.load(static_path).astype(np.float32)     # (6,) z-scored
-    static_raw = (static_norm * stat_std + stat_mean).astype(np.float32)
 
     # Align to the windows every source agrees on (same indexing as build_feature_dataset).
-    lengths = [len(bvp) // BVP_WINDOW, len(acc) // ACC_WINDOW, len(features), len(labels)]
-    if context is not None:
-        lengths.append(len(context))
-    count = min(lengths)
+    count = min(len(bvp) // BVP_WINDOW, len(acc) // ACC_WINDOW, len(features), len(labels))
     if count == 0:
         raise ValueError(f"{sid}: no complete windows to export")
 
     ppg_win  = window_raw(bvp, BVP_WINDOW, count)             # (count, 512) f32
     acc_win  = window_raw(acc, ACC_WINDOW, count)             # (count, 256) f32
     feat_win = features[:count].astype(np.float32)           # (count, 17) f32
-    ctx_win  = context[:count].astype(np.float32) if context is not None else None  # (count, 2) f32
     score    = labels[:count].astype(np.int8).reshape(count, 1)  # (count, 1) int8
 
     # Fake ESP metadata over the full grid, before any window is dropped: sequence
@@ -115,8 +96,7 @@ def export_subject(subject: int, datasets_dir: Path, out_path: Path,
         data_present = present_mask(count, 1.0 - missing_samples, rng)
         feat_present = present_mask(count, 1.0 - missing_features, rng)
 
-    dataset = pb.CaptureDataset(format_version=FORMAT_VERSION, subject=subject,
-                                static=static_raw.tobytes())
+    dataset = pb.CaptureDataset(format_version=FORMAT_VERSION, subject=subject)
     for i in range(count):
         if not (data_present[i] or feat_present[i]):
             continue                                # neither half survived: real seq gap
@@ -127,8 +107,6 @@ def export_subject(subject: int, datasets_dir: Path, out_path: Path,
             w.device_end_ms = int(dev_end[i])
             w.ppg = ppg_win[i].tobytes()
             w.acc = acc_win[i].tobytes()
-            if ctx_win is not None:
-                w.context = ctx_win[i].tobytes()
         if feat_present[i]:
             w.features = feat_win[i].tobytes()
             w.score = score[i].tobytes()
@@ -162,8 +140,6 @@ if __name__ == '__main__':
     parser.add_argument('--clean', action='store_true',
                         help="Export the clean signal dataset (no injected anomalies) instead of "
                              "mixed; features/labels come from clean-features (all windows normal)")
-    parser.add_argument('--include-context', action='store_true',
-                        help="Embed each window's raw activity context (context.npy)")
     parser.add_argument('--missing-samples', type=unit_fraction, default=None, metavar='F',
                         help="Drop a random fraction F of windows' signal data")
     parser.add_argument('--missing-features', type=unit_fraction, default=None, metavar='F',
@@ -173,6 +149,5 @@ if __name__ == '__main__':
     out = args.output or Path(f'S{args.subject}.ssds')
     export_subject(args.subject, args.datasets_dir, out,
                    clean=args.clean,
-                   include_context=args.include_context,
                    missing_samples=args.missing_samples,
                    missing_features=args.missing_features)

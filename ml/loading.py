@@ -1,10 +1,9 @@
 """tf.data pipelines over the arrays ``ml.preprocessing`` wrote to disk.
 
 Every dataset a training loop, sweep or export path consumes is built here, and
-every one of them is cached: windowing a subject and computing its causal context
-is the expensive part of a run and it never depends on the model weights, so a
-sweep that rebuilds a fresh-weight trainer per configuration pays for it once per
-process.
+every one of them is cached: windowing a subject is the expensive part of a run and
+it never depends on the model weights, so a sweep that rebuilds a fresh-weight
+trainer per configuration pays for it once per process.
 """
 
 from pathlib import Path
@@ -12,9 +11,7 @@ from pathlib import Path
 import numpy as np
 import tensorflow as tf
 
-from .preprocessing import (
-    DatasetUnavailibleError, get_sorted_paths, stacked_signal, window_cond_vectors,
-)
+from .preprocessing import DatasetUnavailibleError, get_sorted_paths, load_signal
 
 # Keyed by everything that changes the tensors: the source tree, the subject, and the
 # windowing/batching applied on top (see Trainer.dataset_key). A dataset carries no model
@@ -38,18 +35,13 @@ def window_signal(signal: np.ndarray, window_size: int, shift: int) -> tf.data.D
             .apply(tf.data.experimental.assert_cardinality(count)))
 
 
-def subject_windows(subjects_dir: Path, sid: str, window_size: int, shift: int,
-                    anomalous_dir: Path | None = None) -> tf.data.Dataset:
-    """``(bvp_window, cond)`` pairs for one subject, both raw — the model z-scores
-    signal and cond in its own signatures.
-
-    The window carries BVP only. ACC reaches the model exclusively through ``cond``'s
-    activity context: as a raw encoder channel it measured as a no-op (identical
-    reconstruction and identical per-kind recall), so it is not fed to the encoder."""
-    raw = stacked_signal(subjects_dir, sid, anomalous_dir)
-    ds = window_signal(raw[:, :1], window_size, shift)
-    cond = window_cond_vectors(subjects_dir, sid, raw[:, 1], window_size, shift, len(ds))
-    return tf.data.Dataset.zip(ds, tf.data.Dataset.from_tensor_slices(cond))
+def subject_windows(signal_dir: Path, sid: str, window_size: int,
+                    shift: int) -> tf.data.Dataset:
+    """One-tuple ``(bvp_window,)`` datapoints for one subject, raw — the model
+    z-scores the signal in its own signatures. ACC is not fed to any model; it exists
+    only as a feature-extraction input."""
+    ds = window_signal(load_signal(signal_dir, sid), window_size, shift)
+    return ds.map(lambda w: (w,))
 
 
 def cached(key: tuple, build) -> tf.data.Dataset:

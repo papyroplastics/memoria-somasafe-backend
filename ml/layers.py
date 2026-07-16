@@ -70,7 +70,7 @@ class Dense(tf.Module):
         self.bias = tf.Variable(tf.zeros(shape=[out_dim]), name='dense_bias')
         self.activation = activation if activation else (lambda x: x)
 
-    def __call__(self, data):
+    def __call__(self, data) -> tf.Tensor:
         out = data @ self.weight + self.bias
         return self.activation(out)
 

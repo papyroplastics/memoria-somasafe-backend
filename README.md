@@ -81,11 +81,6 @@ scripts/   CLI entry points, grouped into subpackages by how each relates to the
                            train, over datasets ml.loading builds once), footprint.
 ```
 
-[`TUNING.md`](TUNING.md) records the `cnn-ae` tuning pass and the distillation
-simplification — the sweep data behind the current defaults, the negative results (FiLM and
-latent dropout were dead weight; the raw ACC channel is a no-op), why calibration maximizes
-Youden's J rather than F1, and which anomaly kinds are undetectable by construction.
-
 Evaluation/experiment output (histories, reports, figures, distilled labels) goes to
 `results/<model>/`; the served `.tflite` artifacts stay in `shared/gen/models/<model>/`.
 [`PLOTS.md`](PLOTS.md) catalogs every figure/report file, the command that produces it, and
@@ -120,31 +115,24 @@ plots both curves from the `run.yaml` manifests without retraining anything, and
 overlay runs whose manifests disagree.
 
 Autoencoder variants (LSTM/GRU/CNN/...) share `TrainableAutoencoder` (reconstruction
-train/eval + conditioning) and `AutoencoderTrainer` (windowing + recon-error metrics).
-They reconstruct **BVP only**, from BVP only: ACC as a raw encoder channel measured as a
-no-op (identical reconstruction error and identical per-kind recall, to three decimals), so
-it reaches the model *solely* through the condition. Every model is **conditioned** on a
-single `cond` vector — z-scored demographics plus a causal *activity context* (trailing-2-min
-mean/std of the ACC). The context is computed from the **raw** ACC; the whole `cond` (and
-the BVP signal) is fed to the model **raw**, and the model z-scores it in its `eval`/`train`
-signatures with baked-in constants (`context_norm_params.npy` is just the ACC mean/std, so
-normalizing it equals the old "normalize ACC, then take trailing stats"). The on-device
-pipeline feeds raw the same way. The objective is reconstruction MSE plus a first-difference
-(slope) term that penalizes a constant "flat line" output.
+train/eval) and `AutoencoderTrainer` (windowing + recon-error metrics). They reconstruct
+**BVP only, from BVP only**: the signal is the single model input, fed **raw**, and the
+model z-scores it in its `eval`/`train` signatures with baked-in constants. The on-device
+pipeline feeds raw the same way. ACC never reaches an autoencoder — it exists only as an
+input to `FeatureMLP`'s hand-crafted features. The objective is reconstruction MSE plus a
+first-difference (slope) term that penalizes a constant "flat line" output.
 
-What makes the error separate anomalies is how **tightly the model fits the clean-BVP
-manifold**, not how narrow the code is — a sharper fit makes off-manifold input miss by
-relatively more. Detection therefore improves with capacity up to `latent_dim` 256 and
-degrades past it, and *starving* the code hurts: at 16 it cannot reconstruct clean BVP
-either and detection collapses with it. Latent dropout hurts for the same reason and is off
-by default. Since each threshold is a quantile of the subject's own clean errors, the
-absolute error scale cancels — only the clean/anomalous overlap matters.
+Since each threshold is a quantile of the subject's own clean errors, the absolute error
+scale cancels — only the clean/anomalous overlap matters. See
+[`shared/docs/anomalies-and-distillation.md`](../shared/docs/anomalies-and-distillation.md)
+for how the reconstruction error becomes a calibrated detector and how its labels are
+distilled into the student.
 
 ## Models
 
 See [`shared/docs/model-types.md`](shared/docs/model-types.md) for what each model
-architecture is and how conditioning/normalization work; this section covers the
-backend-specific dataset and training-pipeline details.
+architecture is and how normalization works; this section covers the backend-specific
+dataset and training-pipeline details.
 
 ### `FeatureMLP` dataset — synthetic anomaly injection
 
@@ -309,13 +297,9 @@ replacing it (see "Run"). `personalize_test` fine-tunes the distilled student, s
 imports (run `make proto` first). Each window mirrors an ESP sample: raw PPG/ACC, the raw
 feature vector, the label in the score field, plus a fake sequence number and contiguous
 8 s device-time grid, so imported windows preprocess and train exactly like streamed ones.
-The dataset also carries the subject's raw 6-d demographics (`static`, recovered by
-de-normalizing `static.npy`), which the app stamps onto the imported group as its
-conditioning static.
 
 ```bash
 uv run -m scripts.system.export_subject_data 1                              # S1.ssds, every window complete
-uv run -m scripts.system.export_subject_data 1 --include-context           # also embed each window's raw context
 uv run -m scripts.system.export_subject_data 1 --missing-samples 0.7       # keep 70% of windows' signal; drop the rest
 uv run -m scripts.system.export_subject_data 1 --missing-features 0.7      # keep 70% of windows' ML result; phone recomputes the rest
 uv run -m scripts.system.export_subject_data 1 --missing-samples 0.7 --missing-features 0.7  # both, drawn independently
@@ -649,11 +633,15 @@ and a default user (`SEED_USER` / `SEED_PASSWORD`, default `somasafe` /
 (`uv run -m scripts.system.seed_db firmware/factory_nvs.csv`) to also register that device.
 
 A model's weights are seeded **once** and then owned by aggregation, so re-running the seed
-after retraining leaves the old snapshot in place. `--reset-weights` (or `make db-reseed`)
+after retraining leaves the old snapshot in place. `--reseed` (or `make db-reseed`)
 re-points each seeded model at the artifacts currently on disk: it drops the model's
 `GlobalWeights` history along with everything anchored to it — the submissions, quantization
 jobs and secure rounds that name a base snapshot they were computed against, and the stored
-`WeightsArtifact` rows — then re-seeds from `shared/gen/models/<model>/`. Model definitions and
+`WeightsArtifact` rows — then re-seeds from `shared/gen/models/<model>/`. It also skips the
+idempotency checks: an existing version's registry row is overwritten in place, **including a
+moved architecture fingerprint**, which otherwise aborts the seed (see
+[`shared/docs/versioning.md`](../shared/docs/versioning.md)) — that is what makes it the way
+to re-seed after changing a model rather than merely retraining one. Model definitions and
 versions are untouched.
 
 Session semantics (stateful tokens, `api/routes/auth.py` endpoints, argon2 password

@@ -6,12 +6,8 @@ import numpy as np
 import tensorflow as tf
 
 from ..optimizers import Adam
-from ..layers import Dense, relu
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
-from ..preprocessing import (
-    CLEAN_SUBDIR, BVP_RATE, norm_stats,
-    load_context_norm_params, load_static_norm_params,
-)
+from ..preprocessing import CLEAN_SUBDIR, BVP_RATE, norm_stats
 from ..loading import batched, cached, subject_dirs, subject_windows
 
 # Batches of a run's eval set fed to the int8 converter to fix its tensor scales.
@@ -101,40 +97,25 @@ class TrainableAutoencoder(TrainableModel):
 
     default_batch_size = 12
 
-    def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int, n_cond: int,
-                 cond_embed_dim, n_outputs, diff_weight, signal_mean, signal_std,
-                 cond_mean, cond_std):
+    def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int,
+                 n_outputs, diff_weight, signal_mean, signal_std):
         super().__init__(name=name)
         self.batch_size = batch_size
         self.seq_len = seq_len
         self.n_signals = n_signals
-        self.n_cond = n_cond
-        self.cond_embed_dim = cond_embed_dim
         self.n_outputs = n_outputs
         self.diff_weight = diff_weight
         self.signal_shape = (batch_size, seq_len, n_signals)
-        self.cond_shape = (batch_size, n_cond)
 
         # Inputs arrive raw; the model z-scores them so the device and firmware never
         # ship or apply normalization params. Signal params broadcast over (batch, seq).
         self.signal_mean = tf.constant(signal_mean, dtype=tf.float32)
         self.signal_std = tf.constant(signal_std, dtype=tf.float32)
-        self.cond_mean = tf.constant(cond_mean, dtype=tf.float32)
-        self.cond_std = tf.constant(cond_std, dtype=tf.float32)
-
-        self.cond_dense1 = Dense(n_cond, 32, activation=relu)
-        self.cond_dense2 = Dense(32, cond_embed_dim, activation=relu)
-
-    def _embed_cond(self, cond: tf.Tensor) -> tf.Tensor:
-        return self.cond_dense2(self.cond_dense1(cond))
 
     def _bind(self, learning_rate: float, beta1: float, beta2: float, epsilon: float):
         """Bind train/eval/infer/save/restore. Call once all layers exist."""
         self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
-        signature = [
-            tf.TensorSpec(shape=self.signal_shape, dtype=tf.float32),
-            tf.TensorSpec(shape=self.cond_shape, dtype=tf.float32),
-        ]
+        signature = [tf.TensorSpec(shape=self.signal_shape, dtype=tf.float32)]
         # eval/train z-score raw inputs; infer takes already-normalized inputs and is the
         # only signature exported to the int8 model, so its int8 input calibrates on
         # normalized values (see saving.optimize_saved_model).
@@ -143,30 +124,27 @@ class TrainableAutoencoder(TrainableModel):
         self.train = tf.function(self.train_eager, input_signature=signature)
         self._init_save_restore()
 
-    def _forward(self, signal: tf.Tensor, cond: tf.Tensor) -> tf.Tensor:
+    def _forward(self, signal: tf.Tensor) -> tf.Tensor:
         raise NotImplementedError
 
-    def _eval_core(self, signal: tf.Tensor, cond: tf.Tensor):
-        """Reconstruction + error from already-normalized signal/cond."""
-        reconstruction = self._forward(signal, cond)
+    def _eval_core(self, signal: tf.Tensor):
+        """Reconstruction + error from an already-normalized signal."""
+        reconstruction = self._forward(signal)
         target = signal[:,:,:self.n_outputs]
         return {'reconstruction': reconstruction,
                 'error': reconstruction_error(reconstruction, target)}
 
-    def infer_eager(self, signal: tf.Tensor, cond: tf.Tensor):
-        return self._eval_core(signal, cond)
+    def infer_eager(self, signal: tf.Tensor):
+        return self._eval_core(signal)
 
-    def eval_eager(self, signal: tf.Tensor, cond: tf.Tensor):
-        signal = (signal - self.signal_mean) / self.signal_std
-        cond = (cond - self.cond_mean) / self.cond_std
-        return self._eval_core(signal, cond)
+    def eval_eager(self, signal: tf.Tensor):
+        return self._eval_core((signal - self.signal_mean) / self.signal_std)
 
-    def train_eager(self, signal: tf.Tensor, cond: tf.Tensor):
+    def train_eager(self, signal: tf.Tensor):
         signal = (signal - self.signal_mean) / self.signal_std
-        cond = (cond - self.cond_mean) / self.cond_std
         target = signal[:,:,:self.n_outputs]
         with tf.GradientTape() as tape:
-            reconstruction = self._forward(signal, cond)
+            reconstruction = self._forward(signal)
             loss = (mse_loss(reconstruction, target)
                     + self.diff_weight * first_difference_loss(reconstruction, target))
         grads = tape.gradient(loss, self.trainable_variables)
@@ -285,24 +263,16 @@ class TrainerBuilder(Protocol):
 
 
 def autoencoder_norm_params(data_root: Path, data_subdir: str = CLEAN_SUBDIR):
-    """z-score params baked into an autoencoder so it normalizes its own raw inputs:
-    signal as ``[BVP]`` and cond as ``[static(6), context(2)]``. ``norm_stats`` also
-    carries ACC, which the autoencoders no longer take as an input channel — it reaches
-    them only as ``cond``'s activity context — so only the BVP column is baked in."""
-    subjects_dir = data_root / data_subdir
-    sig_mean, sig_std = (s[:1] for s in norm_stats(subjects_dir))
-    stat_mean, stat_std = load_static_norm_params(subjects_dir)
-    ctx_mean, ctx_std = load_context_norm_params(subjects_dir)
-    cond_mean = np.concatenate([stat_mean, ctx_mean]).astype(np.float32)
-    cond_std = np.concatenate([stat_std, ctx_std]).astype(np.float32)
-    return sig_mean, sig_std, cond_mean, cond_std
+    """z-score params baked into an autoencoder so it normalizes its own raw input:
+    the BVP signal. ACC is not a model input — it only feeds feature extraction."""
+    return norm_stats(data_root / data_subdir)
 
 class AutoencoderTrainer(Trainer):
 
     primary_metric = 'recon_error'
-    dataset_tensors = ['signal', 'cond']
-    n_eval_inputs = 2
-    contract_version = 2   # norm layout: signal mean/std(1 each), cond mean/std(8 each)
+    dataset_tensors = ['signal']
+    n_eval_inputs = 1
+    contract_version = 2   # norm layout: signal mean/std (1 each)
 
     default_shift = BVP_RATE * 3
 
@@ -318,16 +288,14 @@ class AutoencoderTrainer(Trainer):
     def norm_param_bytes(self):
         return np.concatenate([
             self.model.signal_mean.numpy(), self.model.signal_std.numpy(),
-            self.model.cond_mean.numpy(), self.model.cond_std.numpy(),
         ]).astype('<f4').tobytes()
 
     def subject_dataset(self, subject_dir):
         return subject_windows(subject_dir.parent, subject_dir.name,
                                self.model.seq_len, self.shift)
 
-    def normalize_feed(self, signal, cond):
-        return {'signal': (signal - self.model.signal_mean) / self.model.signal_std,
-                'cond': (cond - self.model.cond_mean) / self.model.cond_std}
+    def normalize_feed(self, signal):
+        return {'signal': (signal - self.model.signal_mean) / self.model.signal_std}
 
     def eval_metrics(self, datapoints, outputs):
         errors = np.concatenate([np.asarray(o['error']).reshape(-1) for o in outputs])

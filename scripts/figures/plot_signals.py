@@ -15,7 +15,7 @@ from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
 from ml.preprocessing import (
     CLEAN_SUBDIR, ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_RATE,
-    conditional_windows, get_sorted_paths,
+    get_sorted_paths, load_signal, window_count,
 )
 from ml.saving import load_trainable_weights
 from ..common.reports import get_report_dir, write_yaml
@@ -24,17 +24,14 @@ KINDS = ('clean', *ANOMALY_KINDS)
 
 
 def window_views(data_dir, sid, window, index):
-    """Raw [BVP, ACC] window + its raw conditioning vector for the clean signal
-    and each anomaly kind, all sliced at the same window ``index``. Only BVP carries
-    the anomaly; ACC is always the subject's clean signal."""
-    subjects_dir = data_dir / CLEAN_SUBDIR
-    anomalous_dir = data_dir / ANOMALOUS_SUBDIR
-
+    """The raw BVP window for the clean signal and each anomaly kind, all sliced at the
+    same window ``index``."""
     views = {}
     for kind in KINDS:
-        src = None if kind == 'clean' else anomalous_dir / kind
-        signal, cond = conditional_windows(subjects_dir, sid, window, anomalous_dir=src)
-        views[kind] = (signal[index * window:(index + 1) * window], cond[index])
+        src = (data_dir / CLEAN_SUBDIR if kind == 'clean'
+               else data_dir / ANOMALOUS_SUBDIR / kind)
+        signal = load_signal(src, sid)
+        views[kind] = signal[index * window:(index + 1) * window]
     return views
 
 
@@ -58,8 +55,7 @@ if __name__ == "__main__":
         raise SystemExit(f"{subjects_dir} is empty. Run get_dataset.py first.")
 
     sid = subject_dirs[rng.integers(len(subject_dirs))].name
-    _, cond = conditional_windows(subjects_dir, sid, window)
-    n_windows = len(cond)
+    n_windows = window_count(load_signal(subjects_dir, sid), window)
     if n_windows == 0:
         raise SystemExit(f"{sid} has no full {window}-sample window.")
     index = int(rng.integers(n_windows))
@@ -68,10 +64,8 @@ if __name__ == "__main__":
     views = window_views(DATASETS_DIR, sid, window, index)
     t = np.arange(window) / BVP_RATE
 
-    n_signals = trainer.model.n_signals
-    signals = np.stack([views[k][0][:, :n_signals] for k in KINDS]).astype(np.float32)
-    conds = np.stack([views[k][1] for k in KINDS]).astype(np.float32)
-    recons = eval_padded(trainer.model, signals, conds)['reconstruction'][:, :, 0]
+    signals = np.stack([views[k] for k in KINDS]).astype(np.float32)
+    recons = eval_padded(trainer.model, signals)['reconstruction'][:, :, 0]
 
     fig_in, axs_in = plt.subplots(len(KINDS), 1, sharex=True, figsize=(8, 2 * len(KINDS)))
     fig_rec, axs_rec = plt.subplots(len(KINDS), 1, sharex=True, figsize=(8, 2 * len(KINDS)))
@@ -82,7 +76,7 @@ if __name__ == "__main__":
     bvp_std = trainer.model.signal_std.numpy()[0]
 
     for i, (ax_in, ax_rec, kind) in enumerate(zip(axs_in, axs_rec, KINDS)):
-        bvp = views[kind][0][:, 0]
+        bvp = views[kind][:, 0]
         # eval() reconstructs in z-scored space; denormalize back to raw BVP units
         # so it's comparable to the raw `bvp` it's plotted against.
         recon = recons[i] * bvp_std + bvp_mean
@@ -116,14 +110,14 @@ if __name__ == "__main__":
         'rows': {'order': 'top to bottom', 'kinds': list(KINDS)},
         **axes,
         'sample': sample,
-        'note': "only BVP carries the anomaly; ACC stays the subject's clean signal",
+        'note': "anomalies are injected into BVP only",
         'backs': 'report Sec. 4.1 (illustrative)',
     })
     write_yaml(report_dir / 'signals_reconstructed.yaml', {
         'shows': f"The same {len(KINDS)} windows with the {args.model} autoencoder's "
                  f"reconstruction (denormalized to raw BVP units) overlaid on the input: "
-                 f"the conditioned autoencoder tracks clean rhythm and departs on "
-                 f"integrity/rhythm anomalies.",
+                 f"the autoencoder tracks clean rhythm and departs on integrity/rhythm "
+                 f"anomalies.",
         'rows': {'order': 'top to bottom', 'kinds': list(KINDS)},
         **axes,
         'sample': sample,

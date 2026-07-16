@@ -22,10 +22,7 @@ MIXED_SUBDIR = 'mixed-signals'              # realistic ~50% mix: S*/ (bvp + bin
 MIXED_FEATURE_SUBDIR = 'mixed-features'     # features windowed from mixed-signals
 CLEAN_FEATURE_SUBDIR = 'clean-features'     # features windowed from clean-signals (all-normal)
 NORM_PARAMS_FILE = 'norm-params.npy'
-STATIC_NORM_PARAMS_FILE = 'static_norm_params.npy'
-CONTEXT_NORM_PARAMS_FILE = 'context_norm_params.npy'
 FEATURE_STATS_FILE = 'feature_stats.npy'
-CONTEXT_FILE = 'context.npy'
 
 BVP_RATE = 64
 ACC_RATE = 32
@@ -40,16 +37,6 @@ ANOMALY_KINDS = ('blowup', 'noise', 'tachy', 'brady', 'afib')
 N_FEATURES = 17
 EPS = 1e-8
 
-# Conditioning vector for the autoencoders: z-scored demographics (static) + a causal
-# activity context (trailing-CONTEXT_SECONDS mean/std of the normalized ACC magnitude).
-# The context lets the decoder expect activity-appropriate rhythm (a fast pulse is normal
-# under high ACC, anomalous at rest). Warm-up (<CONTEXT_SECONDS of history) expands over
-# whatever is available — all subjects start at rest, so that's the at-rest average.
-CONTEXT_SECONDS = 120
-N_STATIC = 6
-N_CONTEXT = 2
-N_COND = N_STATIC + N_CONTEXT
-
 
 class DatasetUnavailibleError(FileNotFoundError):
     def __init__(self, data_dir: str | Path):
@@ -60,19 +47,6 @@ class DatasetUnavailibleError(FileNotFoundError):
 def get_sorted_paths(dataset_dir: Path) -> list[Path]:
     dir_list = [d for d in dataset_dir.glob('S*') if d.is_dir() and d.name[1:].isdigit()]
     return sorted(dir_list, key=lambda d: int(d.name[1:]))
-
-def user_description_vector(quest: dict) -> np.ndarray:
-    """Raw 6-dim demographics vector. Standardized globally in Stage 1."""
-    gender_raw = quest.get('Gender', 'm').strip().lower()
-    gender = 1.0 if gender_raw == 'f' else 0.0
-    return np.array([
-        gender,
-        float(quest.get('AGE', 30)),
-        float(quest.get('HEIGHT', 150)),
-        float(quest.get('WEIGHT', 70)),
-        float(quest.get('SKIN', 3)),
-        float(quest.get('SPORT', 3)),
-    ], dtype=np.float32)
 
 
 # ---------------------------------------------------------------------------
@@ -95,18 +69,16 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
     """Extract raw BVP (64 Hz) and ACC magnitude (32 Hz) per subject.
 
     BVP and ACC are stored raw (un-normalized, different lengths) so anomaly
-    injection and load-time normalization can work from a single source. Global
-    BVP/ACC mean/std (size-weighted across subjects) go to norm-params.npy; the
-    6-dim demographics vector is z-scored across subjects (params in
-    static_norm_params.npy) and stored already-normalized as static.npy.
+    injection and load-time normalization can work from a single source. The global
+    BVP mean/std (size-weighted across subjects) goes to norm-params.npy. ACC is
+    stored for feature extraction only; it is not fed to any model, so it needs no
+    normalization params.
     """
     subjects_dir.mkdir(parents=True, exist_ok=True)
 
     subject_raw_dirs = get_sorted_paths(raw_dir)
 
     bvp_stats: list[tuple[int, float, float]] = []
-    acc_stats: list[tuple[int, float, float]] = []
-    statics: dict[str, np.ndarray] = {}
     processed = []
 
     for subject_raw_dir in subject_raw_dirs:
@@ -126,9 +98,6 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
         np.save(save_dir / 'acc.npy', acc)
 
         bvp_stats.append((len(bvp), float(bvp.mean()), float(bvp.std())))
-        acc_stats.append((len(acc), float(acc.mean()), float(acc.std())))
-
-        statics[subject_dir_name] = user_description_vector(raw['questionnaire'])
         processed.append(subject_dir_name)
 
         print(f"  {subject_dir_name}: BVP {len(bvp)} samples @ {BVP_RATE} Hz, ACC {len(acc)} samples @ {ACC_RATE} Hz")
@@ -137,62 +106,11 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
         return []
 
     bvp_mean, bvp_std = weighted_mean_std(bvp_stats)
-    acc_mean, acc_std = weighted_mean_std(acc_stats)
     np.save(subjects_dir / NORM_PARAMS_FILE,
-            np.array([[bvp_mean, bvp_std], [acc_mean, acc_std]], dtype=np.float32))
+            np.array([bvp_mean, bvp_std], dtype=np.float32))
 
-    # Context normalization params: the activity context is the trailing mean/std of
-    # the raw ACC magnitude, so normalizing it reproduces the old "normalize ACC, then
-    # take trailing stats" exactly — the mean dim shifts by acc_mean and both dims
-    # scale by acc_std. Stored separately (redundant with norm-params) so the context
-    # path has self-contained params to apply at load time.
-    ctx_mean = np.array([acc_mean, 0.0], dtype=np.float32)
-    ctx_std = np.array([acc_std + EPS, acc_std + EPS], dtype=np.float32)
-    np.save(subjects_dir / CONTEXT_NORM_PARAMS_FILE,
-            np.stack([ctx_mean, ctx_std]).astype(np.float32))
-
-    all_static = np.stack([statics[d] for d in processed])
-    static_mean = all_static.mean(axis=0).astype(np.float32)
-    static_std = (all_static.std(axis=0) + EPS).astype(np.float32)
-    np.save(subjects_dir / STATIC_NORM_PARAMS_FILE,
-            np.stack([static_mean, static_std]).astype(np.float32))
-    for subject_id in processed:
-        norm_static = ((statics[subject_id] - static_mean) / static_std).astype(np.float32)
-        np.save(subjects_dir / subject_id / 'static.npy', norm_static)
-
-    print(f"  Global BVP/ACC mean/std saved to {subjects_dir / NORM_PARAMS_FILE}")
-    print(f"  Static mean/std saved to {subjects_dir / STATIC_NORM_PARAMS_FILE}")
-    print(f"  Context norm params saved to {subjects_dir / CONTEXT_NORM_PARAMS_FILE}")
+    print(f"  Global BVP mean/std saved to {subjects_dir / NORM_PARAMS_FILE}")
     return processed
-
-
-def build_context_pass(subjects_dir: Path):
-    """Precompute each subject's per-window activity context on the non-overlapping
-    8-second grid -> ``S*/context.npy`` (raw, un-normalized; consumers normalize at
-    load with ``context_norm_params.npy``).
-
-    The precomputed counterpart of the at-load context in ``window_cond_vectors``, for
-    the no-overlap case only: consumed by ``conditional_windows`` and exported by
-    ``scripts/system/export_subject_data.py`` so the phone can store context per window.
-    The shifted ``ml.loading.subject_windows`` path samples context at arbitrary window
-    ends, so it recomputes instead."""
-    # Self-heal context norm params for datasets whose Stage 1 predates them.
-    if not (subjects_dir / CONTEXT_NORM_PARAMS_FILE).exists():
-        _, _, acc_mean, acc_std = load_norm_params(subjects_dir)   # acc_std already + EPS
-        ctx_mean = np.array([acc_mean, 0.0], dtype=np.float32)
-        ctx_std = np.array([acc_std, acc_std], dtype=np.float32)
-        np.save(subjects_dir / CONTEXT_NORM_PARAMS_FILE,
-                np.stack([ctx_mean, ctx_std]).astype(np.float32))
-
-    for subject_dir in get_sorted_paths(subjects_dir):
-        sid = subject_dir.name
-        raw_acc = stacked_signal(subjects_dir, sid)[:, 1]
-        count = max(0, (len(raw_acc) - BVP_WINDOW) // BVP_WINDOW + 1)
-        ctx_mean, ctx_std = causal_rolling_mean_std(raw_acc, CONTEXT_SECONDS * BVP_RATE)
-        ends = np.clip(np.arange(count) * BVP_WINDOW + BVP_WINDOW - 1, 0, len(raw_acc) - 1)
-        ctx = np.stack([ctx_mean[ends], ctx_std[ends]], axis=1).astype(np.float32)
-        np.save(subject_dir / CONTEXT_FILE, ctx)
-        print(f"  {sid}: {count} context windows")
 
 
 # ---------------------------------------------------------------------------
@@ -384,8 +302,9 @@ def build_feature_dataset(signal_dir: Path, subjects_dir: Path, feature_dir: Pat
     """Window BVP and raw ACC into non-overlapping 8-second windows and extract features.
 
     BVP comes from ``signal_dir`` (raw, un-normalized): mixed-signals for the training
-    set, or clean-signals for the anomaly-free export set. ACC comes from clean-signals
-    (raw magnitude, 32 Hz). Per-window labels are read from ``signal_dir/S*/labels.npy``
+    set, or clean-signals for the anomaly-free export set. ACC comes from
+    ``subjects_dir`` (clean-signals; raw magnitude, 32 Hz) — the anomalies are injected
+    into BVP only. Per-window labels are read from ``signal_dir/S*/labels.npy``
     when present (mixed anomalies are window-aligned, so each window is fully clean or
     fully anomalous); the clean signals carry no labels file, so every window is normal
     (label 0). Features are stored per subject under S*/ raw (un-normalized), mirroring
@@ -451,20 +370,15 @@ def build_feature_dataset(signal_dir: Path, subjects_dir: Path, feature_dir: Pat
 # Load-time helpers (normalization params + raw signal assembly)
 # ---------------------------------------------------------------------------
 
-def load_norm_params(subjects_dir: Path) -> tuple[float, float, float, float]:
-    """Global BVP/ACC (mean, std) from Stage 1 as (bvp_mean, bvp_std, acc_mean,
-    acc_std), guarded against a zero std."""
+def load_norm_params(subjects_dir: Path) -> tuple[float, float]:
+    """Global BVP (mean, std) from Stage 1, guarded against a zero std."""
     params = np.load(subjects_dir / NORM_PARAMS_FILE)
-    bvp_mean, bvp_std = float(params[0][0]), float(params[0][1])
-    acc_mean, acc_std = float(params[1][0]), float(params[1][1])
-    return bvp_mean, bvp_std + EPS, acc_mean, acc_std + EPS
+    return float(params[0]), float(params[1]) + EPS
 
 
 def norm_stats(subjects_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    bvp_mean, bvp_std, acc_mean, acc_std = load_norm_params(subjects_dir)
-    mean = np.array([bvp_mean, acc_mean], dtype=np.float32)
-    std  = np.array([bvp_std, acc_std], dtype=np.float32)
-    return mean, std
+    bvp_mean, bvp_std = load_norm_params(subjects_dir)
+    return np.array([bvp_mean], dtype=np.float32), np.array([bvp_std], dtype=np.float32)
 
 
 def load_feature_stats(feature_dir: Path) -> tuple[np.ndarray, np.ndarray]:
@@ -472,86 +386,12 @@ def load_feature_stats(feature_dir: Path) -> tuple[np.ndarray, np.ndarray]:
     return stats[0].astype(np.float32), stats[1].astype(np.float32)
 
 
-def load_context_norm_params(subjects_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    params = np.load(subjects_dir / CONTEXT_NORM_PARAMS_FILE)
-    return params[0].astype(np.float32), params[1].astype(np.float32)
+def load_signal(signal_dir: Path, sid: str) -> np.ndarray:
+    """Raw, un-normalized ``(T, 1)`` BVP for a subject, read from ``signal_dir`` —
+    clean-signals, mixed-signals or a per-kind anomalous-signals directory."""
+    bvp = np.load(signal_dir / sid / 'bvp.npy').astype(np.float32)
+    return bvp.reshape(-1, 1)
 
 
-def load_static_norm_params(subjects_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    params = np.load(subjects_dir / STATIC_NORM_PARAMS_FILE)
-    return params[0].astype(np.float32), params[1].astype(np.float32)
-
-
-def load_static_raw(subjects_dir: Path, sid: str) -> np.ndarray:
-    """``static.npy`` is stored z-scored (Stage 1); the model owns cond normalization
-    now, so de-normalize back to raw for the load path."""
-    norm = np.load(subjects_dir / sid / 'static.npy').astype(np.float32)
-    mean, std = load_static_norm_params(subjects_dir)
-    return (norm * std + mean).astype(np.float32)
-
-
-def _interp_acc(acc: np.ndarray, target_len: int) -> np.ndarray:
-    """Resample ACC (32 Hz) to the BVP sample count (64 Hz)."""
-    return np.interp(
-        np.linspace(0, 1, target_len),
-        np.linspace(0, 1, len(acc)),
-        acc,
-    ).astype(np.float32)
-
-
-def stacked_signal(subjects_dir: Path, sid: str,
-                   anomalous_dir: Path | None = None) -> np.ndarray:
-    """Raw, un-normalized ``(T, 2)`` ``[BVP(64 Hz), ACC(interp to 64 Hz)]`` for a
-    subject. BVP is read from ``anomalous_dir`` when given, else clean-signals;
-    ACC always comes from clean-signals."""
-    bvp_src = anomalous_dir if anomalous_dir is not None else subjects_dir
-    bvp = np.load(bvp_src / sid / 'bvp.npy').astype(np.float32)
-    acc = np.load(subjects_dir / sid / 'acc.npy').astype(np.float32)
-    acc = _interp_acc(acc, len(bvp))
-    return np.stack([bvp, acc], axis=-1).astype(np.float32)
-
-
-def causal_rolling_mean_std(x: np.ndarray, win: int) -> tuple[np.ndarray, np.ndarray]:
-    """Per-sample trailing mean/std of ``x`` over the last ``win`` samples, expanding
-    over whatever history exists for the first ``win`` samples (causal, no look-ahead)."""
-    csum  = np.concatenate([[0.0], np.cumsum(x, dtype=np.float64)])
-    csum2 = np.concatenate([[0.0], np.cumsum(np.square(x, dtype=np.float64))])
-    idx = np.arange(1, len(x) + 1)
-    lo = np.maximum(0, idx - win)
-    count = idx - lo
-    mean = (csum[idx] - csum[lo]) / count
-    var  = np.maximum((csum2[idx] - csum2[lo]) / count - mean ** 2, 0.0)
-    return mean.astype(np.float32), np.sqrt(var).astype(np.float32)
-
-
-def window_cond_vectors(subjects_dir: Path, sid: str, raw_acc: np.ndarray,
-                        window_size: int, shift: int, count: int) -> np.ndarray:
-    """Per-window *raw* conditioning vectors ``(count, N_COND)``: the subject's
-    demographics repeated, concatenated with the causal activity context sampled at
-    each window's last sample.
-
-    Both parts are left un-normalized — the model z-scores the whole cond vector on its
-    own. The context is the trailing mean/std of the raw ACC magnitude; the same values
-    the on-device pipeline computes and feeds raw."""
-    static = load_static_raw(subjects_dir, sid)                             # (N_STATIC,) raw
-    ctx_mean, ctx_std = causal_rolling_mean_std(raw_acc, CONTEXT_SECONDS * BVP_RATE)
-    ends = np.clip(np.arange(count) * shift + window_size - 1, 0, len(raw_acc) - 1)
-    ctx_raw = np.stack([ctx_mean[ends], ctx_std[ends]], axis=1)              # (count, N_CONTEXT)
-    static_rep = np.broadcast_to(static, (count, len(static)))
-    return np.concatenate([static_rep, ctx_raw], axis=1).astype(np.float32)
-
-
-def conditional_windows(subjects_dir: Path, sid: str, window_size: int,
-                        anomalous_dir: Path | None = None) -> tuple[np.ndarray, np.ndarray]:
-    """Raw ``(T, 2)`` signal + per-window raw cond ``(n_windows, N_COND)`` for
-    non-overlapping windows — for distill_calibrate / distill_labels, which slice windows
-    manually rather than via tf.data. The model normalizes both on eval.
-
-    Reads the precomputed raw context (``context.npy``, on the same no-overlap grid)."""
-    raw = stacked_signal(subjects_dir, sid, anomalous_dir)
-    ctx_raw = np.load(subjects_dir / sid / CONTEXT_FILE).astype(np.float32)
-    count = min(len(ctx_raw), max(0, (len(raw) - window_size) // window_size + 1))
-    static = load_static_raw(subjects_dir, sid)
-    static_rep = np.broadcast_to(static, (count, len(static)))
-    cond = np.concatenate([static_rep, ctx_raw[:count]], axis=1).astype(np.float32)
-    return raw, cond
+def window_count(signal: np.ndarray, window_size: int) -> int:
+    return max(0, (len(signal) - window_size) // window_size + 1)

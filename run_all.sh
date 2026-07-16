@@ -128,11 +128,11 @@ step "personalization probe ($STUDENT from $AE)" \
 step "footprint table" "$RESULTS/footprint/footprint.csv" "${run[@]}" scripts.figures.footprint
 
 # --- 8. seed the database ---------------------------------------------------------
-# Always runs: idempotent, and --reset-weights re-points each model at the artifacts
-# just trained (weights are seeded once and then owned by aggregation, so without it a
-# re-run would keep serving the old snapshot).
+# Always runs: --reseed re-points each model at the artifacts just trained (weights are
+# seeded once and then owned by aggregation, so without it a re-run would keep serving
+# the old snapshot) and absorbs an architecture change that moved the fingerprint.
 step "seed database + object store" "" \
-    "${run[@]}" scripts.system.seed_db --assign-device --test-users --reset-weights
+    "${run[@]}" scripts.system.seed_db --assign-device --test-users --reseed
 
 # --- 9. integration verification over the real HTTP API (Sec. 5.1) ----------------
 # Needs the api + worker up. These mutate GlobalWeights (each round bakes a new snapshot),

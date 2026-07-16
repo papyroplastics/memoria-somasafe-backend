@@ -23,7 +23,7 @@ run-all: shared
 db-seed: shared
 	uv run -m scripts.system.seed_db --assign-device --test-users
 db-reseed: shared
-	uv run -m scripts.system.seed_db --assign-device --test-users --reset-weights
+	uv run -m scripts.system.seed_db --assign-device --test-users --reseed
 db-run:
 	podman compose up
 db-clean:
