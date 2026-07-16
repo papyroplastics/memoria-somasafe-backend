@@ -25,10 +25,8 @@ from pathlib import Path
 import numpy as np
 
 import tensorflow as tf
-from ml.preprocessing import (
-    CLEAN_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
-    get_sorted_paths, load_signal, window_count,
-)
+from ml.preprocessing import CLEAN_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR, get_sorted_paths
+from ml.loading import load_signal, window_count
 from ml.models.common import AutoencoderTrainer
 
 from . import dsp

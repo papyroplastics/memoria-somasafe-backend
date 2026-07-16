@@ -7,8 +7,8 @@ import tensorflow as tf
 
 from ..optimizers import Adam
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
-from ..preprocessing import CLEAN_SUBDIR, BVP_RATE, norm_stats
-from ..loading import batched, cached, subject_dirs, subject_windows
+from ..preprocessing import CLEAN_SUBDIR, BVP_RATE
+from ..loading import norm_stats, batched, cached, subject_dirs, subject_windows
 
 # Batches of a run's eval set fed to the int8 converter to fix its tensor scales.
 CALIBRATION_BATCHES = 150

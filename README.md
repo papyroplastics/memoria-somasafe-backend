@@ -231,19 +231,17 @@ and the training report/plot in `results/<model>/<loop>/`:
 ```bash
 uv run -m scripts.system.train feature-mlp                      # synthetic-anomaly classifier
 uv run -m scripts.system.train cnn-ae                           # conditional Conv1D autoencoder (focus)
-uv run -m scripts.system.train lstm-ae                          # conditional LSTM autoencoder
-uv run -m scripts.system.train gru-ae                           # conditional GRU autoencoder
 uv run -m scripts.system.train feature-mlp --loop federated     # simulated FedAvg
 uv run -m scripts.system.train feature-mlp --batch-size 32       # train at a larger batch (GPU-friendly)
 uv run -m scripts.system.train cnn-ae --eval-subjects 3          # hold out the last 3 subjects
 ```
 
-To produce **every** report result in one go — from an empty database and no exported
+to produce **every** report result in one go — from an empty database and no exported
 artifacts, with the services/api/worker already up — run `./run_all.sh` (or `make run-all`).
-It sequences training, figures, the distillation round-trip, seeding and the integration
+it sequences training, figures, the distillation round-trip, seeding and the integration
 harness in dependency order; it is resumable (each step is skipped when its output exists,
-`FORCE=1` redoes them) and tunable via the env vars at the top of the file. See
-[`PLOTS.md`](PLOTS.md) for what each step emits.
+`force=1` redoes them) and tunable via the env vars at the top of the file. see
+[`plots.md`](plots.md) for what each step emits.
 
 `--loop` selects the training loop (`normal` by default, or `federated`); `--epochs` tunes
 the normal loop while `--rounds` and `--local-epochs` tune the federated one's global rounds

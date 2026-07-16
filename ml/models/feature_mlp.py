@@ -5,7 +5,8 @@ import tensorflow as tf
 
 from ..layers import Dense, relu
 from .common import TrainableModel, Trainer
-from ..preprocessing import MIXED_FEATURE_SUBDIR, N_FEATURES, load_feature_stats
+from ..preprocessing import MIXED_FEATURE_SUBDIR, N_FEATURES
+from ..loading import load_feature_stats
 from ..optimizers import Adam
 
 

@@ -35,8 +35,6 @@ MAX_ANOMALY_WINDOWS = 30
 
 ANOMALY_KINDS = ('blowup', 'noise', 'tachy', 'brady', 'afib')
 N_FEATURES = 17
-EPS = 1e-8
-
 
 class DatasetUnavailibleError(FileNotFoundError):
     def __init__(self, data_dir: str | Path):
@@ -365,33 +363,3 @@ def build_feature_dataset(signal_dir: Path, subjects_dir: Path, feature_dir: Pat
     np.save(feature_dir / FEATURE_STATS_FILE, np.stack([mean, std]).astype(np.float32))
     print(f"Saved {total} windows ({anomalous} anomalous) to {feature_dir}")
 
-
-# ---------------------------------------------------------------------------
-# Load-time helpers (normalization params + raw signal assembly)
-# ---------------------------------------------------------------------------
-
-def load_norm_params(subjects_dir: Path) -> tuple[float, float]:
-    """Global BVP (mean, std) from Stage 1, guarded against a zero std."""
-    params = np.load(subjects_dir / NORM_PARAMS_FILE)
-    return float(params[0]), float(params[1]) + EPS
-
-
-def norm_stats(subjects_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    bvp_mean, bvp_std = load_norm_params(subjects_dir)
-    return np.array([bvp_mean], dtype=np.float32), np.array([bvp_std], dtype=np.float32)
-
-
-def load_feature_stats(feature_dir: Path) -> tuple[np.ndarray, np.ndarray]:
-    stats = np.load(feature_dir / FEATURE_STATS_FILE)
-    return stats[0].astype(np.float32), stats[1].astype(np.float32)
-
-
-def load_signal(signal_dir: Path, sid: str) -> np.ndarray:
-    """Raw, un-normalized ``(T, 1)`` BVP for a subject, read from ``signal_dir`` —
-    clean-signals, mixed-signals or a per-kind anomalous-signals directory."""
-    bvp = np.load(signal_dir / sid / 'bvp.npy').astype(np.float32)
-    return bvp.reshape(-1, 1)
-
-
-def window_count(signal: np.ndarray, window_size: int) -> int:
-    return max(0, (len(signal) - window_size) // window_size + 1)

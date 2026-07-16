@@ -13,10 +13,8 @@ from common.config import DATASETS_DIR, MODELS_DIR
 from ..common.scoring import eval_padded
 from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
-from ml.preprocessing import (
-    CLEAN_SUBDIR, ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_RATE,
-    get_sorted_paths, load_signal, window_count,
-)
+from ml.preprocessing import CLEAN_SUBDIR, ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_RATE, get_sorted_paths
+from ml.loading import load_signal, window_count
 from ml.saving import load_trainable_weights
 from ..common.reports import get_report_dir, write_yaml
 
