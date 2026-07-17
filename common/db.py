@@ -1,15 +1,9 @@
-"""SQLModel tables, plus the blob tables the gateway serves from.
+"""SQLModel tables for the gateway.
 
-Every blob the gateway hands out (model artifacts, firmware images, per-user
-quantization results) lives in its own table keyed by the row that owns it, so a
-handler locates one from the row it already loaded. They are split out rather
-than kept as columns because the owning rows are read constantly and the blobs
-almost never: aggregation loads GlobalWeights for its weights, /ota/versions
-lists Firmware rows, and neither should drag a .tflite along.
-
-Blobs are stored and served zstd-compressed; the client decompresses.
-Signatures in the DB cover the *raw* bytes, so compression happens after signing
-and the client verifies after decompressing.
+Model/quantization blobs live in their own tables keyed by the owning row, so a
+row read constantly (e.g. GlobalWeights) never drags a .tflite along; Blobs are
+stored and served zstd-compressed; DB signatures cover the *raw* bytes, so
+compression happens after signing and the client verifies after decompressing.
 """
 
 import uuid
@@ -17,6 +11,7 @@ from datetime import datetime, timezone
 from enum import Enum
 
 from sqlalchemy import DDL, JSON, BigInteger, Column, UniqueConstraint, event
+from sqlalchemy.orm import defer
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from common.config import DATABASE_URL
@@ -35,14 +30,10 @@ class JobStatus(str, Enum):
 
 
 class SubmissionType(str, Enum):
-    """How a model version's weight updates are uploaded and aggregated. Fixes
-    both the submission endpoint a client uses and the aggregation strategy the
-    worker applies. ``quantize`` also accepts submissions on the raw path (same
-    dense LE-float32 format, less backend work); ``raw`` does not accept the
-    quantize path. ``secure`` carries an incompatible body (masked ring elements,
-    not float32) and only aggregates inside a sealed ``SecureRound`` — it shares
-    nothing with the dense paths (see shared/docs/secure-aggregation.md). Future
-    formats (sparse, DP) likewise get their own endpoint."""
+    """How a version's weight updates are uploaded and aggregated. ``raw`` and
+    ``quantize`` share a dense LE-float32 body (``quantize`` also accepts the raw
+    path); ``secure`` carries masked ring elements aggregated only inside a sealed
+    ``SecureRound`` (see shared/docs/secure-aggregation.md)."""
 
     raw = "raw"
     quantize = "quantize"
@@ -90,11 +81,9 @@ class User(IntPKModel, table=True):
 
 
 class AuthSession(SQLModel, table=True):
-    """A stateful login session's long-lived half. Only the refresh token lives
-    here (opaque random string, only its sha256 stored, so a row can be revoked
-    to invalidate refresh at once); the short-lived access token is validated
-    against Redis instead (api.lib.session) — a Postgres row per request would be
-    pure overhead for a token that expires in minutes anyway."""
+    """A login session's long-lived half: only the refresh token (opaque, stored
+    as sha256 so a row can be revoked to kill refresh at once). The short-lived
+    access token is validated against Redis instead (api.lib.session)."""
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     user_id: int = Field(foreign_key="user.id", index=True)
@@ -105,10 +94,9 @@ class AuthSession(SQLModel, table=True):
 
 
 class Device(SQLModel, table=True):
-    """A physical SomaSafe device, provisioned with a factory ECDSA P-256 key.
-    Seeded ownerless by scripts.db_seed from a factory NVS image; ``owner_id`` is
-    set once a user attests ownership (see api.routes.device). ``last_attested_at``
-    gates ownership changes to once per DEVICE_ATTEST_COOLDOWN_SECONDS."""
+    """A physical SomaSafe device with its factory ECDSA P-256 key. Seeded
+    ownerless; ``owner_id`` is set once a user attests ownership (api.routes.device)
+    and ``last_attested_at`` gates changes to once per DEVICE_ATTEST_COOLDOWN_SECONDS."""
 
     serial: str = Field(primary_key=True)
     public_key: bytes          # 65-byte uncompressed P-256 point (0x04 || X || Y)
@@ -128,14 +116,9 @@ class ModelDefinition(SQLModel, table=True):
 
 
 class ModelVersion(IntPKModel, table=True):
-    """One published version of a model. ``version`` is the hand-bumped integer
-    from the code registry (ml.model_list); ``fingerprint`` (Trainer.arch_fingerprint,
-    a hash of the trainable-variable layout plus the baked normalization params) is
-    the tripwire the seed script checks it against — a moved fingerprint without a
-    version bump aborts the seed. Only the newest version per model accepts weight
-    submissions; older versions are frozen but still served. ``min_app_version`` is
-    the oldest app that can use the version; ``contract_version`` fixes how the
-    device feeds the model (norm_params layout + I/O signatures, see ml.payload)."""
+    """One published version of a model. ``version`` is the hand-bumped registry
+    integer, ``fingerprint`` its arch tripwire; only the newest version per model
+    accepts submissions. ``contract_version`` fixes how the device feeds it."""
 
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version: int
@@ -151,60 +134,36 @@ class ModelVersion(IntPKModel, table=True):
 
 
 class GlobalWeights(IntPKModel, table=True):
-    """A snapshot of a model version's global weights. The trainable/quantized
-    serving artifacts baked from these weights are WeightsArtifact rows keyed by
-    this one, written in the same transaction; only their signature is kept here.
-    Seeded from the trained tflite files and appended to by aggregation, which
-    re-exports both artifacts (and signs the quantized one, see ml.payload) each
-    round. The active weights of a version are its latest **valid** row;
-    ``created_at`` is the weight version clients compare against to decide when
-    to re-pull. ``valid`` doubles as a hand-operated kill switch (flip it to roll
-    back a bad round — the previous row's artifacts come back with it) and is set
-    to false by aggregation itself when an artifact export fails.
-    ``mse_threshold`` is the allowed submission error computed by that round
-    (None on seeded rows, which skips the check in weight validation)."""
+    """A snapshot of a version's global weights, its serving artifacts kept as
+    keyed WeightsArtifact rows. The active weights are the latest **valid** row
+    (``created_at`` gates client re-pulls); ``valid`` is also a kill switch."""
 
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version_id: int = Field(foreign_key="modelversion.id", index=True)
     weights: bytes             # packed float32 (np.float32 .tobytes())
-    weight_count: int
     valid: bool = True
-    mse_threshold: float | None = None
-    artifact_signature: bytes | None = None   # DER ECDSA over the canonical model bytes
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
 
 class WeightsArtifact(SQLModel, table=True):
-    """One serving artifact of a GlobalWeights snapshot. Row existence *is* the
-    presence check the download route makes — a snapshot may legitimately carry a
-    trainable artifact and no quantized one (the seed skips the quantized artifact
-    for a model with no int8 export), so which artifacts exist is data rather than
-    something a handler has to assume."""
+    """One serving artifact of a snapshot; row existence *is* the download route's
+    presence check (a snapshot may carry a trainable and no quantized artifact).
+    ``signature`` is the server's ECDSA over its canonical model bytes (ml.payload)."""
 
     weights_id: int = Field(foreign_key="globalweights.id", primary_key=True,
                             ondelete="CASCADE")
     artifact: Artifact = Field(primary_key=True)
     data: bytes                # zstd-compressed .tflite, served as stored
+    signature: bytes           # DER ECDSA over the canonical model bytes
 
 
 class ClientDeltaSubmission(IntPKModel, table=True):
-    """A client-uploaded weight *delta* — Δ = local_weights − global_weights, the
-    change the client's local training produced against the snapshot it trained
-    from. Persisted indefinitely: besides feeding quantization, these rows are the
-    substrate for federated aggregation (worker.tasks.federated_aggregation), which
-    averages the deltas and adds the mean onto the reference global weights.
-    ``base_weights_id`` is the GlobalWeights snapshot the delta is relative to (and
-    the client trained from); ``version_id`` (its model version) is denormalized off
-    it so aggregation can filter without a join and never mixes incompatible updates.
-    ``valid`` is the cached weight-validation verdict — None until validated; set by
-    the quantize/validate tasks, and by aggregation for rows neither got to. The
-    verdict is never surfaced to the client (a Byzantine client should not learn its
-    update was filtered)."""
+    """A client-uploaded weight *delta* (Δ = local − global). ``base_weights_id``
+    is the GlobalWeights it trained from — aggregation matches on it so only
+    same-base deltas mix; ``valid`` is the cached structural-check verdict."""
 
     user_id: int = Field(foreign_key="user.id", index=True)
-    model_key: str
     base_weights_id: int = Field(foreign_key="globalweights.id", index=True)
-    version_id: int = Field(foreign_key="modelversion.id", index=True)
     deltas: bytes              # packed float32 delta (np.float32 .tobytes())
     weight_count: int
     valid: bool | None = None
@@ -212,14 +171,9 @@ class ClientDeltaSubmission(IntPKModel, table=True):
 
 
 class SecureRound(IntPKModel, table=True):
-    """One secure-aggregation round for a model version. Created ``open`` by the
-    first client to join (pinned to the version's active ``base_weights`` — the W
-    every member trains against), sealed once the cohort is fixed, then consumed
-    by ``worker.tasks.secure_aggregation``. ``member_count`` (n) and ``scale`` (the
-    fixed-point S = floor(2^31 / (n * clip_bound))) are null until seal, when the
-    roster size is known. Only the newest version aggregates; ``clip_bound`` (B)
-    bounds each client's per-coordinate influence and fixes the quantization range
-    (see shared/docs/secure-aggregation.md)."""
+    """One secure-aggregation round, pinned to the ``base_weights`` every member
+    trains against. ``member_count`` and ``scale`` are null until seal; ``clip_bound``
+    bounds per-coordinate influence (see shared/docs/secure-aggregation.md)."""
 
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version_id: int = Field(foreign_key="modelversion.id", index=True)
@@ -234,13 +188,9 @@ class SecureRound(IntPKModel, table=True):
 
 
 class SecureRoundMember(SQLModel, table=True):
-    """A client's seat in a round. The composite (round_id, user_id) primary key is
-    the structural one-submission-per-client-per-round guard the protocol requires
-    (a second masked vector under the same masks would leak the difference of two
-    updates — reject it, don't merely rate-limit). ``ka_public_key`` is snapshotted
-    at join, never joined to a mutable key table, so a client changing keys mid-round
-    can't desync the roster the masks are derived against. ``masked`` is the client's
-    submitted vector — m little-endian uint32 ring elements — set exactly once."""
+    """A client's seat in a round; the (round_id, user_id) PK enforces one
+    submission per client (a second masked vector would leak a difference of two).
+    ``masked`` is the submitted vector (m LE uint32 ring elements), set once."""
 
     round_id: int = Field(foreign_key="secureround.id", primary_key=True)
     user_id: int = Field(foreign_key="user.id", primary_key=True)
@@ -250,11 +200,9 @@ class SecureRoundMember(SQLModel, table=True):
 
 
 class QuantizationJob(SQLModel, table=True):
-    """Tracks one quantization request end to end. The int8 .tflite result is a
-    QuantizationResult row keyed by this one; ``signature`` is the server's ECDSA
-    over its canonical model bytes (ml.payload). The result row is dropped and
-    the signature nulled by the cleanup sweep once served (after a grace period)
-    or once expired (unclaimed)."""
+    """Tracks one quantization request end to end; the int8 .tflite is a keyed
+    QuantizationResult row and ``signature`` the server's ECDSA over it. Both are
+    dropped by the cleanup sweep once served (after a grace) or expired."""
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     submission_id: int = Field(foreign_key="clientdeltasubmission.id")
@@ -279,37 +227,22 @@ class QuantizationResult(SQLModel, table=True):
 
 
 class Firmware(IntPKModel, table=True):
-    """A published firmware build, seeded from a `shared/gen/firmware/{version}`
-    export (`firmware/scripts/export_image.py`) and served by the /ota routes.
-    The image itself is a FirmwareImage row keyed by this one; only its ``size``
-    (raw image bytes) and ``signature`` are kept here, so /ota/versions can list
-    builds without reading any images. ``interface_version`` is the BLE contract
-    an app build must share to talk to it; ``supported_contracts`` are the model
-    contract versions it can consume; ``signature`` (never null — an unverifiable
-    image is useless to the device) is the server's ECDSA over the raw image
-    bytes, verified by the device against its factory srv_pub before booting the
-    image."""
+    """A published firmware build served by the /ota routes. ``interface_version``
+    is the BLE contract an app must share, ``supported_contracts`` the model
+    contracts it consumes, ``signature`` the ECDSA over the raw image (``data``)."""
 
     version: str = Field(unique=True, index=True)  # arbitrary <=32-byte build string
     interface_version: int = Field(index=True)
     supported_contracts: list[int] = Field(sa_column=Column(JSON))
     size: int                                      # raw (uncompressed) image size
     signature: bytes                               # DER ECDSA over the raw image
+    data: bytes                                    # zstd-compressed raw image, served as stored
     created_at: datetime = Field(default_factory=utcnow)
-
-
-class FirmwareImage(SQLModel, table=True):
-    """A published build's image. Deleting the Firmware row takes this with it,
-    which is what re-publishing a changed build under an existing version does."""
-
-    firmware_id: int = Field(foreign_key="firmware.id", primary_key=True,
-                             ondelete="CASCADE")
-    data: bytes                # zstd-compressed raw image, served as stored
 
 
 # The blob columns already hold zstd output, so TOAST's compression pass can only
 # burn CPU failing to shrink them: keep them out of line and uncompressed.
-for _blob_model in (WeightsArtifact, QuantizationResult, FirmwareImage):
+for _blob_model in (WeightsArtifact, QuantizationResult, Firmware):
     event.listen(
         _blob_model.__table__, "after_create",  # type: ignore[attr-defined]
         DDL(f"ALTER TABLE {_blob_model.__tablename__} "
@@ -384,11 +317,13 @@ def get_open_round(session: Session, key: str) -> "SecureRound | None":
 
 
 def list_firmware(session: Session, interface_version: int) -> list[Firmware]:
-    """Every published firmware build for a BLE interface version, newest first."""
+    """Every published firmware build for a BLE interface version, newest first.
+    The image blob is deferred — the listing never reads it."""
     return list(session.exec(
         select(Firmware)
         .where(Firmware.interface_version == interface_version)
         .order_by(Firmware.created_at.desc())  # type: ignore[attr-defined]
+        .options(defer(Firmware.data))  # type: ignore[arg-type]
     ).all())
 
 

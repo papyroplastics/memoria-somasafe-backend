@@ -44,7 +44,7 @@ common/    Shared, TensorFlow-free infra imported by api + worker: env-driven co
            both sides address (celery_tasks.py), and the SQLModel tables (User, AuthSession,
            Device, ModelDefinition, ModelVersion, GlobalWeights, WeightsArtifact,
            ClientDeltaSubmission, QuantizationJob, QuantizationResult, SecureRound,
-           SecureRoundMember, Firmware, FirmwareImage).
+           SecureRoundMember, Firmware).
 api/       FastAPI gateway (no TensorFlow): routers for auth/device/model (routes/),
            rate-limiting + attestation-challenge helpers (lib/), and a pytest suite
            mirroring the routers (test/).
@@ -62,8 +62,8 @@ ml/        TensorFlow models + training, imported by worker + scripts, never by 
            can't execute.
 worker/    Celery task layer (TensorFlow loads at startup): celery_app.py wires the
            broker + beat schedule; tasks.py holds quantize_submission,
-           validate_submission, federated_aggregation and cleanup_results; utils/ has
-           the TF-free validation/outlier-filtering helpers tasks.py calls into.
+           validate_submission, federated_aggregation and cleanup_results (plus the
+           structural malformed_reason check they share).
 scripts/   CLI entry points, grouped into subpackages by how each relates to the system.
            common/ holds their shared, model-agnostic helpers (api, litert, scoring, dsp,
            reports, plots, secure + the generated dataset_pb2); scripts/__init__.py
@@ -396,15 +396,15 @@ and aggregation reconstructs from; the client must re-download the latest weight
 Request flow for a `quantize`-typed model:
 
 1. `POST /model/submit/quantize/{key}/{weights_id}` stores the delta as a
-   `ClientDeltaSubmission` (tagged with the submitting `user_id`, the `base_weights_id` and its
-   `version_id`), creates a `QuantizationJob` (`pending`), enqueues `quantize_submission`
-   (the job id is set as the Celery task id), and returns `202` with the `job_id`.
-2. The worker runs the job: malformedness fails it, but the aggregation-usability verdict
-   (MSE gate) is cached silently on the submission and the artifact is produced either
-   way — a Byzantine client never learns its update was filtered. The int8 `.tflite` is
-   written (zstd-compressed) to the job row along with an ECDSA signature over the canonical
-   model bytes (`ml/payload.py`, spec in `shared/docs/model-signing.md`; the signature covers
-   the raw model, so it is signed before compression).
+   `ClientDeltaSubmission` (tagged with the submitting `user_id` and the `base_weights_id` —
+   its model and version are reachable through that snapshot), creates a `QuantizationJob`
+   (`pending`), enqueues `quantize_submission` (the job id is set as the Celery task id), and
+   returns `202` with the `job_id`.
+2. The worker runs the job: a malformed delta fails it (and caches `valid = false` on the
+   submission); otherwise `valid = true` is cached and the artifact is produced. The int8
+   `.tflite` is written (zstd-compressed) to the job row along with an ECDSA signature over the
+   canonical model bytes (`ml/payload.py`, spec in `shared/docs/model-signing.md`; the signature
+   covers the raw model, so it is signed before compression).
 3. The client polls `GET /model/quantize/result/{job_id}`. The endpoint authorizes and
    answers from the DB row first (the source of truth for the verdict), and only when the
    job is still `pending`/`running` does it **long-poll** — blocking on the Celery task (the
@@ -435,28 +435,23 @@ aggregation round per initialized model:
 0. **Strategy:** chosen by the latest version's `submission_type`. `raw` and `quantize` are
    byte-identical dense vectors and share the aggregation path below; sparse/DP formats will
    branch here. A model whose type has no strategy is skipped.
-1. **Window:** submissions created after the model's newest `GlobalWeights` snapshot
-   (valid or not, so updates consumed by a later-invalidated round are never re-aggregated),
-   filtered to the latest `ModelVersion` — frozen versions never aggregate. One update per
-   client: only each user's latest submission in the window counts.
-2. **Validation** (`worker/utils/weight_validation.py`): weight count must match the
-   model's `total_weight_size`, the buffer must be finite, and — once a previous round
-   has set an `mse_threshold` — the delta's magnitude (mean square, which equals its MSE
-   from the active global weights) must stay under it. Validation runs once per submission:
-   the quantize/validate tasks perform it as uploads arrive and cache the verdict on
-   `ClientDeltaSubmission.valid` (never surfacing it to the client); aggregation trusts that
-   verdict and validates only rows neither task got to.
+1. **Window:** the deltas whose `base_weights_id` is the version's **active** (newest valid)
+   `GlobalWeights` snapshot. Matching on the base id guarantees every accepted delta was
+   trained against the same weights and never mixes across rounds or frozen versions. One
+   update per client: only each user's latest submission counts.
+2. **Validation:** a structural check (`malformed_reason` in `worker/tasks.py`) — the weight
+   count must match the model's `total_weight_size` and the buffer must be finite. It runs
+   once per submission: the quantize/validate tasks perform it as uploads arrive and cache the
+   verdict on `ClientDeltaSubmission.valid` (never surfacing it to the client); aggregation
+   trusts that verdict and validates only rows neither task got to.
 3. **Round threshold:** fewer than `FED_MIN_SUBMISSIONS` (default 1) valid submissions skips
    the model until the next round.
-4. **Outlier filter:** each submission's L2 distance from the element-wise mean is z-scored;
-   rows above the cutoff are dropped (needs ≥ 3 submissions to be meaningful, otherwise all
-   are kept).
-5. **Aggregation:** `ml.training.trimmed_mean` reduces the accepted deltas to one update,
+4. **Aggregation:** `ml.training.trimmed_mean` reduces the accepted deltas to one update,
    dropping the `FED_TRIM_RATIO` fraction (default 0.1) of smallest and largest values at
-   each coordinate before averaging the rest; the result is added onto the reference global
-   weights (identical to aggregating absolute weights when every client shares a base). The
-   result is stored as a new `GlobalWeights` row along with the next round's
-   `mse_threshold` (a margin over the worst deviation accepted this round).
+   each coordinate before averaging the rest — this is the round's only Byzantine defense, so
+   a handful of gross outliers can't drag the result. The update is added onto the reference
+   global weights (identical to aggregating absolute weights when every client shares a base)
+   and stored as a new `GlobalWeights` row.
 
    Weighting by dataset size — the "Avg" in textbook FedAvg, and what the simulated
    `federated_loop` does with its known-honest clients — is deliberately **not** what the
@@ -548,9 +543,9 @@ to be frozen before anyone masks:
    models (it has no strategy for them); a secure round only runs when its task is queued.
 
 **What secure aggregation costs.** The server never sees an individual update, so the
-per-submission MSE gate, the z-scored outlier filter, the trimmed mean and the per-client
-validity verdict are all **structurally impossible** here — every one of them needs to look
-at updates individually. This is inherent to the scheme, not a gap. Only
+trimmed mean and the per-client validity verdict are both **structurally impossible**
+here — each needs to look at updates individually. This is inherent to the scheme, not a
+gap. Only
 client-side clipping to `B` and an aggregate-level sanity check (finite, mean delta within
 the clip bound) remain. It buys privacy against an honest-but-curious server, not
 robustness.
@@ -598,15 +593,16 @@ trusts what the seed wrote to the DB.
   (e.g. `queue_aggregation`/`fed_client` block on the aggregation summary instead of polling
   `GlobalWeights`); results expire after `RESULT_TTL_SECONDS`.
 - **Redis** is the Celery broker.
-- **Every served blob lives in PostgreSQL too**, each in its own table keyed by the row that
-  owns it: `WeightsArtifact` (a snapshot's trainable/quantized `.tflite`, keyed by
-  `GlobalWeights` + artifact), `FirmwareImage` (keyed by `Firmware`) and `QuantizationResult`
-  (keyed by `QuantizationJob`). A handler locates a blob from the row it already loaded, and
-  row existence *is* the presence check — a snapshot may legitimately have a trainable artifact
-  and no quantized one. They are separate tables rather than columns because the owning rows are
-  read constantly and the blobs almost never: aggregation loads `GlobalWeights` for its weights
-  and `/ota/versions` lists `Firmware` rows, neither of which should drag a `.tflite` along.
-  Blob columns are `STORAGE EXTERNAL` since zstd output is not worth a TOAST compression pass.
+- **Every served blob lives in PostgreSQL too.** Model blobs sit in their own table keyed by
+  the row that owns it: `WeightsArtifact` (a snapshot's trainable/quantized `.tflite`, keyed by
+  `GlobalWeights` + artifact) and `QuantizationResult` (keyed by `QuantizationJob`). A handler
+  locates a blob from the row it already loaded, and row existence *is* the presence check — a
+  snapshot may legitimately have a trainable artifact and no quantized one. They are separate
+  tables rather than columns because the owning rows are read constantly and the blobs almost
+  never: aggregation loads `GlobalWeights` for its weights and should not drag a `.tflite`
+  along. Firmware keeps its image inline in the `Firmware` row but `/ota/versions` defers the
+  `data` column (`list_firmware`), so the listing stays blob-free. Blob columns are
+  `STORAGE EXTERNAL` since zstd output is not worth a TOAST compression pass.
 - **Why not object storage.** This replaced a local-disk design (`serve/` tree) once the worker
   stopped being assumed to share a filesystem with the API — Celery is a distributed-computing
   tool, so pretending its workers and the gateway share a mount was wrong from the start. The
@@ -715,9 +711,9 @@ interface yields `[]`); `GET /ota/download/{interface}/{version}` streams the ra
 with the server's ECDSA signature over it in `X-Firmware-Signature`, which the app
 forwards to the device for verification against its factory `srv_pub`.
 
-Images live in `FirmwareImage` rows (zstd-compressed, keyed by the `Firmware` row), like the
-model artifacts; the `Firmware` row itself keeps only the raw `size` and the mandatory
-`signature`, so listing versions never reads an image.
+The zstd-compressed image is the `Firmware` row's own `data` column, alongside the raw `size`
+and the mandatory `signature`; `list_firmware` defers `data`, so listing versions never reads
+an image.
 `scripts/system/seed_db.py` publishes them: it scans a directory of exports (`--firmware-dir`,
 default `shared/gen/firmware/`, populated by `make export-image` in `firmware/`), signs
 each image with `SERVER_PRIVATE_KEY_FILE` (a build it can't sign is skipped — the signature

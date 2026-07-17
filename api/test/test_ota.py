@@ -13,7 +13,7 @@ import pytest
 from sqlmodel import select
 
 from common.compression import compress, decompress
-from common.db import Firmware, FirmwareImage, Session, engine, utcnow
+from common.db import Firmware, Session, engine, utcnow
 
 SIGNATURE_HEADER = "X-Firmware-Signature"
 
@@ -36,11 +36,8 @@ def firmwares():
             firmware = Firmware(
                 version=version, interface_version=interface,
                 supported_contracts=contracts, size=len(blob),
-                signature=SIGNATURE, created_at=utcnow() - age)
+                signature=SIGNATURE, data=compress(blob), created_at=utcnow() - age)
             session.add(firmware)
-            session.flush()
-            session.add(FirmwareImage(firmware_id=firmware.id,
-                                      data=compress(blob)))
         session.commit()
     yield interface, new_version, old_version
     with Session(engine) as session:

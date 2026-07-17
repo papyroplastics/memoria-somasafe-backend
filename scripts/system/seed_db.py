@@ -31,7 +31,6 @@ from common.db import (
     ClientDeltaSubmission,
     Device,
     Firmware,
-    FirmwareImage,
     GlobalWeights,
     ModelDefinition,
     ModelVersion,
@@ -164,33 +163,32 @@ def seed_models(session: Session, reseed: bool = False) -> None:
             select(GlobalWeights).where(GlobalWeights.version_id == version.id)
         ).first()
         if has_weights is None:
+            if not SERVER_PRIVATE_KEY_FILE.exists():
+                raise SystemExit(
+                    f"no key at {SERVER_PRIVATE_KEY_FILE}; cannot seed signed "
+                    f"artifacts for '{key}'")
             weights = load_trainable_weights(tflite)
             trainable_bytes = tflite.read_bytes()
             quantized_file = MODELS_DIR / key / "quantized.tflite"
             quantized = quantized_file.read_bytes() if quantized_file.exists() else None
-            signature = None
-            if quantized is not None:
-                if SERVER_PRIVATE_KEY_FILE.exists():
-                    signature = sign_model(quantized, version.contract_version,
-                                           version.norm_params, SERVER_PRIVATE_KEY_FILE)
-                else:
-                    print(f"  ! no key at {SERVER_PRIVATE_KEY_FILE}; "
-                          f"'{key}' quantized artifact left unsigned")
+
             gw = GlobalWeights(
                 model_key=key, version_id=version.id,
                 weights=weights.astype("float32").tobytes(),
-                weight_count=int(weights.size),
-                artifact_signature=signature,
             )
             session.add(gw)
             session.flush()  # need the row id the artifacts are keyed by
-            session.add(WeightsArtifact(weights_id=gw.id,
-                                        artifact=Artifact.trainable,
-                                        data=compress(trainable_bytes)))
+            session.add(WeightsArtifact(
+                weights_id=gw.id, artifact=Artifact.trainable,
+                data=compress(trainable_bytes),
+                signature=sign_model(trainable_bytes, version.contract_version,
+                                     version.norm_params, SERVER_PRIVATE_KEY_FILE)))
             if quantized is not None:
-                session.add(WeightsArtifact(weights_id=gw.id,
-                                            artifact=Artifact.quantized,
-                                            data=compress(quantized)))
+                session.add(WeightsArtifact(
+                    weights_id=gw.id, artifact=Artifact.quantized,
+                    data=compress(quantized),
+                    signature=sign_model(quantized, version.contract_version,
+                                         version.norm_params, SERVER_PRIVATE_KEY_FILE)))
             print(f"  + initial weights for '{key}' v{spec.version} ({weights.size} weights)")
     session.commit()
 
@@ -229,11 +227,10 @@ def seed_firmware(session: Session, firmware_dir: Path) -> None:
             supported_contracts=metadata["supported_contracts"],
             size=len(blob),
             signature=signature,
+            data=compress(blob),
             created_at=created_at,
         )
         session.add(firmware)
-        session.flush()  # need the row id the image is keyed by
-        session.add(FirmwareImage(firmware_id=firmware.id, data=compress(blob)))
         print(f"  + firmware '{version}' (interface {metadata['interface_version']}, "
               f"contracts {metadata['supported_contracts']}, {len(blob)} bytes)")
     session.commit()

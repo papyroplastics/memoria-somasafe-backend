@@ -111,10 +111,11 @@ def check_submission(session: Session, key: str, weights_id: int,
             detail=f"Stale base weights; re-download the latest weights of "
                    f"'{key}' before submitting")
 
-    if len(body) != base.weight_count * 4:
+    weight_count = session.get(ModelVersion, base.version_id).weight_count
+    if len(body) != weight_count * 4:
         raise HTTPException(
             status_code=400,
-            detail=f"Expected {base.weight_count} little-endian float32 weights")
+            detail=f"Expected {weight_count} little-endian float32 weights")
     if not np.all(np.isfinite(np.frombuffer(body, dtype=np.float32))):
         raise HTTPException(status_code=400,
                             detail="Weights contain non-finite values")
@@ -125,11 +126,9 @@ def store_submission(session: Session, base: GlobalWeights, body: bytes,
                      user: User) -> ClientDeltaSubmission:
     submission = ClientDeltaSubmission(
         user_id=user.id,
-        model_key=base.model_key,
         base_weights_id=base.id,
-        version_id=base.version_id,
         deltas=bytes(body),
-        weight_count=base.weight_count,
+        weight_count=session.get(ModelVersion, base.version_id).weight_count,
     )
     session.add(submission)
     session.commit()
@@ -255,7 +254,8 @@ def _settled_result(session: Session, job_id: uuid.UUID, user: User) -> Response
     session.add(job)
     session.commit()
 
-    version = session.get(ModelVersion, submission.version_id)
+    base = session.get(GlobalWeights, submission.base_weights_id)
+    version = session.get(ModelVersion, base.version_id)
     headers = {
         CONTRACT_VERSION_HEADER: str(version.contract_version),
         NORM_PARAMS_HEADER: base64.b64encode(version.norm_params).decode(),
@@ -330,8 +330,7 @@ def download_model(artifact: Artifact, key: str, version: int | None = None,
         if artifact is Artifact.quantized:
             headers[CONTRACT_VERSION_HEADER] = str(ver.contract_version)
             headers[NORM_PARAMS_HEADER] = base64.b64encode(ver.norm_params).decode()
-            if weights.artifact_signature is not None:
-                headers[SIGNATURE_HEADER] = base64.b64encode(weights.artifact_signature).decode()
+            headers[SIGNATURE_HEADER] = base64.b64encode(baked.signature).decode()
 
         # zstd-compressed as stored; the client decompresses.
         return Response(content=baked.data, media_type="application/octet-stream",

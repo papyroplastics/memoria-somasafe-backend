@@ -1,5 +1,5 @@
 import uuid
-from datetime import timedelta, datetime
+from datetime import timedelta
 
 import numpy as np
 import tensorflow as tf
@@ -8,13 +8,6 @@ from sqlalchemy import and_, delete, or_
 from sqlmodel import Session, select
 
 from worker.celery_app import app
-from worker.utils.weight_validation import (
-    compute_mse_threshold,
-    filter_outliers,
-    malformed_reason,
-    update_magnitude,
-    validate_submission,
-)
 
 from common.celery_tasks import (
     CLEANUP_TASK,
@@ -45,7 +38,6 @@ from common.db import (
     WeightsArtifact,
     engine,
     get_latest_version,
-    get_latest_weights,
     get_version_weights,
     utcnow,
 )
@@ -84,6 +76,19 @@ def _load_models(**_) -> None:
             print(f"[worker] model '{key}' unavailable, skipping: {exc}")
 
 
+def malformed_reason(submission: ClientDeltaSubmission,
+                     expected_weight_count: int) -> str | None:
+    if submission.weight_count != expected_weight_count:
+        return (f"weight count {submission.weight_count} != "
+                f"model's {expected_weight_count}")
+    if len(submission.deltas) != expected_weight_count * 4:
+        return (f"buffer size {len(submission.deltas)} != "
+                f"{expected_weight_count} float32 weights")
+    if not np.all(np.isfinite(np.frombuffer(submission.deltas, dtype=np.float32))):
+        return "weights contain non-finite values"
+    return None
+
+
 @app.task(name=QUANTIZE_TASK)
 def quantize_submission(job_id: str) -> None:
     with Session(engine) as session:
@@ -104,31 +109,25 @@ def quantize_submission(job_id: str) -> None:
                 raise ValueError(f"model '{job.model_key}' not initialized")
             model, rep_dataset, fingerprint, contract_version, norm_bytes = _models[job.model_key]
 
+            base = session.get(GlobalWeights, submission.base_weights_id)
+            if base is None:
+                raise ValueError(f"base weights {submission.base_weights_id} not found")
+
             # Reject weights trained against an outdated version — the worker
             # could not restore them, and aggregation must not mix versions.
             latest = get_latest_version(session, job.model_key)
-            if latest is None or submission.version_id != latest.id \
+            if latest is None or base.version_id != latest.id \
                     or latest.fingerprint != fingerprint:
                 raise ValueError(f"stale model version for '{job.model_key}'")
 
             reason = malformed_reason(submission, model.total_weight_size)
-            if reason is not None:
-                submission.valid = False
-                session.add(submission)
-                raise ValueError(f"invalid submission: {reason}")
-
-            # Aggregation-usability is judged silently: the verdict is cached on
-            # the row and the artifact is produced either way.
-            submission.valid = validate_submission(
-                submission, model.total_weight_size,
-                get_latest_weights(session, job.model_key)) is None
+            submission.valid = reason is None
             session.add(submission)
+            if reason is not None:
+                raise ValueError(f"invalid submission: {reason}")
 
             # The personalized int8 artifact is built from the client's own local
             # weights, reconstructed as base snapshot + submitted delta.
-            base = session.get(GlobalWeights, submission.base_weights_id)
-            if base is None:
-                raise ValueError(f"base weights {submission.base_weights_id} not found")
             delta = np.frombuffer(submission.deltas, dtype=np.float32)
             local = (np.frombuffer(base.weights, dtype=np.float32) + delta).astype(np.float32)
             model.restore(tf.constant(local, dtype=tf.float32))
@@ -152,39 +151,40 @@ def validate_weight_submission(submission_id: int) -> None:
     aggregation; never surfaced to the client."""
     with Session(engine) as session:
         submission = session.get(ClientDeltaSubmission, submission_id)
-        if submission is None or submission.model_key not in _models:
+        if submission is None:
             return
-        model, _, _, _, _ = _models[submission.model_key]
-        reason = validate_submission(submission, model.total_weight_size,
-                                     get_latest_weights(session, submission.model_key))
+        base = session.get(GlobalWeights, submission.base_weights_id)
+        if base is None or base.model_key not in _models:
+            return
+        model, _, _, _, _ = _models[base.model_key]
+        reason = malformed_reason(submission, model.total_weight_size)
         submission.valid = reason is None
         if reason is not None:
-            print(f"[validate] {submission.model_key}: "
+            print(f"[validate] {base.model_key}: "
                   f"submission {submission.id} rejected: {reason}")
         session.add(submission)
         session.commit()
 
 
 def _bake_and_store(session: Session, key: str, latest, new_weights: np.ndarray,
-                    mse_threshold: float | None, model, rep_dataset,
+                    model, rep_dataset,
                     contract_version: int, norm_bytes: bytes) -> Exception | None:
     model.restore(tf.constant(new_weights, dtype=tf.float32))
-    trainable = quantized = signature = export_error = None
+    trainable = quantized = trainable_sig = quantized_sig = export_error = None
     try:
         trainable = bytes(get_trainable_model(model))
         quantized = bytes(get_optimized_model(model, rep_dataset))
-        signature = sign_model(quantized, contract_version, norm_bytes,
-                               SERVER_PRIVATE_KEY_FILE)
+        trainable_sig = sign_model(trainable, contract_version, norm_bytes,
+                                   SERVER_PRIVATE_KEY_FILE)
+        quantized_sig = sign_model(quantized, contract_version, norm_bytes,
+                                   SERVER_PRIVATE_KEY_FILE)
     except Exception as exc:
         export_error = exc
 
     snapshot = GlobalWeights(
         model_key=key, version_id=latest.id,
         weights=new_weights.tobytes(),
-        weight_count=model.total_weight_size,
         valid=export_error is None,
-        mse_threshold=mse_threshold,
-        artifact_signature=signature,
     )
     session.add(snapshot)
     if export_error is None:
@@ -193,10 +193,10 @@ def _bake_and_store(session: Session, key: str, latest, new_weights: np.ndarray,
         session.flush()  # for the row id the artifacts are keyed by
         session.add(WeightsArtifact(weights_id=snapshot.id,
                                     artifact=Artifact.trainable,
-                                    data=compress(trainable)))
+                                    data=compress(trainable), signature=trainable_sig))
         session.add(WeightsArtifact(weights_id=snapshot.id,
                                     artifact=Artifact.quantized,
-                                    data=compress(quantized)))
+                                    data=compress(quantized), signature=quantized_sig))
     session.commit()
     if export_error is None:
         clear_model_limits(key)
@@ -222,18 +222,11 @@ def _aggregate_model(session: Session, key: str) -> str:
     if reference is None:
         return "skipped: no active global weights"
 
-    # Window since the newest snapshot regardless of validity: submissions
-    # consumed by a later-invalidated round are not re-aggregated.
-    cutoff = session.exec(
-        select(GlobalWeights.created_at)
-        .where(GlobalWeights.version_id == latest.id)
-        .order_by(GlobalWeights.created_at.desc())  # type: ignore
-    ).first() or datetime.fromtimestamp(0)
-
+    # Only deltas trained against the current active weights: matching on
+    # base_weights_id guarantees a shared base and never mixes across rounds.
     submissions = list(session.exec(
         select(ClientDeltaSubmission)
-        .where(ClientDeltaSubmission.version_id == latest.id,
-               ClientDeltaSubmission.created_at > cutoff)
+        .where(ClientDeltaSubmission.base_weights_id == reference.id)
         .order_by(ClientDeltaSubmission.created_at.asc())  # type: ignore
     ))
     latest_per_user = {sub.user_id: sub for sub in submissions}
@@ -241,7 +234,7 @@ def _aggregate_model(session: Session, key: str) -> str:
     valid: list[ClientDeltaSubmission] = []
     for sub in latest_per_user.values():
         if sub.valid is None:  # never validated by the quantize/submit tasks
-            reason = validate_submission(sub, model.total_weight_size, reference)
+            reason = malformed_reason(sub, model.total_weight_size)
             sub.valid = reason is None
             session.add(sub)
             if reason is not None:
@@ -252,32 +245,30 @@ def _aggregate_model(session: Session, key: str) -> str:
 
     if len(valid) < FED_MIN_SUBMISSIONS:
         return (f"skipped: {len(valid)} valid submissions "
-                f"(min {FED_MIN_SUBMISSIONS}, {len(submissions)} in window)")
+                f"(min {FED_MIN_SUBMISSIONS}, {len(submissions)} on this base)")
 
     deltas = np.stack([np.frombuffer(sub.deltas, dtype=np.float32)
                        for sub in valid])
-    kept = deltas[filter_outliers(deltas)]
 
     # aggregation over deltas: new global = reference global + trimmed mean of the
     # accepted updates. With a shared base this is identical to aggregating absolute
-    # weights.
+    # weights; trimmed mean is what bounds the influence of outlier/malicious deltas.
     reference_weights = np.frombuffer(reference.weights, dtype=np.float32)
-    new_weights = (reference_weights + trimmed_mean(kept, FED_TRIM_RATIO)).astype(np.float32)
+    new_weights = (reference_weights + trimmed_mean(deltas, FED_TRIM_RATIO)).astype(np.float32)
 
-    # Bake the new weights into fresh serving artifacts. A failed export
-    # invalidates the round: clients keep pulling the previous snapshot, and the
-    # window's submissions stay consumed.
+    # Bake the new weights into fresh serving artifacts. On success the new valid
+    # snapshot becomes the reference, so these deltas (keyed to the old base) fall
+    # out of the next window. A failed export leaves the reference unchanged, so
+    # they stay eligible and the round is retried next beat.
     export_error = _bake_and_store(
         session, key, latest, new_weights,
-        compute_mse_threshold([update_magnitude(delta) for delta in kept]),
         model, rep_dataset, contract_version, norm_bytes)
     if export_error is not None:
-        return (f"aggregated {len(kept)} submissions but artifact export failed "
+        return (f"aggregated {len(valid)} submissions but artifact export failed "
                 f"(round invalidated): {export_error}")
 
-    return (f"aggregated {len(kept)} submissions "
-            f"({len(submissions)} in window, {len(latest_per_user)} users, "
-            f"{len(valid) - len(kept)} outliers dropped)")
+    return (f"aggregated {len(valid)} submissions "
+            f"({len(submissions)} on this base, {len(latest_per_user)} users)")
 
 
 @app.task(name=FED_AGG_TASK)
@@ -352,7 +343,7 @@ def secure_aggregation(round_id: int) -> str:
             return _fail_round(session, round,
                                "aggregate failed sanity check (implausible mean delta)")
 
-        export_error = _bake_and_store(session, key, latest, new_weights, None,
+        export_error = _bake_and_store(session, key, latest, new_weights,
                                        model, rep_dataset, contract_version, norm_bytes)
         round.status = (SecureRoundStatus.failed if export_error is not None
                         else SecureRoundStatus.aggregated)

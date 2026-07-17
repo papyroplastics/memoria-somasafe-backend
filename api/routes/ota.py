@@ -8,7 +8,6 @@ from sqlmodel import Session
 
 from common.config import OTA_DOWNLOAD_COOLDOWN_SECONDS
 from common.db import (
-    FirmwareImage,
     User,
     get_firmware,
     get_session,
@@ -52,8 +51,7 @@ def download_firmware(interface: int, version: str,
     require_device_owner(session, user)
 
     firmware = get_firmware(session, interface, version)
-    image = None if firmware is None else session.get(FirmwareImage, firmware.id)
-    if firmware is None or image is None:
+    if firmware is None:
         raise HTTPException(status_code=404,
                             detail=f"No firmware '{version}' for interface {interface}")
 
@@ -67,7 +65,7 @@ def download_firmware(interface: int, version: str,
         }
         # zstd-compressed as stored; the client decompresses, then verifies the
         # signature (which covers the raw image) before forwarding it to the device.
-        return Response(content=image.data,
+        return Response(content=firmware.data,
                         media_type="application/octet-stream", headers=headers)
     finally:
         record_usage(RateLimit.ota_download, user.id, str(interface),
