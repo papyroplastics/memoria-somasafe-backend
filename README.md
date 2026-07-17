@@ -71,15 +71,15 @@ scripts/   CLI entry points, grouped into subpackages by how each relates to the
              system/       essential to the running pipeline: get_dataset, train (exports the
                            served .tflite artifacts + is the source of the federated
                            convergence curves), transfer_learn, export_subject_data, seed_db.
-             distillation/ the unsupervised-teacher label pipeline + personalization probe
-                           (a demonstrated use case, not part of the deployed architecture):
-                           distill_calibrate/labels/eval, personalize_test.
              integration/  multi-user backend verification over the real HTTP API: fed_client,
                            secure_aggregation, queue_aggregation.
              figures/      report result/figure generators (see PLOTS.md): plot_signals,
                            plot_convergence (reads a previous train.py run — Secs. 5.2+5.3 —
                            and never trains), byzantine + sensitivity (sweeps that do
-                           train, over datasets ml.loading builds once), footprint.
+                           train), footprint, and the autoencoder case studies (a demonstrated
+                           use case, not part of the deployed architecture): calibrate_fpr +
+                           anomaly_detection (detector eval, Sec. 5.4) and
+                           knowledge_distillation (distillation + LOSO personalization).
 ```
 
 Evaluation/experiment output (histories, reports, figures, distilled labels) goes to
@@ -149,7 +149,7 @@ serialized into the signed quantize payload for the firmware to apply. The same 
 build also runs over the clean signals into `datasets/clean-features/S*/` (every window
 normal, label 0) — unused for training, only feeds `export_subject_data.py --clean`. A
 separate per-type `anomalous-signals/<kind>/` (each kind applied to every window) lets
-`distill_calibrate.py` measure per-kind detection recall in isolation.
+`anomaly_detection.py` measure per-kind detection recall in isolation.
 
 Because injection operates on un-normalized signals, perturbations scale with the
 signal's own range/std, so they apply at any sensor output range. The five kinds are
@@ -184,37 +184,37 @@ thresholds, and only lands near it on an unseen subject — hence *expected*.
 
 In-band spectral entropy is scored alongside as a hand-crafted **baseline**, thresholded at
 the same expected FPR so its precision/recall are directly comparable. It is not part of the
-detector and never reaches the distilled labels — `distill_eval.py` reports it so the
+detector and never reaches the distilled labels — `anomaly_detection.py` reports it so the
 learned teacher can be read against a classical index.
 
-The work splits into three scripts along **what data each is allowed to see** — mirroring
-deployment, where only the expected FPR is global and everything else is done per-client on
-unlabeled data:
+The soft label a window gets is `sigmoid((error − threshold) / s)`, where `s` is the
+standard deviation of that subject's own clean-window scores. Normalizing by the subject's
+own clean-error spread makes the ramp calibrated per subject (reconstruction-error scale
+varies between people), and `label > 0.5` reproduces the hard decision. Soft targets carry
+the teacher's confidence — proper knowledge distillation, not just pseudo-labeling.
 
-- **`distill_calibrate.py` (server: labeled, global)** picks the **expected FPR** — the only
-  globally-relevant output, and the only thing that reads the synthetic labels. It is the
-  level maximizing the detector's Youden's J (mixed-set recall minus empirical clean FPR) on
-  the labeled data. Writes the expected FPR (and the whole sweep, for the report) to
-  `results/<model>/`.
-- **`distill_labels.py` (client: unlabeled)** touches only what a real client has — its
-  own clean baseline and the mixed signal + on-device features, **never the true labels or
-  the per-anomaly sets**. Reads the expected FPR, derives each subject's threshold from its
-  *own* clean windows, and emits a **soft** `[0,1]` label per window: the clean-CDF rank
-  past that threshold (so `label > 0` reproduces the hard decision), then a size-1 temporal
-  **median filter** (real anomalies span many windows, so a lone flag is a false positive
-  and a lone gap a false negative — cleaned without tuning to the injected span length).
-  Soft targets carry the teacher's confidence — proper knowledge distillation, not just
-  pseudo-labeling.
-- **`distill_eval.py` (science: unrestricted)** replays the same expected FPR → per-subject
-  thresholds a client uses, then scores the detector against the true mixed-window labels
-  and the per-type `anomalous-signals/` sets: precision/recall/F1, per-anomaly-kind recall
-  and clean FPR, for the detector and the spectral baseline alike. Writes the metrics to
-  `results/<model>/`.
+The case studies live in three `scripts/figures/` scripts:
 
-The labels land in a datasets-shaped tree (`mixed-features/S*/` with the distilled
-`labels.npy`, feature arrays symlinked back to `datasets/`), so the student `FeatureMLP`
-trains on them via `train.py --dataset-dir` — the path to validating an unsupervised
-teacher that needs no labels on-device.
+- **`calibrate_fpr.py`** sweeps the candidate FPRs on the split teacher's **training**
+  subjects and writes the whole table (recall / precision / F1 / clean FPR / Youden's J per
+  level) to `results/<model>/calibration.json`. It exists only to justify calibrating on J
+  rather than F1 for the report; nothing imports it, and the two scripts below re-pick the
+  FPR internally (it is cheap).
+- **`anomaly_detection.py`** takes a model trained **with a split**: it picks the expected
+  FPR inline on the training subjects and scores the detector against the true mixed-window
+  labels and the per-type `anomalous-signals/` sets on the **held-out** subjects —
+  precision/recall/F1, per-anomaly-kind recall and clean FPR, detector and spectral baseline
+  alike. Held-out only, so the numbers are generalization to an unseen user.
+- **`knowledge_distillation.py`** takes a teacher trained on **all** users (so every
+  subject's soft labels are the same, teacher-seen quality) and shows a distilled student can
+  be personalized. It distils the soft labels in memory and runs **leave-one-subject-out**:
+  per fold a fresh `FeatureMLP` is trained centrally on the *other* subjects' distilled
+  labels, fine-tuned on the held-out subject's own labels, and both are scored (float + int8)
+  against that subject's **true** labels. Rotating the held-out subject keeps every fold
+  leakage-free (the global never trained on the subject it is judged on) and none special.
+
+Nothing is written to disk but the metrics; the student never sees a true label, mirroring
+the on-device setting where only the expected FPR is global.
 
 ## Run
 
@@ -238,7 +238,7 @@ uv run -m scripts.system.train cnn-ae --eval-subjects 3          # hold out the 
 
 to produce **every** report result in one go — from an empty database and no exported
 artifacts, with the services/api/worker already up — run `./run_all.sh` (or `make run-all`).
-it sequences training, figures, the distillation round-trip, seeding and the integration
+it sequences training, figures, the autoencoder case studies, seeding and the integration
 harness in dependency order; it is resumable (each step is skipped when its output exists,
 `force=1` redoes them) and tunable via the env vars at the top of the file. see
 [`plots.md`](plots.md) for what each step emits.
@@ -265,10 +265,14 @@ non-default `--batch-size` suffixes those artifacts (`trainable_32.tflite`,
 `--tag NAME` does the same for a *variant* of a model you also train normally: results go to
 `results/<model>/<loop>-<name>/` and artifacts are suffixed (`trainable_<name>.tflite`), so
 the canonical artifact — the one `seed_db` publishes and the system serves — stays the
-untagged run. It exists because the same model key can be trained on different data: the
-distillation round-trip below trains `feature-mlp` on both the synthetic ground truth and the
-teacher's distilled labels, and without a tag the second run would silently overwrite the
-first's results and artifacts.
+untagged run. It exists because the same model key can be trained under different splits: the
+knowledge-distillation case study needs an all-users teacher (`--tag all --eval-subjects 0`),
+and without a tag it would overwrite the split teacher the convergence figures and
+`anomaly_detection` rely on.
+
+`--eval-subjects 0` trains on **every** subject and skips evaluation (no held-out set, so no
+metric plot, reconstruction report, or final metric in the manifest) — how the all-users
+teacher for `knowledge_distillation` is produced.
 
 Because the model's batch size is baked into the `.tflite` input signature, the
 GPU-trained large-batch model isn't itself the deliverable. `transfer_learn`
@@ -283,24 +287,23 @@ uv run -m scripts.system.transfer_learn feature-mlp 32 --epochs 3 # 2) transfer 
 The source batch size must be `>=` the default; `transfer_learn` re-exports the
 fine-tuned model under the canonical (unsuffixed) artifact names.
 
-To run the knowledge-distillation round-trip, first calibrate the autoencoder
-(`distill_calibrate.py` picks the expected FPR), then `distill_labels.py` derives each
-subject's threshold and emits the soft-label tree; `distill_eval.py` reports the detector's
-per-kind metrics against the ground truth. Then point `feature-mlp` at those labels with
-`--dataset-dir`:
+For the autoencoder case studies (Sec. 5.4/5.8): `calibrate_fpr` dumps the FPR sweep table
+and `anomaly_detection` scores the detector on held-out subjects, both from the split teacher
+`train.py` already produced. `knowledge_distillation` needs a teacher trained on all users,
+then runs the leave-one-subject-out personalization end to end (distils the soft labels in
+memory — no tree, no `--dataset-dir` student to train):
 
 ```bash
-uv run -m scripts.distillation.distill_calibrate cnn-ae                                       # exp. FPR -> results/cnn-ae/
-uv run -m scripts.distillation.distill_eval cnn-ae                                            # metrics -> results/cnn-ae/
-uv run -m scripts.distillation.distill_labels cnn-ae                                          # teacher -> results/cnn-ae/distilled-labels/
-uv run -m scripts.system.train feature-mlp --dataset-dir results/cnn-ae/distilled-labels \
-    --tag distilled                                                                       # student on pseudo-labels
+uv run -m scripts.figures.calibrate_fpr cnn-ae                          # FPR sweep table -> results/cnn-ae/calibration.json
+uv run -m scripts.figures.anomaly_detection cnn-ae                      # detector metrics -> results/cnn-ae/
+uv run -m scripts.system.train cnn-ae --tag all --eval-subjects 0       # all-users teacher -> trainable_all.tflite
+uv run -m scripts.figures.knowledge_distillation cnn-ae --student feature-mlp \
+    --weights shared/gen/models/cnn-ae/trainable_all.tflite             # LOSO personalization
 ```
 
-`--tag distilled` keeps this run off the canonical `feature-mlp` results and artifacts, so it
-can be compared against the same student trained on the direct synthetic labels rather than
-replacing it (see "Run"). `personalize_test` fine-tunes the distilled student, so pass
-`--weights shared/gen/models/feature-mlp/trainable_distilled.tflite`.
+The distilled-vs-direct student comparison (does the distilled student match one trained on
+the synthetic ground truth?) is deferred — it can be folded into `knowledge_distillation`
+later.
 
 ### Export a subject to the Android app
 

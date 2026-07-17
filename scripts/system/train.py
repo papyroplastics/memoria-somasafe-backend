@@ -28,7 +28,7 @@ LOOP_OPTIONS = ['normal', 'federated']
 def run_loop(trainer: Trainer, data_dir: Path, loop: str, eval_subjects: int,
              steps: int, local_epochs: int) -> tuple[History, tf.data.Dataset, int]:
     train_subjects, held_out = holdout(trainer.subject_datasets(data_dir), eval_subjects)
-    eval_dataset = pool(held_out)
+    eval_dataset = pool(held_out) if held_out else None
 
     if loop == 'normal':
         history = normal_loop(trainer, pool(train_subjects), eval_dataset, steps)
@@ -48,7 +48,8 @@ if __name__ == "__main__":
     parser.add_argument('--loop', choices=LOOP_OPTIONS, default='normal', help='Training loop (default: normal)')
     parser.add_argument('--eval-subjects', type=int, default=2,
                         help='Subjects held out whole for evaluation (default: 2). The last '
-                             'N subjects; both loops train on the rest and score on these.')
+                             'N subjects; both loops train on the rest and score on these. '
+                             '0 trains on every subject and skips evaluation (all-users teacher).')
     parser.add_argument('--epochs', type=int, default=5, help='Epochs for the normal loop')
     parser.add_argument('--rounds', type=int, default=5, help='Global rounds for the federated loop')
     parser.add_argument('--local-epochs', type=int, default=2, help='Local epochs per round (federated)')
@@ -58,8 +59,8 @@ if __name__ == "__main__":
     parser.add_argument('--dataset-dir', type=Path, default=DATASETS_DIR,
                         help='Dataset directory to train on (default: datasets). Point this '
                              'at an alternative source with the same structure as datasets/ '
-                             '(e.g. a distilled-labels directory) to train against distilled '
-                             'labels instead of the synthetic ground truth.')
+                             'to train against alternative labels (e.g. a teacher\'s distilled '
+                             'ones) instead of the synthetic ground truth.')
     parser.add_argument('--tag', default=None,
                         help='Name this run so it does not overwrite the canonical one: '
                              'results go to results/<model>/<loop>-<tag>/ and artifacts are '
@@ -68,9 +69,9 @@ if __name__ == "__main__":
                              'on distilled labels rather than the synthetic ground truth.')
     args = parser.parse_args()
 
-    if args.eval_subjects < 1:
-        raise SystemExit("--eval-subjects must be >= 1: the run scores on the held-out "
-                         "subjects and the manifest records that metric.")
+    if args.eval_subjects < 0:
+        raise SystemExit("--eval-subjects must be >= 0 (0 trains on every subject and "
+                         "skips evaluation, e.g. to produce an all-users teacher).")
 
     data_dir = args.dataset_dir
 
@@ -91,10 +92,13 @@ if __name__ == "__main__":
     parts = ([args.tag] if args.tag else []) + (
         [str(batch_size)] if batch_size != type(trainer.model).default_batch_size else [])
     postfix = ''.join(f'_{p}' for p in parts)
-    save_artifacts(trainer, result_dir, eval_dataset, postfix)
-    plot_history(history, trainer.primary_metric, report_dir)
+    save_artifacts(trainer, result_dir, eval_dataset, postfix, data_root=data_dir)
     write_history_csv(history, report_dir)
-    trainer.report(report_dir, eval_dataset)
+    # With --eval-subjects 0 there is no held-out set, so the metric plot and the
+    # reconstruction report (which read eval data) are skipped.
+    if eval_dataset is not None:
+        plot_history(history, trainer.primary_metric, report_dir)
+        trainer.report(report_dir, eval_dataset)
 
     _, final_loss, final_metrics = history[-1]
     write_yaml(report_dir / RUN_MANIFEST, {

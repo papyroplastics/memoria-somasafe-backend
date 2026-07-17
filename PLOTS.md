@@ -18,14 +18,22 @@ Conventions (see `README.md`, "Layout"):
   verification only.
 - **The figure scripts split into two kinds.** `plot_convergence` and `plot_calibration`
   *read* a previous run (`results/<model>/<loop>/run.yaml` + `training.csv`, and
-  `distill_calibration.json` respectively) and fail if there is none — they never compute.
-  `byzantine` and `sensitivity` *do* train, because they sweep configurations no single
-  `train.py` run produces.
+  `calibration.json` respectively) and fail if there is none — they never compute.
+  `byzantine`, `sensitivity` and `knowledge_distillation` *do* train, because they sweep
+  configurations no single `train.py` run produces.
 - **Every loop holds out whole subjects** (`--eval-subjects N`, default 2: the last N).
   A metric is therefore generalization to an *unseen subject*, and a centralized and a
   federated run at the same `--eval-subjects` train on the same data and score on the same
   subjects — which is what makes the Sec. 5.3 overlay a claim rather than a coincidence.
   `plot_convergence` refuses to draw the overlay if the two manifests disagree.
+- **The Sec. 5.4 scripts key off that same split.** `anomaly_detection` takes a **split**
+  teacher: it picks the operating point on the training subjects (inline) and scores the
+  detector on the held-out subjects, so its numbers are generalization to an unseen user
+  like every other Chapter 5 metric. `calibrate_fpr` calibrates on the same training
+  subjects but only dumps the full FPR sweep for the report table. `knowledge_distillation`
+  instead takes a teacher trained on **all** users (uniform per-subject label quality) and
+  runs leave-one-subject-out at the student level, so every fold is leakage-free and none is
+  special.
 
 Run scripts from `backend/` with `uv run -m …`. The training runs and the sweeps are
 compute-heavy; launch them in the background.
@@ -61,9 +69,10 @@ uv run -m scripts.figures.plot_convergence <model>      # both figures, no train
 | `results/<model>/<loop>/training.png` + `training.csv` + `run.yaml` (+ `reconstruction.png` for AEs, eval report) | `scripts.system.train <model> --loop {normal,federated} --eval-subjects K` | 5.2/5.3 (the underlying runs; the source both figures below read) |
 | `results/<model>/federated/convergence.png` + `.csv` + `.yaml` | `scripts.figures.plot_convergence <model>` | **5.2** federated model improves round over round |
 | `results/<model>/centralized_vs_federated/centralized_vs_federated.png` + `.csv` + `.yaml` | `scripts.figures.plot_convergence <model>` (same run; `--skip-overlay` to omit) | **5.3** FedAvg ≈ centralized without centralizing raw data (central claim) |
-| `results/<model>/distill_eval.json` | `scripts.distillation.distill_eval <model>` | **5.4** per-kind recall, clean FPR, detector vs. spectral baseline / accuracy·F1 |
-| `results/<model>/calibration.png` + `.csv` + `.yaml` | `scripts.figures.plot_calibration <model>` (reads a previous `distill_calibrate`; never calibrates) | **5.4** recall/empirical FPR vs. expected FPR with the selected operating point — makes the chosen expected FPR auditable |
-| `results/<model>/personalization/personalization[_S*].csv` + `.json` | `scripts.distillation.personalize_test --model feature-mlp --teacher <ae>` | **5.4** personalization marginal-positive; int8 ≈ float |
+| `results/<model>/anomaly_detection.json` | `scripts.figures.anomaly_detection <model>` (split teacher) | **5.4** per-kind recall, clean FPR, detector vs. spectral baseline / accuracy·F1 — calibrated on training subjects, scored on the held-out eval subjects |
+| `results/<model>/calibration.json` | `scripts.figures.calibrate_fpr <model>` (split teacher) | **5.4** the full expected-FPR sweep (table backing "J not F1"); standalone, feeds only the figure below |
+| `results/<model>/calibration.png` + `.csv` + `.yaml` | `scripts.figures.plot_calibration <model>` (reads a previous `calibrate_fpr`; never calibrates) | **5.4** recall/empirical FPR vs. expected FPR with the selected operating point — makes the chosen expected FPR auditable |
+| `results/feature-mlp/personalization/personalization.csv` + `.json` | `scripts.figures.knowledge_distillation <ae> --student feature-mlp --weights <all-users teacher>` (trains) | **5.4/5.8** leave-one-subject-out personalization marginal-positive; int8 ≈ float |
 | `results/<model>/byzantine/byzantine.png` + `.csv` + `.yaml` | `scripts.figures.byzantine <model> --max-malicious N --rounds R [--aggregator trimmed-mean\|average]` | **5.5** outlier filter holds the round (and no more) — trains |
 | `results/footprint/footprint.csv` + `.yaml` | `scripts.figures.footprint` | **5.6** system fits the edge (backend rows; phone/ESP32 rows pasted in) |
 | `results/<model>/sensitivity/{participants,local_epochs,loso}.png` + `.csv` + `.yaml` | `scripts.figures.sensitivity <model> [--sweep participants\|local-epochs\|loso\|all]` | **5.7** conclusions robust to configuration (LOSO mean ± std) — trains |
@@ -81,32 +90,26 @@ under this threat model an attacker just claims a huge dataset size, so it is un
 than merely weak. Each aggregator is swept with the z-score filter on and off, which is the
 figure's two lines.
 
-## Distillation round-trip (Sec. 5.8) and its inputs
+## Knowledge distillation + personalization (Secs. 5.4/5.8)
 
-The unsupervised-teacher → student pipeline, end to end:
-
-```bash
-uv run -m scripts.distillation.distill_calibrate <ae>   # exp. FPR -> results/<ae>/distill_calibration.json
-uv run -m scripts.distillation.distill_eval      <ae>   # metrics  -> results/<ae>/distill_eval.json
-uv run -m scripts.distillation.distill_labels    <ae>   # teacher  -> results/<ae>/distilled-labels/
-uv run -m scripts.system.train feature-mlp \
-    --dataset-dir results/<ae>/distilled-labels \
-    --tag distilled                                     # student on the distilled labels
-```
-
-Compare the distilled student against the same student trained on the direct synthetic
-labels; `distill_eval` reports the detector's metrics against ground truth. Both students are
-the same model key, so the distilled run needs **`--tag distilled`**: without it, it
-overwrites the direct-label run's `results/feature-mlp/normal/` and its exported artifacts.
-Tagged, it lands in `results/feature-mlp/normal-distilled/` and exports
-`trainable_distilled.tflite`, leaving the canonical (direct-label) artifact — the one
-`seed_db` publishes and the system serves — untouched. `personalize_test` fine-tunes the
-distilled student, so point it at that artifact:
+`knowledge_distillation.py` is self-contained: it loads an autoencoder teacher trained on
+**all** users, calibrates the expected FPR inline, distils a soft label per window in memory
+(sigmoid of the error past the subject's own threshold, scaled by its own clean-error std),
+and runs leave-one-subject-out personalization — per fold a fresh FeatureMLP student is
+trained centrally on the *other* subjects' distilled labels, fine-tuned on the held-out
+subject's own labels, and both are scored (float + int8) against that subject's **true**
+labels. Nothing is written to disk but the pooled metrics.
 
 ```bash
-uv run -m scripts.distillation.personalize_test --model feature-mlp --teacher <ae> \
-    --weights shared/gen/models/feature-mlp/trainable_distilled.tflite
+uv run -m scripts.system.train <ae> --tag all --eval-subjects 0          # all-users teacher
+uv run -m scripts.figures.knowledge_distillation <ae> --student feature-mlp \
+    --weights shared/gen/models/<ae>/trainable_all.tflite
 ```
+
+The teacher needs `--tag all` so its `trainable_all.tflite` lands beside — not on top of —
+the split teacher the convergence figures and `anomaly_detection`/`calibrate_fpr` use. The
+distilled-vs-direct student comparison (does distillation reproduce the teacher?) is deferred
+— it can be folded into this script later.
 
 ## Integration verification (methodology, Sec. 5.1 — not report figures)
 

@@ -59,19 +59,19 @@ def _format(metrics: dict[str, float]) -> str:
 
 
 def normal_loop(trainer: Trainer, train_dataset: tf.data.Dataset,
-                eval_dataset: tf.data.Dataset, epochs: int) -> History:
+                eval_dataset: tf.data.Dataset | None, epochs: int) -> History:
     history: History = []
     for epoch in range(epochs):
         prefix = f"epoch={epoch + 1}/{epochs}"
         loss = train_epoch(trainer, train_dataset, prefix)
-        metrics = evaluate(trainer, eval_dataset, prefix)
+        metrics = evaluate(trainer, eval_dataset, prefix) if eval_dataset is not None else {}
         history.append((epoch, loss, metrics))
         print(f"{prefix} loss={loss:.4f} {_format(metrics)}", flush=True)
     return history
 
 
 def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Dataset],
-                   eval_dataset: tf.data.Dataset, local_epochs: int,
+                   eval_dataset: tf.data.Dataset | None, local_epochs: int,
                    rounds: int) -> History:
     model = trainer.model
     sizes = [len(ds) for ds in subject_train_datasets]
@@ -93,7 +93,7 @@ def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Datase
         global_weights = (base + weighted_average(client_deltas, sizes)).astype(base.dtype)
         model.restore(tf.constant(global_weights))
 
-        metrics = evaluate(trainer, eval_dataset, round_prefix)
+        metrics = evaluate(trainer, eval_dataset, round_prefix) if eval_dataset is not None else {}
         history.append((r, loss, metrics))
         print(f"{round_prefix} {_format(metrics)}", flush=True)
     return history

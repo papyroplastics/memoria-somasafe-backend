@@ -1,11 +1,11 @@
 """The detector's calibration sweep (report Sec. 5.4): recall and empirical clean
 false-positive rate against the expected FPR, with the selected operating point marked.
 
-This script calibrates nothing: it reads the sweep `scripts.distillation.distill_calibrate`
-already wrote to results/<model>/distill_calibration.json and fails if there is none.
+This script calibrates nothing: it reads the sweep `scripts.figures.calibrate_fpr`
+already wrote to results/<model>/calibration.json and fails if there is none.
 Produce it with:
 
-    uv run -m scripts.distillation.distill_calibrate <model>
+    uv run -m scripts.figures.calibrate_fpr <model>
     uv run -m scripts.figures.plot_calibration <model>
 
 The figure is what makes the chosen expected FPR auditable rather than asserted. Each
@@ -24,15 +24,16 @@ from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 from ..common.scoring import CALIBRATION_REPORT
 
 
-def load_sweep(model: str) -> tuple[float, list[dict]]:
+def load_sweep(model: str) -> tuple[float, list[dict], list[str]]:
     path = get_report_dir(model) / CALIBRATION_REPORT
     if not path.exists():
         raise SystemExit(
             f"no calibration report at {path}. Run "
-            f"`uv run -m scripts.distillation.distill_calibrate {model}` first — this "
+            f"`uv run -m scripts.figures.calibrate_fpr {model}` first — this "
             f"script plots a previous calibration, it does not calibrate.")
     report = json.loads(path.read_text())
-    return float(report['expected_fpr']), report['sweep']
+    return (float(report['expected_fpr']), report['sweep'],
+            report.get('calibration_subjects', []))
 
 
 def main() -> None:
@@ -41,7 +42,7 @@ def main() -> None:
     parser.add_argument('model', choices=sorted(MODELS), help='Calibrated autoencoder to plot')
     args = parser.parse_args()
 
-    expected_fpr, sweep = load_sweep(args.model)
+    expected_fpr, sweep, calibration_subjects = load_sweep(args.model)
     chosen = next(r for r in sweep if r['expected_fpr'] == expected_fpr)
     levels = [r['expected_fpr'] for r in sweep]
 
@@ -66,6 +67,9 @@ def main() -> None:
         'x_axis': {'name': 'expected FPR', 'range': [min(levels), max(levels)],
                    'scale': 'log'},
         'y_axis': {'name': 'rate', 'range': [0, 1]},
+        'measured_on': {'subjects': calibration_subjects,
+                        'note': 'training subjects — the operating point is chosen '
+                                'disjoint from the held-out subjects anomaly_detection scores'},
         'selection': {
             'criterion': "maximum Youden's J (recall - clean FPR)",
             'why': "J is built from two rates each conditioned on a single class, so it "

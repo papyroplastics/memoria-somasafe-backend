@@ -5,7 +5,7 @@ Stage 1 → datasets/clean-signals/S*/    raw BVP (64 Hz) + ACC mag (32 Hz); glo
 mean/std (norm-params.npy). ACC is stored for feature extraction only — no model takes
 it as an input, so it needs no normalization params.
 Stage 2 → datasets/anomalous-signals/<kind>/S*/  per-type fully-anomalous BVP (one kind
-applied to every window) — for isolated per-kind testing in distill_calibrate.py
+applied to every window) — for isolated per-kind recall in anomaly_detection.py
 Stage 3 → datasets/mixed-signals/S*/      raw BVP with a window-aligned ~50% mix of anomaly
 kinds + per-window binary label bitmap (labels.npy) — the realistic training/distill set
 Stage 4 → datasets/mixed-features/S*/     per-subject non-overlapping 8 s windowed feature

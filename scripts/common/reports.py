@@ -48,6 +48,16 @@ def read_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text())
 
 
+def read_eval_subjects(model: str, loops: tuple[str, ...]) -> int:
+    for loop in loops:
+        path = RESULTS_DIR / model / loop / RUN_MANIFEST
+        if path.exists():
+            return int(read_yaml(path)['eval_subjects'])
+    raise SystemExit(
+        f"no run manifest for '{model}' under {list(loops)}; run "
+        f"`uv run -m scripts.system.train {model}` first so the held-out split is recorded.")
+
+
 def read_run(model: str, loop: str) -> dict:
     """The manifest of a previous `train.py <model> --loop <loop>` run. The figure
     scripts read this instead of re-running the loop, so it must carry everything they

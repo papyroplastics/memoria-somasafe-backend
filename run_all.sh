@@ -103,25 +103,25 @@ done
 step "signal + reconstruction figures" "$RESULTS/$AE/signals_reconstructed.png" \
     "${run[@]}" scripts.figures.plot_signals "$AE" --seed 0
 
-# --- 6. distillation round-trip (Secs. 5.4 + 5.8) ---------------------------------
-# The student is trained a second time here, on the teacher's labels instead of the
-# synthetic ground truth. It is --tag'd so it lands beside the direct-label run rather
-# than on top of it: the canonical trainable.tflite stays the direct-label student (the
-# one the DB serves), and the distilled variant is what personalize_test fine-tunes.
-step "calibrate detector expected FPR ($AE)" "$RESULTS/$AE/distill_calibration.json" \
-    "${run[@]}" scripts.distillation.distill_calibrate "$AE"
-step "evaluate detector vs ground truth ($AE)" "$RESULTS/$AE/distill_eval.json" \
-    "${run[@]}" scripts.distillation.distill_eval "$AE"
-step "distill labels from $AE" "$RESULTS/$AE/distilled-labels" \
-    "${run[@]}" scripts.distillation.distill_labels "$AE"
-step "train $STUDENT on the distilled labels" "$RESULTS/$STUDENT/normal-distilled/run.yaml" \
-    "${run[@]}" scripts.system.train "$STUDENT" --loop normal \
-        --dataset-dir "$RESULTS/$AE/distilled-labels" --tag distilled \
-        --epochs "$EPOCHS" --eval-subjects "$EVAL_SUBJECTS"
-step "personalization probe ($STUDENT from $AE)" \
+# --- 6. anomaly detection + knowledge distillation (Secs. 5.4 + 5.8) --------------
+# calibrate_fpr + anomaly_detection use the split teacher from step 2 (they report
+# generalization to held-out subjects). knowledge_distillation instead needs a teacher of
+# uniform per-subject quality so its leave-one-subject-out folds are comparable, so the
+# teacher is trained a second time on ALL subjects, --tag'd so it lands beside the split
+# run rather than clobbering the trainable.tflite the convergence figures + DB rely on.
+step "calibrate FPR sweep table ($AE)" "$RESULTS/$AE/calibration.json" \
+    "${run[@]}" scripts.figures.calibrate_fpr "$AE"
+step "detector calibration figure ($AE)" "$RESULTS/$AE/calibration.png" \
+    "${run[@]}" scripts.figures.plot_calibration "$AE"
+step "anomaly detection eval ($AE)" "$RESULTS/$AE/anomaly_detection.json" \
+    "${run[@]}" scripts.figures.anomaly_detection "$AE"
+step "train $AE on all users (distillation teacher)" "$GEN_MODELS/$AE/trainable_all.tflite" \
+    "${run[@]}" scripts.system.train "$AE" --loop normal --tag all \
+        --epochs "$EPOCHS" --eval-subjects 0
+step "knowledge distillation + personalization ($STUDENT from $AE)" \
     "$RESULTS/$STUDENT/personalization/personalization.csv" \
-    "${run[@]}" scripts.distillation.personalize_test --model "$STUDENT" --teacher "$AE" \
-        --weights "$GEN_MODELS/$STUDENT/trainable_distilled.tflite"
+    "${run[@]}" scripts.figures.knowledge_distillation "$AE" --student "$STUDENT" \
+        --weights "$GEN_MODELS/$AE/trainable_all.tflite"
 
 # --- 7. footprint table (Sec. 5.6) ------------------------------------------------
 # After every artifact exists, so the size columns are populated.

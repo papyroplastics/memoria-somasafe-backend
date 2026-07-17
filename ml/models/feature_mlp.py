@@ -76,8 +76,8 @@ class FeatureMLP(TrainableModel):
 class FeatureMLPTrainer(Trainer):
     """Trains the FeatureMLP on the per-subject feature dataset. Both features and
     labels are read from ``<data_root>/mixed-features/S*/``; to train against
-    distilled teacher labels instead of the synthetic ground truth, point the data
-    root at a directory with the same structure (see ``distill_labels.py``)."""
+    alternative labels (e.g. a teacher's distilled ones) instead of the synthetic
+    ground truth, point the data root at a directory with the same structure."""
 
     primary_metric = 'accuracy'
     dataset_tensors = ['features', 'labels']

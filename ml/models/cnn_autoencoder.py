@@ -19,7 +19,7 @@ class CNNAutoencoder(TrainableAutoencoder):
 
     def __init__(self, name: str, batch_size: int, seq_len: int,
                  signal_mean, signal_std, n_signals: int = 1,
-                 hidden_dim: int = 32, latent_dim: int = 256,
+                 hidden_dim: int = 32, latent_dim: int = 32,
                  kernel_size: int = 7, n_outputs: int = 1,
                  diff_weight: float = 1.0, learning_rate: float = 1e-3,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):

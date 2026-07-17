@@ -12,31 +12,36 @@ is its *empirical* FPR (``clean_fpr``).
 
 ``spectral`` (in-band spectral entropy) is a classical DSP index carried alongside as a
 *baseline*, thresholded the same way so its precision/recall are directly comparable.
-It is not part of the detector and never reaches the distilled labels: distill_eval.py
+It is not part of the detector and never reaches the distilled labels: anomaly_detection.py
 reports it so the learned teacher can be read against a hand-crafted one.
 
 See ../../../shared/docs/anomalies-and-distillation.md for why the expected FPR is
 calibrated on Youden's J.
 """
 
-import json
 from pathlib import Path
 
 import numpy as np
 
 import tensorflow as tf
 from ml.preprocessing import CLEAN_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR, get_sorted_paths
-from ml.loading import load_signal, window_count
+from ml.loading import load_signal, window_count, holdout
+from ml.metrics import classification_report
 from ml.models.common import AutoencoderTrainer
 
 from . import dsp
-from .reports import get_report_dir
 
 DETECTOR = 'recon'       # the autoencoder score the detector and the labels are built on
-BASELINE = 'spectral'    # hand-crafted DSP index, reported by distill_eval as a comparison
+BASELINE = 'spectral'    # hand-crafted DSP index, reported alongside as a comparison
 SCORE_NAMES = (DETECTOR, BASELINE)
 
-CALIBRATION_REPORT = 'distill_calibration.json'   # the expected FPR, from distill_calibrate
+CALIBRATION_REPORT = 'calibration.json'   # the full FPR sweep, from calibrate_fpr
+
+# Candidate expected FPRs. Because each threshold is the (1 - f) quantile of the subject's
+# *own* clean scores, that fraction of clean windows lies above it by definition — so
+# J(f) = recall(f) - f and the grid just has to be wide enough to bracket the turn.
+FPR_GRID = (0.0025, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1,
+            0.15, 0.2, 0.25, 0.3, 0.4, 0.5)
 
 
 def eval_padded(model, *arrays: np.ndarray) -> dict[str, np.ndarray]:
@@ -56,16 +61,6 @@ def eval_padded(model, *arrays: np.ndarray) -> dict[str, np.ndarray]:
         batch = [tf.constant(a[start:start + batch_size], dtype=tf.float32) for a in arrays]
         chunks.append({k: np.asarray(v) for k, v in model.eval(*batch).items()})
     return {k: np.concatenate([c[k] for c in chunks])[:n] for k in chunks[0]}
-
-
-def load_expected_fpr(model_name: str) -> float:
-    """The global expected FPR picked by distill_calibrate.py."""
-    report_path = get_report_dir(model_name) / CALIBRATION_REPORT
-    if not report_path.exists():
-        raise SystemExit(
-            f"no calibration report at {report_path}. Run distill_calibrate '{model_name}' "
-            f"first to pick the expected FPR.")
-    return float(json.loads(report_path.read_text())['expected_fpr'])
 
 
 def window_errors(model, signal: np.ndarray, window: int, n_windows: int) -> np.ndarray:
@@ -101,6 +96,29 @@ def subject_thresholds(clean: dict[str, dict[str, np.ndarray]],
             for sid, sc in clean.items()}
 
 
+def calibrate_expected_fpr(clean: dict[str, dict[str, np.ndarray]],
+                           mixed: dict[str, dict[str, np.ndarray]],
+                           truth: dict[str, np.ndarray],
+                           grid=FPR_GRID) -> tuple[float, list[dict]]:
+    """The expected FPR maximizing the detector's Youden's J, plus the whole sweep.
+
+    J rather than F1 because the mixed set is ~50% anomalous by construction: F1 depends on
+    that prevalence, while J = recall - FPR is prevalence-independent. F1 and precision are
+    recorded per level anyway, for the report table."""
+    pooled_truth = np.concatenate([truth[sid] for sid in mixed])
+    sweep = []
+    for f in grid:
+        thr = {sid: clean_threshold(clean[sid][DETECTOR], f) for sid in clean}
+        rep = classification_report(
+            np.concatenate([mixed[sid][DETECTOR] > thr[sid] for sid in mixed]), pooled_truth)
+        fpr = float(np.concatenate(
+            [clean[sid][DETECTOR] > thr[sid] for sid in clean]).mean())
+        sweep.append({'expected_fpr': f, 'recall': rep['recall'], 'precision': rep['precision'],
+                      'f1': rep['f1'], 'clean_fpr': fpr, 'youden_j': rep['recall'] - fpr})
+    best = max(sweep, key=lambda row: row['youden_j'])
+    return best['expected_fpr'], sweep
+
+
 def pooled_flags(scores: dict[str, dict[str, np.ndarray]],
                  thresholds: dict[str, dict[str, float]],
                  name: str = DETECTOR) -> np.ndarray:
@@ -109,35 +127,25 @@ def pooled_flags(scores: dict[str, dict[str, np.ndarray]],
     return np.concatenate([scores[sid][name] > thresholds[sid][name] for sid in scores])
 
 
-def soft_score(mixed_scores: dict[str, np.ndarray], clean_scores: dict[str, np.ndarray],
-               expected_fpr: float) -> np.ndarray:
-    """The teacher's soft [0,1] label: how far past its threshold the detector score
-    ranks in the subject's own clean CDF, so ``label > 0`` reproduces the hard decision."""
-    n = len(mixed_scores[DETECTOR])
-    if expected_fpr <= 0.0:
-        return np.zeros(n, dtype=np.float32)
-    clean_sorted = np.sort(clean_scores[DETECTOR])
-    cdf = np.searchsorted(clean_sorted, mixed_scores[DETECTOR], side='right') / len(clean_sorted)
-    return np.clip((cdf - (1.0 - expected_fpr)) / expected_fpr, 0.0, 1.0).astype(np.float32)
+def split_subject_ids(data_dir: Path, n_eval: int) -> tuple[list[str], list[str]]:
+    """(training, held-out) subject IDs for the same last-N split train.py's holdout makes:
+    subjects numerically sorted, the last n_eval held out."""
+    sids = [d.name for d in get_sorted_paths(data_dir / CLEAN_SUBDIR)]
+    return holdout(sids, n_eval)
 
 
-def median3(x: np.ndarray) -> np.ndarray:
-    if len(x) < 3:
-        return x.astype(np.float32, copy=True)
-    prev = np.concatenate([x[:1], x[:-1]])
-    nxt = np.concatenate([x[1:], x[-1:]])
-    return np.median(np.stack([prev, x, nxt]), axis=0).astype(np.float32)
-
-
-def score_dir_by_subject(trainer: AutoencoderTrainer, data_dir: Path,
-                         bvp_dir: Path | None) -> dict[str, dict[str, np.ndarray]]:
+def score_dir_by_subject(trainer: AutoencoderTrainer, data_dir: Path, bvp_dir: Path | None,
+                         subjects: set[str] | None = None) -> dict[str, dict[str, np.ndarray]]:
     """Score every subject's non-overlapping windows. ``bvp_dir`` is the signal source —
-    a per-kind anomalous-signals directory, or ``None`` for the clean signals."""
+    a per-kind anomalous-signals directory, or ``None`` for the clean signals. ``subjects``
+    restricts scoring to a subset (e.g. the held-out eval subjects)."""
     window = trainer.model.seq_len
     signal_dir = bvp_dir if bvp_dir is not None else data_dir / CLEAN_SUBDIR
     out: dict[str, dict[str, np.ndarray]] = {}
     for d in get_sorted_paths(data_dir / CLEAN_SUBDIR):
         sid = d.name
+        if subjects is not None and sid not in subjects:
+            continue
         signal = load_signal(signal_dir, sid)
         count = window_count(signal, window)
         if count > 0:
@@ -145,10 +153,12 @@ def score_dir_by_subject(trainer: AutoencoderTrainer, data_dir: Path,
     return out
 
 
-def score_mixed_by_subject(trainer: AutoencoderTrainer, data_dir: Path
+def score_mixed_by_subject(trainer: AutoencoderTrainer, data_dir: Path,
+                           subjects: set[str] | None = None
                            ) -> dict[str, dict[str, np.ndarray]]:
     """The mixed set, scored on the feature grid: the window count comes from
-    ``mixed-features`` so the scores line up 1:1 with the ground-truth labels."""
+    ``mixed-features`` so the scores line up 1:1 with the ground-truth labels. ``subjects``
+    restricts scoring to a subset (e.g. the held-out eval subjects)."""
     window = trainer.model.seq_len
     mixed_dir = data_dir / MIXED_SUBDIR
     feature_dir = data_dir / MIXED_FEATURE_SUBDIR
@@ -160,6 +170,8 @@ def score_mixed_by_subject(trainer: AutoencoderTrainer, data_dir: Path
     scores: dict[str, dict[str, np.ndarray]] = {}
     for d in subject_dirs:
         sid = d.name
+        if subjects is not None and sid not in subjects:
+            continue
         signal = load_signal(mixed_dir, sid)
         n_windows = len(np.load(feature_dir / sid / 'features.npy'))
         scores[sid] = score_windows(trainer.model, signal, window, n_windows)

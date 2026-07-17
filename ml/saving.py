@@ -71,12 +71,12 @@ def load_trainable_weights(tflite_path: Path) -> np.ndarray:
 
 
 def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset: tf.data.Dataset | None,
-                   postfix: str = ''):
+                   postfix: str = '', data_root: Path | None = None):
     trainable_file = result_dir / f'trainable{postfix}.tflite'
     trainable_file.write_bytes(get_trainable_model(trainer.model))
     print(f"Saved trainable model to {trainable_file}")
     try:
-        rep_dataset = trainer.representative_dataset(dataset=eval_dataset)
+        rep_dataset = trainer.representative_dataset(dataset=eval_dataset, data_root=data_root)
         quantized_file = result_dir / f'quantized{postfix}.tflite'
         quantized_file.write_bytes(get_optimized_model(trainer.model, rep_dataset))
         print(f"Saved quantized model to {quantized_file}")
