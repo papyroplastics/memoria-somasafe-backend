@@ -8,8 +8,7 @@ self-contained (calibrate_fpr.py only exists to dump the whole sweep for the rep
 
 Scores the detector against the true mixed-window labels and the per-type anomalous-signals/
 sets: precision/recall/F1, per-anomaly-kind recall, and the empirical clean false-positive
-rate. The spectral baseline is measured the same way alongside it, so the learned teacher
-can be read against a hand-crafted index. Writes the metrics to results/<model>/.
+rate. Writes the metrics to results/<model>/.
 """
 
 
@@ -27,7 +26,7 @@ from ml.metrics import classification_report
 from ml.saving import load_trainable_weights
 from ..common.reports import get_report_dir, read_eval_subjects
 from ..common.scoring import (
-    SCORE_NAMES, DETECTOR, BASELINE, calibrate_expected_fpr, subject_thresholds, pooled_flags,
+    DETECTOR, calibrate_expected_fpr, subject_thresholds, pooled_flags,
     score_dir_by_subject, score_mixed_by_subject, load_mixed_truth, split_subject_ids,
 )
 
@@ -40,14 +39,12 @@ def evaluate(trainer, data_dir: Path, clean: dict[str, dict[str, np.ndarray]],
              subjects: set[str] | None = None) -> dict:
     pooled_truth = np.concatenate([truth[sid] for sid in mixed])
 
-    per_score = {}
-    for n in SCORE_NAMES:
-        rep = classification_report(pooled_flags(mixed, thresholds, n), pooled_truth)
-        per_score[n] = {
-            'precision': rep['precision'], 'recall': rep['recall'], 'f1': rep['f1'],
-            'accuracy': rep['accuracy'],
-            'clean_fpr': float(pooled_flags(clean, thresholds, n).mean()),
-        }
+    rep = classification_report(pooled_flags(mixed, thresholds), pooled_truth)
+    detector = {
+        'precision': rep['precision'], 'recall': rep['recall'], 'f1': rep['f1'],
+        'accuracy': rep['accuracy'],
+        'clean_fpr': float(pooled_flags(clean, thresholds).mean()),
+    }
 
     anomalous_dir = data_dir / ANOMALOUS_SUBDIR
     per_kind = {}
@@ -56,16 +53,14 @@ def evaluate(trainer, data_dir: Path, clean: dict[str, dict[str, np.ndarray]],
         c = sum(len(v[DETECTOR]) for v in sc.values())
         per_kind[name] = {
             'count': c,
-            'by_score': {n: (float(pooled_flags(sc, thresholds, n).mean()) if c else None)
-                         for n in SCORE_NAMES},
+            'recall': float(pooled_flags(sc, thresholds).mean()) if c else None,
         }
 
     return {
         'n_windows': int(len(pooled_truth)),
         'gt_anomaly_rate': float(pooled_truth.mean()),
         'pred_anomaly_rate': float(pooled_flags(mixed, thresholds).mean()),
-        'detector': per_score[DETECTOR],
-        'baseline': per_score[BASELINE],
+        'detector': detector,
         'per_kind': per_kind,
     }
 
@@ -75,18 +70,13 @@ def print_metrics(results: dict, expected_fpr: float):
     print(f"\nexpected_fpr={expected_fpr:.4f}")
     print(f"detector ({DETECTOR}): accuracy={d['accuracy']:.4f} precision={d['precision']:.4f} "
           f"recall={d['recall']:.4f} f1={d['f1']:.4f} clean_fpr={d['clean_fpr']:.4f}")
-    b = results['baseline']
-    print(f"baseline ({BASELINE}): accuracy={b['accuracy']:.4f} precision={b['precision']:.4f} "
-          f"recall={b['recall']:.4f} f1={b['f1']:.4f} clean_fpr={b['clean_fpr']:.4f}")
     print(f"ground-truth anomaly rate={results['gt_anomaly_rate']:.1%}  "
           f"predicted rate={results['pred_anomaly_rate']:.1%}")
 
     print("\nrecall by anomaly kind (scored on per-type anomalous-signals/):")
-    print(f"  {'kind':<9} " + "  ".join(f"{n:>9}" for n in SCORE_NAMES))
     for name, stats in results['per_kind'].items():
-        parts = "  ".join('      n/a' if stats['by_score'][n] is None
-                          else f"{stats['by_score'][n]:>9.4f}" for n in SCORE_NAMES)
-        print(f"  {name:<9} {parts}  ({stats['count']} windows)")
+        r = '     n/a' if stats['recall'] is None else f"{stats['recall']:>9.4f}"
+        print(f"  {name:<9} {r}  ({stats['count']} windows)")
 
 
 if __name__ == "__main__":

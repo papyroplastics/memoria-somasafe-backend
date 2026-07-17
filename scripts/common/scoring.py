@@ -10,11 +10,6 @@ subject's own clean scores, that fraction of clean windows lies above it by defi
 parameter *is* the false-alarm rate, not a proxy for it. The rate measured on a given set
 is its *empirical* FPR (``clean_fpr``).
 
-``spectral`` (in-band spectral entropy) is a classical DSP index carried alongside as a
-*baseline*, thresholded the same way so its precision/recall are directly comparable.
-It is not part of the detector and never reaches the distilled labels: anomaly_detection.py
-reports it so the learned teacher can be read against a hand-crafted one.
-
 See ../../../shared/docs/anomalies-and-distillation.md for why the expected FPR is
 calibrated on Youden's J.
 """
@@ -29,11 +24,7 @@ from ml.loading import load_signal, window_count, holdout
 from ml.metrics import classification_report
 from ml.models.common import AutoencoderTrainer
 
-from . import dsp
-
 DETECTOR = 'recon'       # the autoencoder score the detector and the labels are built on
-BASELINE = 'spectral'    # hand-crafted DSP index, reported alongside as a comparison
-SCORE_NAMES = (DETECTOR, BASELINE)
 
 CALIBRATION_REPORT = 'calibration.json'   # the full FPR sweep, from calibrate_fpr
 
@@ -78,11 +69,7 @@ def window_errors(model, signal: np.ndarray, window: int, n_windows: int) -> np.
 
 def score_windows(model, signal: np.ndarray, window: int,
                   n_windows: int) -> dict[str, np.ndarray]:
-    recon = window_errors(model, signal, window, n_windows)
-    bvp = signal[:, 0]
-    spectral = np.array([dsp.spectral_entropy(bvp[w * window:(w + 1) * window])
-                         for w in range(len(recon))], dtype=np.float32)
-    return {DETECTOR: recon, BASELINE: spectral}
+    return {DETECTOR: window_errors(model, signal, window, n_windows)}
 
 
 def clean_threshold(clean_score: np.ndarray, expected_fpr: float) -> float:
@@ -91,8 +78,8 @@ def clean_threshold(clean_score: np.ndarray, expected_fpr: float) -> float:
 
 def subject_thresholds(clean: dict[str, dict[str, np.ndarray]],
                        expected_fpr: float) -> dict[str, dict[str, float]]:
-    """Each subject's per-score threshold at the shared global expected FPR."""
-    return {sid: {n: clean_threshold(sc[n], expected_fpr) for n in SCORE_NAMES}
+    """Each subject's detector threshold at the shared global expected FPR."""
+    return {sid: {DETECTOR: clean_threshold(sc[DETECTOR], expected_fpr)}
             for sid, sc in clean.items()}
 
 

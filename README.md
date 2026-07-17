@@ -65,7 +65,7 @@ worker/    Celery task layer (TensorFlow loads at startup): celery_app.py wires 
            validate_submission, federated_aggregation and cleanup_results (plus the
            structural malformed_reason check they share).
 scripts/   CLI entry points, grouped into subpackages by how each relates to the system.
-           common/ holds their shared, model-agnostic helpers (api, litert, scoring, dsp,
+           common/ holds their shared, model-agnostic helpers (api, litert, scoring,
            reports, plots, secure + the generated dataset_pb2); scripts/__init__.py
            seeds the RNG on any submodule import.
              system/       essential to the running pipeline: get_dataset, train (exports the
@@ -182,11 +182,6 @@ false-alarm rate rather than a proxy for it, so calibration reduces to maximizin
 (`clean_fpr`); it matches `f` exactly on the subjects whose own clean windows set the
 thresholds, and only lands near it on an unseen subject — hence *expected*.
 
-In-band spectral entropy is scored alongside as a hand-crafted **baseline**, thresholded at
-the same expected FPR so its precision/recall are directly comparable. It is not part of the
-detector and never reaches the distilled labels — `anomaly_detection.py` reports it so the
-learned teacher can be read against a classical index.
-
 The soft label a window gets is `sigmoid((error − threshold) / s)`, where `s` is the
 standard deviation of that subject's own clean-window scores. Normalizing by the subject's
 own clean-error spread makes the ramp calibrated per subject (reconstruction-error scale
@@ -203,8 +198,8 @@ The case studies live in three `scripts/figures/` scripts:
 - **`anomaly_detection.py`** takes a model trained **with a split**: it picks the expected
   FPR inline on the training subjects and scores the detector against the true mixed-window
   labels and the per-type `anomalous-signals/` sets on the **held-out** subjects —
-  precision/recall/F1, per-anomaly-kind recall and clean FPR, detector and spectral baseline
-  alike. Held-out only, so the numbers are generalization to an unseen user.
+  precision/recall/F1, per-anomaly-kind recall and clean FPR. Held-out only, so the numbers
+  are generalization to an unseen user.
 - **`knowledge_distillation.py`** takes a teacher trained on **all** users (so every
   subject's soft labels are the same, teacher-seen quality) and shows a distilled student can
   be personalized. It distils the soft labels in memory and runs **leave-one-subject-out**:
