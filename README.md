@@ -355,9 +355,11 @@ same database, which is what makes the worker actually distributable (Celery's p
 instead of implicitly assuming a co-located disk.
 
 - **Gateway (`api/`, no TensorFlow):** serves the model artifacts (read from the DB and
-  returned as stored, keyed by the active `GlobalWeights` row), accepts
-  weight-delta uploads, persists them, enqueues worker jobs, and exposes a result endpoint the
-  client polls. Fast to start since it never imports TF.
+  returned as stored, keyed by the active `GlobalWeights` row) — either the whole
+  trainable/quantized `.tflite`, or just the snapshot's **flat weight buffer** for a client
+  that already holds the graph (`GET /model/weights/{key}`, see "Serving weights on their
+  own") — accepts weight-delta uploads, persists them, enqueues worker jobs, and exposes a
+  result endpoint the client polls. Fast to start since it never imports TF.
 - **Worker (`worker/tasks.py`):** restores uploaded weights into the model, converts it to
   an int8 `.tflite` against the per-model calibration dataset
   (`ml/saving.py:get_optimized_model`) and signs it, validates submit-only uploads, and
@@ -487,10 +489,12 @@ uv run -m scripts.integration.queue_aggregation cnn-ae    # a single model
 ```
 
 **Headless federated run.** `scripts/integration/fed_client.py` drives the whole stack over the real
-HTTP API: for each dataset subject (as user `test_N`) it logs in, pulls the global
-trainable artifact, trains one pass through the on-device LiteRT `CompiledModel` runtime,
-uploads the update, and logs out; then it queues a round, waits for the new `GlobalWeights`,
-and scores it on the held-out subjects, repeating for `--rounds`. It picks the aggregation
+HTTP API: it downloads the trainable artifact once up front (the graph is fixed within a
+version), then for each dataset subject (as user `test_N`) it logs in, pulls the current
+global weight buffer (`/model/weights`), restores it, trains one pass through the on-device
+LiteRT `CompiledModel` runtime, uploads the update, and logs out; then it queues a round,
+waits for the new `GlobalWeights`, and scores it on the held-out subjects, repeating for
+`--rounds`. It picks the aggregation
 strategy from the model's `submission_type`: the dense `raw`/`quantize` path (convergence
 series to `results/<model>/fed_client/`) or the masked `secure` path (see "Secure
 aggregation" for the extra phases, series to `results/<model>/secure_fed_client/`).
@@ -682,6 +686,7 @@ if that work then fails.
 |----------|-------|
 | `GET /model/list`, `GET /model/versions/{key}` | authed only |
 | `GET /model/download/{trainable,quantized}/{key}[?version=N]` | device-owner only; one download per model per `DOWNLOAD_COOLDOWN_SECONDS` (default 300 s) |
+| `GET /model/weights/{key}[?version=N]` | device-owner only; one pull per model per `DOWNLOAD_COOLDOWN_SECONDS` (default 300 s), on a counter separate from the artifact download |
 | `POST /model/submit/quantize/{key}/{weights_id}` | device-owner only; `QUANTIZE_DAILY_LIMIT` (default 2) per model per rolling 24 h; `404` unless the model's `submission_type` is `quantize` |
 | `POST /model/submit/raw/{key}/{weights_id}` | device-owner only; `SUBMIT_DAILY_LIMIT` (default 2) per model per rolling 24 h; `404` unless the model's `submission_type` is `raw` or `quantize` |
 | `GET /model/quantize/result/{job_id}` | authed; only the user who submitted the job (else `404`) |
@@ -698,6 +703,26 @@ echoes `X-Model-Fingerprint`, `X-Model-Version`, `X-Weights-ID` and
 `X-Weights-Timestamp`; the quantized artifact additionally carries `X-Model-Signature`,
 `X-Contract-Version` and `X-Norm-Params` (see `shared/docs/model-signing.md`). The body is
 zstd-compressed — the client decompresses before verifying/using it.
+
+### Serving weights on their own
+
+`GET /model/weights/{key}[?version=N]` serves **just the flat weight buffer** of the same
+active `GlobalWeights` snapshot the trainable artifact is baked from — the raw
+little-endian float32 vector (`GlobalWeights.weights`, exactly what the model's `restore`
+signature consumes), stored zstd-compressed and served as stored like every other blob (the
+weights are compressed once when the snapshot is baked, never per request). The model graph is
+fixed within a `version`, so only the weights change from round to round: a client that
+already downloaded the trainable `.tflite` once can pull this much lighter buffer each
+round and restore it into the model in hand, instead of re-downloading the whole artifact
+(the `cnn-ae` trainable is ~12 MB compressed; its weight buffer is a fraction of that and
+carries no graph or optimizer state). It echoes the same
+`X-Model-Fingerprint`/`X-Model-Version`/`X-Weights-ID`/`X-Weights-Timestamp` headers as the
+artifact download and keys off the same active row, so the `X-Weights-ID` it returns is the
+base a subsequent delta submits against. Its cooldown is a separate per-user counter from
+the artifact download (both cleared after a federated round), so grabbing the graph once and
+then refreshing weights never trips the artifact cooldown and vice versa.
+`scripts/integration/fed_client.py` uses it: it downloads the trainable artifact once at
+startup and pulls only the weight buffer each round.
 
 ## Firmware distribution (OTA)
 

@@ -73,6 +73,20 @@ class LiteRTClient:
     def weights(self) -> np.ndarray:
         return self._run("save", [])["weights"].astype(np.float32)
 
+    def restore(self, weights: np.ndarray) -> None:
+        """Load a flat global-weights buffer into the compiled model's resource
+        variables via the ``restore`` signature, so a fresh snapshot pulled from
+        ``/model/weights`` can be applied without rebuilding the model from a new
+        trainable artifact."""
+        [name] = self.signatures["restore"]["inputs"]
+        buffer = self.model.create_input_buffer_by_name("restore", name)
+        buffer.write(np.ascontiguousarray(weights, dtype=np.float32))
+        output_map = {
+            out: self.model.create_output_buffer_by_name("restore", out)
+            for out in self.signatures["restore"]["outputs"]
+        }
+        self.model.run_by_name("restore", {name: buffer}, output_map)
+
     def eval(self, datapoint) -> dict[str, np.ndarray]:
         """Run the eval signature on one dataset batch, returning the output tensors
         keyed by output name. Extra datapoint tensors (targets the eval signature

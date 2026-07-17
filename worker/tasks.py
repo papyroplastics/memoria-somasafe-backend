@@ -42,7 +42,7 @@ from common.db import (
     utcnow,
 )
 
-from common.compression import compress
+from common.compression import compress, decompress
 from common.ratelimit import clear_model_limits
 from common.secure_agg import dequantize, ring_sum
 
@@ -129,7 +129,7 @@ def quantize_submission(job_id: str) -> None:
             # The personalized int8 artifact is built from the client's own local
             # weights, reconstructed as base snapshot + submitted delta.
             delta = np.frombuffer(submission.deltas, dtype=np.float32)
-            local = (np.frombuffer(base.weights, dtype=np.float32) + delta).astype(np.float32)
+            local = (np.frombuffer(decompress(base.weights), dtype=np.float32) + delta).astype(np.float32)
             model.restore(tf.constant(local, dtype=tf.float32))
             optimized = bytes(get_optimized_model(model, rep_dataset))
             job.signature = sign_model(optimized, contract_version, norm_bytes,
@@ -183,7 +183,7 @@ def _bake_and_store(session: Session, key: str, latest, new_weights: np.ndarray,
 
     snapshot = GlobalWeights(
         model_key=key, version_id=latest.id,
-        weights=new_weights.tobytes(),
+        weights=compress(new_weights.tobytes()),
         valid=export_error is None,
     )
     session.add(snapshot)
@@ -253,7 +253,7 @@ def _aggregate_model(session: Session, key: str) -> str:
     # aggregation over deltas: new global = reference global + trimmed mean of the
     # accepted updates. With a shared base this is identical to aggregating absolute
     # weights; trimmed mean is what bounds the influence of outlier/malicious deltas.
-    reference_weights = np.frombuffer(reference.weights, dtype=np.float32)
+    reference_weights = np.frombuffer(decompress(reference.weights), dtype=np.float32)
     new_weights = (reference_weights + trimmed_mean(deltas, FED_TRIM_RATIO)).astype(np.float32)
 
     # Bake the new weights into fresh serving artifacts. On success the new valid
@@ -333,7 +333,7 @@ def secure_aggregation(round_id: int) -> str:
             vectors.append(v)
 
         mean_delta = dequantize(ring_sum(vectors), round.scale, round.member_count)
-        reference = np.frombuffer(base.weights, dtype=np.float32)
+        reference = np.frombuffer(decompress(base.weights), dtype=np.float32)
         new_weights = (reference + mean_delta).astype(np.float32)
 
         # No individual update is visible, so the only guard is aggregate-level:

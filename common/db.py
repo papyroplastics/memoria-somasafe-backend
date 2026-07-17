@@ -140,7 +140,7 @@ class GlobalWeights(IntPKModel, table=True):
 
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version_id: int = Field(foreign_key="modelversion.id", index=True)
-    weights: bytes             # packed float32 (np.float32 .tobytes())
+    weights: bytes             # zstd-compressed packed float32 (np.float32 .tobytes())
     valid: bool = True
     created_at: datetime = Field(default_factory=utcnow, index=True)
 

@@ -289,12 +289,8 @@ def quantize_result(job_id: uuid.UUID, user: User = Depends(get_current_user)):
         return JSONResponse(status_code=202, content={"status": job.status.value})
 
 
-@router.get("/download/{artifact}/{key}")
-def download_model(artifact: Artifact, key: str, version: int | None = None,
-                   session: Session = Depends(get_session),
-                   user: User = Depends(get_current_user)):
-    check_limit(RateLimit.model_download, user.id, key, 1, DOWNLOAD_COOLDOWN_SECONDS)
-    require_device_owner(session, user)
+def _resolve_weights(session: Session, key: str,
+                     version: int | None) -> tuple[ModelVersion, GlobalWeights]:
     require_model(session, key)
 
     if version is None:
@@ -310,20 +306,52 @@ def download_model(artifact: Artifact, key: str, version: int | None = None,
     weights = get_version_weights(session, ver.id)
     if weights is None:
         raise HTTPException(status_code=404, detail=f"No weights for model '{key}'")
+    return ver, weights
+
+
+def _weights_headers(ver: ModelVersion, weights: GlobalWeights) -> dict[str, str]:
+    return {
+        FINGERPRINT_HEADER: ver.fingerprint,
+        MODEL_VERSION_HEADER: str(ver.version),
+        WEIGHTS_ID_HEADER: str(weights.id),
+        WEIGHTS_TIMESTAMP_HEADER: weights.created_at.isoformat(),
+    }
+
+
+@router.get("/weights/{key}")
+def download_weights(key: str, version: int | None = None,
+                     session: Session = Depends(get_session),
+                     user: User = Depends(get_current_user)):
+    check_limit(RateLimit.weights_download, user.id, key, 1, DOWNLOAD_COOLDOWN_SECONDS)
+    require_device_owner(session, user)
+    ver, weights = _resolve_weights(session, key, version)
+
+    try:
+        headers = _weights_headers(ver, weights) | {
+            "Content-Disposition":
+                f'attachment; filename="{key}-v{ver.version}-weights.bin"',
+        }
+        return Response(content=weights.weights,
+                        media_type="application/octet-stream", headers=headers)
+    finally:
+        record_usage(RateLimit.weights_download, user.id, key, DOWNLOAD_COOLDOWN_SECONDS)
+
+
+@router.get("/download/{artifact}/{key}")
+def download_model(artifact: Artifact, key: str, version: int | None = None,
+                   session: Session = Depends(get_session),
+                   user: User = Depends(get_current_user)):
+    check_limit(RateLimit.model_download, user.id, key, 1, DOWNLOAD_COOLDOWN_SECONDS)
+    require_device_owner(session, user)
+    ver, weights = _resolve_weights(session, key, version)
 
     baked = get_weights_artifact(session, weights.id, artifact)
     if baked is None:
         raise HTTPException(status_code=404,
                             detail=f"No {artifact.value} artifact for model '{key}'")
 
-    # The cooldown is spent only once we actually serve the artifact, so the
-    # cheap rejections above (unknown version/weights/artifact) don't count.
     try:
-        headers = {
-            FINGERPRINT_HEADER: ver.fingerprint,
-            MODEL_VERSION_HEADER: str(ver.version),
-            WEIGHTS_ID_HEADER: str(weights.id),
-            WEIGHTS_TIMESTAMP_HEADER: weights.created_at.isoformat(),
+        headers = _weights_headers(ver, weights) | {
             "Content-Disposition":
                 f'attachment; filename="{key}-v{ver.version}-{artifact.value}.tflite"',
         }

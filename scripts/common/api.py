@@ -36,6 +36,12 @@ def download_trainable(base: str, token: str, key: str) -> tuple[bytes, int]:
     return decompress(resp.content), int(resp.headers[WEIGHTS_ID_HEADER])
 
 
+def download_weights(base: str, token: str, key: str) -> tuple[bytes, int]:
+    resp = requests.get(f"{base}/model/weights/{key}", headers=auth(token))
+    resp.raise_for_status()
+    return decompress(resp.content), int(resp.headers[WEIGHTS_ID_HEADER])
+
+
 def submit_delta(base: str, token: str, key: str, weights_id: int, body: bytes,
                  submission_type: SubmissionType) -> None:
     path = "quantize" if submission_type is SubmissionType.quantize else "raw"

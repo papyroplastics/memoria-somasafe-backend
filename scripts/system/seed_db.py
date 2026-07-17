@@ -174,7 +174,7 @@ def seed_models(session: Session, reseed: bool = False) -> None:
 
             gw = GlobalWeights(
                 model_key=key, version_id=version.id,
-                weights=weights.astype("float32").tobytes(),
+                weights=compress(weights.astype("float32").tobytes()),
             )
             session.add(gw)
             session.flush()  # need the row id the artifacts are keyed by

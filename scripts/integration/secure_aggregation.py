@@ -23,13 +23,8 @@ from sqlmodel import Session
 from common.celery_tasks import SECURE_AGG_TASK
 from ml.model_list import MODELS
 from common.config import SECURE_MIN_MEMBERS, SEED
-from common.db import (
-    GlobalWeights,
-    SubmissionType,
-    engine,
-    get_latest_version,
-    get_latest_weights,
-)
+from common.db import SubmissionType, engine, get_latest_version
+from common.ratelimit import clear_model_limits
 from common.secure_agg import (
     dequantize,
     generate_keypair,
@@ -41,6 +36,7 @@ from worker.celery_app import app
 
 from scripts.common.api import (
     DEFAULT_BASE_URL,
+    download_weights,
     get_descriptor,
     join,
     login,
@@ -49,14 +45,6 @@ from scripts.common.api import (
     wait_for_round,
 )
 from scripts.common.secure import seal_round
-
-
-def read_weights(weights_id: int) -> np.ndarray:
-    with Session(engine) as session:
-        row = session.get(GlobalWeights, weights_id)
-        if row is None:
-            raise SystemExit(f"weights {weights_id} not found")
-        return np.frombuffer(row.weights, dtype=np.float32)
 
 
 def run(base: str, key: str, clients: int, rounds: int) -> None:
@@ -100,7 +88,11 @@ def run(base: str, key: str, clients: int, rounds: int) -> None:
         # comparison); the delta is what gets quantized and masked.
         desc = get_descriptor(base, seats[0][1], round_id)
         m, B, scale = desc["weight_count"], desc["clip_bound"], desc["scale"]
-        base_weights = read_weights(desc["base_weights_id"])
+        clear_model_limits(key)
+        raw, weights_id = download_weights(base, seats[0][1], key)
+        if weights_id != desc["base_weights_id"]:
+            raise SystemExit("served weights id != round base; client out of sync")
+        base_weights = np.frombuffer(raw, dtype=np.float32)
         roster = [(e["user_id"], base64.b64decode(e["ka_public_key"]))
                   for e in desc["roster"]]
 
@@ -125,9 +117,11 @@ def run(base: str, key: str, clients: int, rounds: int) -> None:
         summary = wait_for_round(app.send_task(SECURE_AGG_TASK, args=[round_id]))
         print(f"{prefix} aggregated: {summary}")
 
-        with Session(engine) as session:
-            new_weights = np.frombuffer(
-                get_latest_weights(session, key).weights, dtype=np.float32)
+        clear_model_limits(key)
+        token = login(base, "test_1", "test_1")
+        raw, _ = download_weights(base, token, key)
+        logout(base, token)
+        new_weights = np.frombuffer(raw, dtype=np.float32)
 
         # The aggregation result should be W + mean(delta), i.e. the mean of the
         # clients' random weight tensors.

@@ -6,6 +6,7 @@ quantize job is expected to actually complete and produce a result.
 
 import pytest
 
+from common.compression import decompress
 from common.config import QUANTIZE_DAILY_LIMIT, SUBMIT_DAILY_LIMIT
 
 FINGERPRINT_HEADER = "X-Model-Fingerprint"
@@ -90,6 +91,56 @@ def test_download_unknown_version_404(client, auth_headers, owned_device):
     assert resp.status_code == 404
 
 
+def test_weights_requires_device_owner(client, auth_headers, deviceless_auth_headers):
+    model = _model_with_weights(client, auth_headers)
+    resp = client.get(f"/model/weights/{model['key']}",
+                      headers=deviceless_auth_headers)
+    assert resp.status_code == 403
+
+
+def test_weights_serves_flat_buffer(client, auth_headers, owned_device):
+    model = _model_with_weights(client, auth_headers)
+    resp = client.get(f"/model/weights/{model['key']}", headers=auth_headers)
+    assert resp.status_code == 200, resp.text
+    # The body decompresses to exactly the model's flat float32 weight buffer,
+    # and echoes the same version/weights headers the artifact download does.
+    assert len(decompress(resp.content)) == model["weight_count"] * 4
+    assert resp.headers[FINGERPRINT_HEADER] == model["fingerprint"]
+    assert int(resp.headers[MODEL_VERSION_HEADER]) == model["version"]
+    assert int(resp.headers[WEIGHTS_ID_HEADER]) > 0
+
+
+def test_weights_shares_base_with_artifact(client, auth_headers, owned_device):
+    model = _model_with_weights(client, auth_headers)
+    trainable = _download_trainable(client, auth_headers, model["key"])
+    weights = client.get(f"/model/weights/{model['key']}", headers=auth_headers)
+    assert weights.status_code == 200, weights.text
+    assert weights.headers[WEIGHTS_ID_HEADER] == trainable.headers[WEIGHTS_ID_HEADER]
+
+
+def test_weights_cooldown(client, auth_headers, owned_device):
+    model = _model_with_weights(client, auth_headers)
+    assert client.get(f"/model/weights/{model['key']}",
+                      headers=auth_headers).status_code == 200
+    # An immediate repeat on the same model is rate limited.
+    assert client.get(f"/model/weights/{model['key']}",
+                      headers=auth_headers).status_code == 429
+
+
+def test_weights_download_slots_are_independent(client, auth_headers, owned_device):
+    model = _model_with_weights(client, auth_headers)
+    _download_trainable(client, auth_headers, model["key"])
+    assert client.get(f"/model/weights/{model['key']}",
+                      headers=auth_headers).status_code == 200
+
+
+def test_weights_unknown_version_404(client, auth_headers, owned_device):
+    model = _model_with_weights(client, auth_headers)
+    resp = client.get(f"/model/weights/{model['key']}?version=999",
+                      headers=auth_headers)
+    assert resp.status_code == 404
+
+
 def test_quantize_enqueues_and_polls_pending(client, auth_headers, owned_device):
     model = _model_with_weights(client, auth_headers, "quantize")
     resp = _download_trainable(client, auth_headers, model["key"])
@@ -140,7 +191,6 @@ def test_quantize_daily_limit(client, auth_headers, owned_device):
 
 
 def test_quantize_rejects_raw_model(client, auth_headers, owned_device):
-    """A model whose submission type isn't 'quantize' has no quantize path — 404, not 403."""
     model = _model_with_weights(client, auth_headers, exclude_submission_type="quantize")
     resp = _download_trainable(client, auth_headers, model["key"])
     weights_id = int(resp.headers[WEIGHTS_ID_HEADER])
