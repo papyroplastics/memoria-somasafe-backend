@@ -45,7 +45,7 @@ def load_signal(signal_dir: Path, sid: str) -> np.ndarray:
 
 
 def window_count(signal: np.ndarray, window_size: int) -> int:
-    return max(0, (len(signal) - window_size) // window_size + 1)
+    return len(signal) // window_size
 
 
 def subject_dirs(data_root: Path, subdir: str) -> list[Path]:

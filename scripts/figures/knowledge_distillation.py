@@ -23,23 +23,22 @@ clean-error std. Nothing is written to disk but the final metrics.
 
 
 import argparse
-import json
 from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
 
 from common.config import MODELS_DIR, DATASETS_DIR
-from ml.preprocessing import MIXED_FEATURE_SUBDIR, get_sorted_paths
+from ml.preprocessing import MIXED_FEATURE_SUBDIR, CLEAN_SUBDIR, MIXED_SUBDIR, get_sorted_paths
 from ml.metrics import classification_report
 from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
 from ml.saving import load_trainable_weights, get_optimized_model
 from ..common.litert import infer_int8
-from ..common.reports import get_report_dir, write_metrics_csv
+from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 from ..common.scoring import (
     DETECTOR, calibrate_expected_fpr, clean_threshold, score_dir_by_subject,
-    score_mixed_by_subject, load_mixed_truth,
+    load_mixed_truth,
 )
 
 VARIANTS = ('global_float', 'global_int8', 'personal_float', 'personal_int8')
@@ -127,13 +126,13 @@ if __name__ == "__main__":
     assert isinstance(teacher, AutoencoderTrainer)
 
     print("Scoring the teacher over all subjects + calibrating the expected FPR...")
-    mixed = score_mixed_by_subject(teacher, data_dir)
+    mixed = score_dir_by_subject(teacher, data_dir / MIXED_SUBDIR)
     truth = load_mixed_truth(data_dir, mixed)
-    clean = score_dir_by_subject(teacher, data_dir, None)
+    clean = score_dir_by_subject(teacher, data_dir / CLEAN_SUBDIR)
     missing = set(mixed) - set(clean)
     if missing:
         raise SystemExit(f"subjects {sorted(missing)} lack clean windows; cannot threshold.")
-    expected_fpr, _ = calibrate_expected_fpr(clean, mixed, truth)
+    expected_fpr = calibrate_expected_fpr(clean, mixed, truth)
     distilled = distilled_labels(mixed, clean, expected_fpr)
     print(f"expected_fpr={expected_fpr:.4f}; distilled soft labels for {len(distilled)} subjects")
 
@@ -221,10 +220,30 @@ if __name__ == "__main__":
 
     report_dir = get_report_dir(args.student, 'personalization')
     write_metrics_csv(rows, report_dir, 'personalization.csv')
-    (report_dir / 'personalization.json').write_text(json.dumps({
-        'teacher': args.teacher, 'student': args.student, 'expected_fpr': expected_fpr,
-        'global_epochs': args.global_epochs, 'epochs': args.epochs,
-        'train_split': args.train_split, 'batch_size': args.batch_size,
-        'holdout': 'leave-one-subject-out', 'overall': overall, 'per_subject': rows,
-    }, indent=2))
+    write_yaml(report_dir / 'personalization.yaml', {
+        'shows': f"Leave-one-subject-out personalization of a distilled {args.student} "
+                 f"student against a {args.teacher} teacher (report Secs. 5.4/5.8): per-"
+                 f"fold precision/recall/F1/accuracy for the global vs. personalized "
+                 f"student, float and int8, scored against each held-out subject's true "
+                 f"labels.",
+        'measured_on': {
+            'holdout': 'leave-one-subject-out',
+            'subjects': subjects,
+            'note': "each fold's global student never trains on the subject it is judged "
+                    "on; the teacher trained on all subjects so every fold's distilled "
+                    "labels are the same, teacher-seen quality.",
+        },
+        'config': {
+            'teacher': args.teacher, 'student': args.student, 'expected_fpr': expected_fpr,
+            'global_epochs': args.global_epochs, 'epochs': args.epochs,
+            'train_split': args.train_split, 'batch_size': args.batch_size,
+        },
+        'headline': overall,
+        'personalization_delta_f1': {
+            'float': overall['personal_float']['f1'] - overall['global_float']['f1'],
+            'int8': overall['personal_int8']['f1'] - overall['global_int8']['f1'],
+        },
+        'per_subject': rows,
+        'source': {'reproducible': True},
+    })
     print(f"wrote report to {report_dir}/")

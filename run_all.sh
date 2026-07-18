@@ -109,11 +109,9 @@ step "signal + reconstruction figures" "$RESULTS/$AE/signals_reconstructed.png" 
 # uniform per-subject quality so its leave-one-subject-out folds are comparable, so the
 # teacher is trained a second time on ALL subjects, --tag'd so it lands beside the split
 # run rather than clobbering the trainable.tflite the convergence figures + DB rely on.
-step "calibrate FPR sweep table ($AE)" "$RESULTS/$AE/calibration.json" \
+step "detector calibration + ROC ($AE)" "$RESULTS/$AE/calibrate_fpr/calibration.png" \
     "${run[@]}" scripts.figures.calibrate_fpr "$AE"
-step "detector calibration figure ($AE)" "$RESULTS/$AE/calibration.png" \
-    "${run[@]}" scripts.figures.plot_calibration "$AE"
-step "anomaly detection eval ($AE)" "$RESULTS/$AE/anomaly_detection.json" \
+step "anomaly detection eval ($AE)" "$RESULTS/$AE/anomaly_detection.yaml" \
     "${run[@]}" scripts.figures.anomaly_detection "$AE"
 step "train $AE on all users (distillation teacher)" "$GEN_MODELS/$AE/trainable_all.tflite" \
     "${run[@]}" scripts.system.train "$AE" --loop normal --tag all \

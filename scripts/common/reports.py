@@ -38,8 +38,7 @@ def write_yaml(path: Path, fields: dict) -> None:
     """Writes a run manifest, or a figure's companion summary — `<name>.yaml` next to
     each `<name>.png`, so the result can be read and cited without opening the image.
     Key order is preserved; by convention a summary starts with `shows`, then the axes,
-    the subjects/splits the numbers were measured on, the headline numbers, and what
-    report section it backs."""
+    the subjects/splits the numbers were measured on, the headline numbers"""
     path.write_text(yaml.safe_dump(_plain(fields), sort_keys=False, default_flow_style=False))
     print(f"wrote {path}")
 

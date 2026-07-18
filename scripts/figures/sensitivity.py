@@ -70,7 +70,6 @@ def sweep_participants(key, subjects, metric, args, report_dir):
         'headline': {'min': min(values), 'max': max(values),
                      'spread': max(values) - min(values)},
         'source': {'seed': SEED, 'reproducible': True},
-        'backs': 'report Sec. 5.7',
     })
 
 
@@ -100,7 +99,6 @@ def sweep_local_epochs(key, subjects, metric, args, report_dir):
         'headline': {'min': min(values), 'max': max(values),
                      'spread': max(values) - min(values)},
         'source': {'seed': SEED, 'reproducible': True},
-        'backs': 'report Sec. 5.7',
     })
 
 
@@ -131,7 +129,6 @@ def sweep_loso(key, subjects, metric, args, report_dir):
                   'local_epochs': args.local_epochs, 'rounds': args.rounds},
         'headline': {'mean': mean, 'std': std, 'min': min(values), 'max': max(values)},
         'source': {'seed': SEED, 'reproducible': True},
-        'backs': 'report Sec. 5.7',
     })
 
 

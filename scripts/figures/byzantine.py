@@ -156,7 +156,6 @@ def main() -> None:
                          {label: series[label][-1] for label in aggregators}},
         'conclusion': 'trimmed mean holds the round against gross outliers, and no more',
         'source': {'seed': SEED, 'reproducible': True},
-        'backs': 'report Sec. 5.5',
     })
 
 

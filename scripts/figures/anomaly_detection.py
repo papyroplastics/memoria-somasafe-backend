@@ -4,7 +4,7 @@ Sec. 5.4). Takes a model trained **with a split**: it picks the expected FPR on 
 subjects (the model's own labeled population) and scores the detector on the **held-out**
 subjects, so the numbers are generalization to an unseen user, consistent with the
 convergence figures. Calibration happens inline — it is cheap, and this way the script is
-self-contained (calibrate_fpr.py only exists to dump the whole sweep for the report table).
+self-contained (calibrate_fpr.py only exists to plot the whole sweep + ROC for the report).
 
 Scores the detector against the true mixed-window labels and the per-type anomalous-signals/
 sets: precision/recall/F1, per-anomaly-kind recall, and the empirical clean false-positive
@@ -13,24 +13,23 @@ rate. Writes the metrics to results/<model>/.
 
 
 import argparse
-import json
 from pathlib import Path
 
 import numpy as np
 
 from common.config import DATASETS_DIR, MODELS_DIR
-from ml.preprocessing import ANOMALOUS_SUBDIR, ANOMALY_KINDS
+from ml.preprocessing import ANOMALOUS_SUBDIR, ANOMALY_KINDS, CLEAN_SUBDIR, MIXED_SUBDIR
 from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
 from ml.metrics import classification_report
 from ml.saving import load_trainable_weights
-from ..common.reports import get_report_dir, read_eval_subjects
+from ..common.reports import get_report_dir, read_eval_subjects, write_yaml
 from ..common.scoring import (
     DETECTOR, calibrate_expected_fpr, subject_thresholds, pooled_flags,
-    score_dir_by_subject, score_mixed_by_subject, load_mixed_truth, split_subject_ids,
+    score_dir_by_subject, load_mixed_truth, split_subject_ids,
 )
 
-EVAL_REPORT = 'anomaly_detection.json'   # detector metrics, from this script
+EVAL_REPORT = 'anomaly_detection.yaml'   # detector metrics, from this script
 
 
 def evaluate(trainer, data_dir: Path, clean: dict[str, dict[str, np.ndarray]],
@@ -49,7 +48,7 @@ def evaluate(trainer, data_dir: Path, clean: dict[str, dict[str, np.ndarray]],
     anomalous_dir = data_dir / ANOMALOUS_SUBDIR
     per_kind = {}
     for name in ANOMALY_KINDS:
-        sc = score_dir_by_subject(trainer, data_dir, anomalous_dir / name, subjects=subjects)
+        sc = score_dir_by_subject(trainer, anomalous_dir / name, subjects=subjects)
         c = sum(len(v[DETECTOR]) for v in sc.values())
         per_kind[name] = {
             'count': c,
@@ -95,15 +94,15 @@ if __name__ == "__main__":
     train, held = set(train_ids), set(held_out)
 
     print(f"Calibrating expected FPR on the {len(train_ids)} training subjects...")
-    mixed_tr = score_mixed_by_subject(trainer, data_dir, subjects=train)
+    mixed_tr = score_dir_by_subject(trainer, data_dir / MIXED_SUBDIR, subjects=train)
     truth_tr = load_mixed_truth(data_dir, mixed_tr)
-    clean_tr = score_dir_by_subject(trainer, data_dir, None, subjects=train)
-    expected_fpr, _ = calibrate_expected_fpr(clean_tr, mixed_tr, truth_tr)
+    clean_tr = score_dir_by_subject(trainer, data_dir / CLEAN_SUBDIR, subjects=train)
+    expected_fpr = calibrate_expected_fpr(clean_tr, mixed_tr, truth_tr)
 
     print(f"Evaluating on the {len(held_out)} held-out subjects: {', '.join(held_out)}")
-    mixed = score_mixed_by_subject(trainer, data_dir, subjects=held)
+    mixed = score_dir_by_subject(trainer, data_dir / MIXED_SUBDIR, subjects=held)
     truth = load_mixed_truth(data_dir, mixed)
-    clean = score_dir_by_subject(trainer, data_dir, None, subjects=held)
+    clean = score_dir_by_subject(trainer, data_dir / CLEAN_SUBDIR, subjects=held)
     missing = set(mixed) - set(clean)
     if missing:
         raise SystemExit(f"subjects {sorted(missing)} lack clean windows; "
@@ -116,8 +115,22 @@ if __name__ == "__main__":
     print_metrics(results, expected_fpr)
 
     report_dir = get_report_dir(args.model)
-    eval_path = report_dir / EVAL_REPORT
-    eval_path.write_text(json.dumps(
-        {'model': args.model, 'expected_fpr': expected_fpr,
-         'eval_subjects': held_out, **results}, indent=2))
-    print(f"\nWrote detector metrics to {eval_path}")
+    write_yaml(report_dir / EVAL_REPORT, {
+        'shows': f"Detector evaluation for {args.model} (report Sec. 5.4): precision/"
+                 f"recall/F1/accuracy and clean false-positive rate against the true "
+                 f"mixed-window labels, plus per-anomaly-kind recall, on held-out subjects.",
+        'measured_on': {
+            'calibration_subjects': train_ids,
+            'eval_subjects': held_out,
+            'note': "the expected FPR is calibrated on the training subjects; every "
+                    "metric here is scored on the held-out subjects, so the numbers are "
+                    "generalization to an unseen user.",
+        },
+        'selection': {'expected_fpr': expected_fpr},
+        'headline': results['detector'],
+        'per_kind': results['per_kind'],
+        'n_windows': results['n_windows'],
+        'gt_anomaly_rate': results['gt_anomaly_rate'],
+        'pred_anomaly_rate': results['pred_anomaly_rate'],
+        'source': {'reproducible': True},
+    })

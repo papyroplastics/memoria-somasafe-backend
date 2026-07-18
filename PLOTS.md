@@ -12,15 +12,17 @@ Conventions (see `README.md`, "Layout"):
 - Every `<name>.png` has a companion **`<name>.yaml`** — a structured summary (what it
   shows, axes/units, subjects/splits, headline numbers, which report section it backs)
   written via `scripts/common/reports.py:write_yaml`, so the result can be read and
-  cited without opening the image. Numeric results also carry `.csv`/`.json`.
+  cited without opening the image. Numeric results also carry a `.csv`. `anomaly_detection`
+  and `knowledge_distillation` produce no plot, so their `.yaml` is the whole report
+  (`personalization.csv` alongside the latter's, for the per-fold table).
 - Convergence numbers for the report come from the **simulated** loops (reproducible, seeded
   from `scripts/__init__.py`), not the headless HTTP client — that is integration
   verification only.
-- **The figure scripts split into two kinds.** `plot_convergence` and `plot_calibration`
-  *read* a previous run (`results/<model>/<loop>/run.yaml` + `training.csv`, and
-  `calibration.json` respectively) and fail if there is none — they never compute.
-  `byzantine`, `sensitivity` and `knowledge_distillation` *do* train, because they sweep
-  configurations no single `train.py` run produces.
+- **The figure scripts split into two kinds.** `plot_convergence` *reads* a previous run
+  (`results/<model>/<loop>/run.yaml` + `training.csv`) and fails if there is none — it never
+  computes. `byzantine`, `sensitivity` and `knowledge_distillation` *do* train, because they
+  sweep configurations no single `train.py` run produces. `calibrate_fpr` is its own case: it
+  calibrates (a dense grid argmax over Youden's J) but does not train — see below.
 - **Every loop holds out whole subjects** (`--eval-subjects N`, default 2: the last N).
   A metric is therefore generalization to an *unseen subject*, and a centralized and a
   federated run at the same `--eval-subjects` train on the same data and score on the same
@@ -29,11 +31,14 @@ Conventions (see `README.md`, "Layout"):
 - **The Sec. 5.4 scripts key off that same split.** `anomaly_detection` takes a **split**
   teacher: it picks the operating point on the training subjects (inline) and scores the
   detector on the held-out subjects, so its numbers are generalization to an unseen user
-  like every other Chapter 5 metric. `calibrate_fpr` calibrates on the same training
-  subjects but only dumps the full FPR sweep for the report table. `knowledge_distillation`
-  instead takes a teacher trained on **all** users (uniform per-subject label quality) and
-  runs leave-one-subject-out at the student level, so every fold is leakage-free and none is
-  special.
+  like every other Chapter 5 metric. `calibrate_fpr` picks the same operating point the same
+  way (on the training subjects) but then sweeps and plots the *whole* FPR curve on the
+  **held-out** subjects instead — the calibration subjects' empirical FPR would track the
+  expected FPR almost exactly by construction (each threshold is a quantile of that
+  subject's own clean scores), so sweeping them wouldn't say anything about generalization.
+  `knowledge_distillation` instead takes a teacher trained on **all** users (uniform
+  per-subject label quality) and runs leave-one-subject-out at the student level, so every
+  fold is leakage-free and none is special.
 
 Run scripts from `backend/` with `uv run -m …`. The training runs and the sweeps are
 compute-heavy; launch them in the background.
@@ -69,10 +74,10 @@ uv run -m scripts.figures.plot_convergence <model>      # both figures, no train
 | `results/<model>/<loop>/training.png` + `training.csv` + `run.yaml` (+ `reconstruction.png` for AEs, eval report) | `scripts.system.train <model> --loop {normal,federated} --eval-subjects K` | 5.2/5.3 (the underlying runs; the source both figures below read) |
 | `results/<model>/federated/convergence.png` + `.csv` + `.yaml` | `scripts.figures.plot_convergence <model>` | **5.2** federated model improves round over round |
 | `results/<model>/centralized_vs_federated/centralized_vs_federated.png` + `.csv` + `.yaml` | `scripts.figures.plot_convergence <model>` (same run; `--skip-overlay` to omit) | **5.3** FedAvg ≈ centralized without centralizing raw data (central claim) |
-| `results/<model>/anomaly_detection.json` | `scripts.figures.anomaly_detection <model>` (split teacher) | **5.4** per-kind recall, clean FPR, detector accuracy·F1 — calibrated on training subjects, scored on the held-out eval subjects |
-| `results/<model>/calibration.json` | `scripts.figures.calibrate_fpr <model>` (split teacher) | **5.4** the full expected-FPR sweep (table backing "J not F1"); standalone, feeds only the figure below |
-| `results/<model>/calibration.png` + `.csv` + `.yaml` | `scripts.figures.plot_calibration <model>` (reads a previous `calibrate_fpr`; never calibrates) | **5.4** recall/empirical FPR vs. expected FPR with the selected operating point — makes the chosen expected FPR auditable |
-| `results/feature-mlp/personalization/personalization.csv` + `.json` | `scripts.figures.knowledge_distillation <ae> --student feature-mlp --weights <all-users teacher>` (trains) | **5.4/5.8** leave-one-subject-out personalization marginal-positive; int8 ≈ float |
+| `results/<model>/anomaly_detection.yaml` | `scripts.figures.anomaly_detection <model>` (split teacher) | **5.4** per-kind recall, clean FPR, detector accuracy·F1 — calibrated on training subjects, scored on the held-out eval subjects |
+| `results/<model>/calibrate_fpr/calibration.png` + `.csv` + `.yaml` | `scripts.figures.calibrate_fpr <model>` (split teacher) | **5.4** recall/empirical FPR/Youden's J vs. expected FPR — the sweep backing "J not F1", with the selected operating point marked |
+| `results/<model>/calibrate_fpr/roc.png` + `.yaml` | `scripts.figures.calibrate_fpr <model>` (same run) | **5.4** the detector's ROC curve (recall vs. empirical clean FPR) on the held-out subjects, with the selected operating point marked |
+| `results/feature-mlp/personalization/personalization.csv` + `.yaml` | `scripts.figures.knowledge_distillation <ae> --student feature-mlp --weights <all-users teacher>` (trains) | **5.4/5.8** leave-one-subject-out personalization marginal-positive; int8 ≈ float |
 | `results/<model>/byzantine/byzantine.png` + `.csv` + `.yaml` | `scripts.figures.byzantine <model> --max-malicious N --rounds R [--aggregator trimmed-mean\|average]` | **5.5** outlier filter holds the round (and no more) — trains |
 | `results/footprint/footprint.csv` + `.yaml` | `scripts.figures.footprint` | **5.6** system fits the edge (backend rows; phone/ESP32 rows pasted in) |
 | `results/<model>/sensitivity/{participants,local_epochs,loso}.png` + `.csv` + `.yaml` | `scripts.figures.sensitivity <model> [--sweep participants\|local-epochs\|loso\|all]` | **5.7** conclusions robust to configuration (LOSO mean ± std) — trains |

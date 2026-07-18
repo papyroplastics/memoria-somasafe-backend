@@ -87,7 +87,6 @@ def main() -> None:
         'source': {'artifacts': f'{MODELS_DIR}/<model>/',
                    'na_means': 'the artifact was not exported yet (train + seed the model '
                                'first)'},
-        'backs': 'report Sec. 5.6',
     })
     print(f"wrote footprint table to {report_dir}/ (results root {RESULTS_DIR})")
 

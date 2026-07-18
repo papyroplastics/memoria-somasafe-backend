@@ -65,7 +65,6 @@ def plot_convergence(model: str, run: dict, values: list[float]) -> None:
                      'delta': values[-1] - values[0]},
         'source': {'run': f'results/{model}/federated/run.yaml', 'seed': run['seed'],
                    'reproducible': True},
-        'backs': 'report Sec. 5.2',
     })
 
 
@@ -113,7 +112,6 @@ def plot_overlay(model: str, fed_run: dict, fed_values: list[float],
         'source': {'federated_run': f'results/{model}/federated/run.yaml',
                    'centralized_run': f'results/{model}/normal/run.yaml',
                    'seed': fed_run['seed'], 'reproducible': True},
-        'backs': 'report Sec. 5.3',
     })
 
 

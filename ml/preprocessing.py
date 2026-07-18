@@ -135,14 +135,13 @@ def apply_anomaly(segment: np.ndarray, kind: int, sig_std: float) -> np.ndarray:
 
     if kind == 0:    # blowup - amplitude blow-up around the local mean
         mean = float(seg.mean())
-        seg = mean + (seg - mean) * float(np.random.uniform(2.0, 4.0))
+        seg = mean + (seg - mean) * float(np.random.uniform(1.4, 2.0))
 
     elif kind == 1:  # noise - wavy band-limited interference burst
         seg += wavy_noise(n, sig_std * float(np.random.uniform(0.25, 0.4)))
 
     elif kind == 2:  # tachycardia - increased tempo by shrinking and tiling
-        factor = np.random.uniform(0.5, 0.65)
-        resampled = stretch_by(factor, src, seg)
+        resampled = stretch_by(0.8, src, seg)
         seg = np.tile(resampled, int(np.ceil(n / len(resampled))))[:n]
 
     elif kind == 3:  # bradycardia - decreased tempo by stretching

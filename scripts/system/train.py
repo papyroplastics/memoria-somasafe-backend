@@ -51,7 +51,6 @@ if __name__ == "__main__":
                              'N subjects; both loops train on the rest and score on these. '
                              '0 trains on every subject and skips evaluation (all-users teacher).')
     parser.add_argument('--epochs', type=int, default=5, help='Epochs for the normal loop')
-    parser.add_argument('--rounds', type=int, default=5, help='Global rounds for the federated loop')
     parser.add_argument('--local-epochs', type=int, default=2, help='Local epochs per round (federated)')
     parser.add_argument('--batch-size', type=int, default=None,
                         help='Override the model default batch size. Artifacts from a '
@@ -69,10 +68,6 @@ if __name__ == "__main__":
                              'on distilled labels rather than the synthetic ground truth.')
     args = parser.parse_args()
 
-    if args.eval_subjects < 0:
-        raise SystemExit("--eval-subjects must be >= 0 (0 trains on every subject and "
-                         "skips evaluation, e.g. to produce an all-users teacher).")
-
     data_dir = args.dataset_dir
 
     result_dir = MODELS_DIR / args.model
@@ -82,20 +77,19 @@ if __name__ == "__main__":
                                             else f'{args.loop}-{args.tag}')
 
     trainer = MODELS[args.model].build_trainer(data_dir, batch_size=args.batch_size)
-    steps = args.rounds if args.loop == 'federated' else args.epochs
     history, eval_dataset, n_train_subjects = run_loop(
-        trainer, data_dir, args.loop, args.eval_subjects, steps, args.local_epochs)
+        trainer, data_dir, args.loop, args.eval_subjects, args.epochs, args.local_epochs)
 
-    # Both the tag and a non-default batch size keep a run's artifacts off the canonical
-    # names, so a variant never clobbers the model the system actually serves.
     batch_size = trainer.model.batch_size
     parts = ([args.tag] if args.tag else []) + (
         [str(batch_size)] if batch_size != type(trainer.model).default_batch_size else [])
     postfix = ''.join(f'_{p}' for p in parts)
     save_artifacts(trainer, result_dir, eval_dataset, postfix, data_root=data_dir)
+
+    if args.epochs == 0:
+        exit()
+
     write_history_csv(history, report_dir)
-    # With --eval-subjects 0 there is no held-out set, so the metric plot and the
-    # reconstruction report (which read eval data) are skipped.
     if eval_dataset is not None:
         plot_history(history, trainer.primary_metric, report_dir)
         trainer.report(report_dir, eval_dataset)
@@ -106,7 +100,7 @@ if __name__ == "__main__":
         'loop': args.loop,
         'tag': args.tag,
         'metric': trainer.primary_metric,
-        'steps': steps,
+        'epochs': args.epochs,
         'step_unit': 'round' if args.loop == 'federated' else 'epoch',
         'local_epochs': args.local_epochs if args.loop == 'federated' else None,
         'clients': n_train_subjects if args.loop == 'federated' else None,

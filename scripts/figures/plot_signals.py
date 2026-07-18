@@ -109,7 +109,6 @@ if __name__ == "__main__":
         **axes,
         'sample': sample,
         'note': "anomalies are injected into BVP only",
-        'backs': 'report Sec. 4.1 (illustrative)',
     })
     write_yaml(report_dir / 'signals_reconstructed.yaml', {
         'shows': f"The same {len(KINDS)} windows with the {args.model} autoencoder's "
@@ -119,5 +118,4 @@ if __name__ == "__main__":
         'rows': {'order': 'top to bottom', 'kinds': list(KINDS)},
         **axes,
         'sample': sample,
-        'backs': 'report Sec. 4.1 (illustrative)',
     })

@@ -7,15 +7,19 @@ from ml.training import History
 
 def line_plot(path: Path, x: list, series: dict[str, list], xlabel: str, ylabel: str,
               title: str | None = None, marker: str = 'o-',
-              vline: tuple[float, str] | None = None, logx: bool = False) -> None:
+              vline: tuple[float, str] | None = None, logx: bool = False,
+              diagonal: bool = False) -> None:
     """One or more series against a shared x axis. A single series is drawn unlabeled
     (no legend); several get a legend keyed by name. ``vline`` marks an x position with
-    a labelled dashed rule (e.g. the operating point a sweep selected)."""
+    a labelled dashed rule (e.g. the operating point a sweep selected). ``diagonal`` draws
+    a dashed y=x reference line (the random-classifier baseline on a ROC plot)."""
     fig, ax = plt.subplots()
     markers = [marker, 's-', '^-', 'd-']
     for i, (name, values) in enumerate(series.items()):
         ax.plot(x[:len(values)], values, markers[i % len(markers)],
                 label=name if len(series) > 1 else None)
+    if diagonal:
+        ax.plot([0, 1], [0, 1], 'k--', linewidth=1, label='random classifier')
     if vline is not None:
         ax.axvline(vline[0], color='k', linestyle='--', linewidth=1, label=vline[1])
     if logx:
@@ -24,7 +28,7 @@ def line_plot(path: Path, x: list, series: dict[str, list], xlabel: str, ylabel:
     ax.set_ylabel(ylabel)
     if title:
         ax.set_title(title)
-    if len(series) > 1 or vline is not None:
+    if len(series) > 1 or vline is not None or diagonal:
         ax.legend()
     fig.savefig(path)
     plt.close(fig)

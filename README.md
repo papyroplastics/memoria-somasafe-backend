@@ -190,11 +190,16 @@ the teacher's confidence — proper knowledge distillation, not just pseudo-labe
 
 The case studies live in three `scripts/figures/` scripts:
 
-- **`calibrate_fpr.py`** sweeps the candidate FPRs on the split teacher's **training**
-  subjects and writes the whole table (recall / precision / F1 / clean FPR / Youden's J per
-  level) to `results/<model>/calibration.json`. It exists only to justify calibrating on J
-  rather than F1 for the report; nothing imports it, and the two scripts below re-pick the
-  FPR internally (it is cheap).
+- **`calibrate_fpr.py`** picks the expected FPR maximizing Youden's J on the split teacher's
+  **training** subjects (a dense grid argmax over Youden's J) and then sweeps +
+  plots the whole recall / precision / F1 / clean FPR / Youden's J curve on the **held-out**
+  subjects instead — each subject's threshold is a quantile of its own clean scores, so a
+  sweep measured on the calibration subjects would show the empirical FPR tracking the
+  expected FPR almost exactly by construction, not a generalization number. Writes two
+  figures to `results/<model>/calibrate_fpr/`: `calibration.png` (recall/FPR/J vs. expected
+  FPR) and `roc.png` (the ROC curve — recall vs. empirical FPR), plus the sweep table
+  (`.csv`/`.yaml`). It exists only to justify calibrating on J rather than F1 for the report;
+  nothing imports it, and the two scripts below re-pick the FPR internally (it is cheap).
 - **`anomaly_detection.py`** takes a model trained **with a split**: it picks the expected
   FPR inline on the training subjects and scores the detector against the true mixed-window
   labels and the per-type `anomalous-signals/` sets on the **held-out** subjects —
@@ -282,14 +287,14 @@ uv run -m scripts.system.transfer_learn feature-mlp 32 --epochs 3 # 2) transfer 
 The source batch size must be `>=` the default; `transfer_learn` re-exports the
 fine-tuned model under the canonical (unsuffixed) artifact names.
 
-For the autoencoder case studies (Sec. 5.4/5.8): `calibrate_fpr` dumps the FPR sweep table
-and `anomaly_detection` scores the detector on held-out subjects, both from the split teacher
-`train.py` already produced. `knowledge_distillation` needs a teacher trained on all users,
-then runs the leave-one-subject-out personalization end to end (distils the soft labels in
-memory — no tree, no `--dataset-dir` student to train):
+For the autoencoder case studies (Sec. 5.4/5.8): `calibrate_fpr` calibrates + plots the FPR
+sweep and ROC curve, and `anomaly_detection` scores the detector on held-out subjects, both
+from the split teacher `train.py` already produced. `knowledge_distillation` needs a teacher
+trained on all users, then runs the leave-one-subject-out personalization end to end (distils
+the soft labels in memory — no tree, no `--dataset-dir` student to train):
 
 ```bash
-uv run -m scripts.figures.calibrate_fpr cnn-ae                          # FPR sweep table -> results/cnn-ae/calibration.json
+uv run -m scripts.figures.calibrate_fpr cnn-ae                          # FPR sweep + ROC -> results/cnn-ae/calibrate_fpr/
 uv run -m scripts.figures.anomaly_detection cnn-ae                      # detector metrics -> results/cnn-ae/
 uv run -m scripts.system.train cnn-ae --tag all --eval-subjects 0       # all-users teacher -> trainable_all.tflite
 uv run -m scripts.figures.knowledge_distillation cnn-ae --student feature-mlp \
