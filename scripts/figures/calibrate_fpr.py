@@ -81,7 +81,6 @@ if __name__ == "__main__":
 
     grid = build_grid(expected_fpr, args.step)
     sweep = sweep_expected_fpr(clean, mixed, truth, grid)
-    sweep_tr = sweep_expected_fpr(clean_tr, mixed_tr, truth_tr, grid)
     chosen = next(row for row in sweep if row['expected_fpr'] == round(expected_fpr, 4))
 
     print(f"\n  {'exp_fpr':>8} {'recall':>8} {'precision':>10} {'f1':>8} {'clean_fpr':>10} {'youden_j':>9}")
@@ -99,8 +98,7 @@ if __name__ == "__main__":
     line_plot(report_dir / 'calibration.png', levels,
               {'recall (mixed set)': [row['recall'] for row in sweep],
                'empirical clean FPR': [row['clean_fpr'] for row in sweep],
-               "Youden's J = recall - FPR": [row['youden_j'] for row in sweep],
-               "Youden's J (calibration subjects)": [row['youden_j'] for row in sweep_tr]},
+               "Youden's J = recall - FPR": [row['youden_j'] for row in sweep]},
               'expected FPR (calibrated clean false-positive rate)', 'rate',
               f'{args.model} — detector calibration (held-out subjects)',
               vline=(expected_fpr, f'selected expected FPR {expected_fpr:.4f}'))

@@ -3,7 +3,7 @@ Train a SomaSafe model with a chosen training loop. Serving artifacts
 (trainable/quantized .tflite) go to shared/gen/models/<model>; the training
 history, plot, run manifest and eval report go to results/<model>/<loop>.
 
-Both loops hold out whole subjects (--eval-subjects: a count, an id range, a list, or none)
+Both loops hold out whole subjects (--eval-subjects: an id, an id range, a list, or none)
 and score on them, so a centralized and a federated run at the same --eval-subjects train on
 the same data and are directly comparable — that overlay is what scripts.figures.plot_convergence
 draws from the manifests this writes. The resolved held-out ids are recorded, not just a count.
@@ -27,16 +27,9 @@ LOOP_OPTIONS = ['normal', 'federated']
 
 
 def parse_eval_selection(value: str, sids: list[str]) -> list[str]:
-    """Resolve the --eval-subjects string against the subjects present on disk, returned in
-    subject order. ``none`` (or ``0``) holds out nothing; a count ``N`` holds out the last N
-    subjects; a range ``n-m`` holds out Sn..Sm inclusive; a comma list ``i,j,k`` holds out
-    exactly those. A malformed list raises through ``int``; unknown ids raise explicitly."""
     value = value.strip()
     if value == 'none':
         return []
-    if re.fullmatch(r'\d+', value):
-        n = int(value)
-        return sids[-n:] if n else []
     if re.fullmatch(r'\d+-\d+', value):
         lo, hi = (int(x) for x in value.split('-'))
         ids = {f'S{i}' for i in range(lo, hi + 1)}
@@ -77,10 +70,10 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Model to train')
     parser.add_argument('--loop', choices=LOOP_OPTIONS, default='normal', help='Training loop (default: normal)')
-    parser.add_argument('--eval-subjects', default='2',
-                        help="Subjects held out whole for evaluation (default: 2). Either a "
-                             "count N (the last N subjects), an inclusive id range 'n-m' "
-                             "(Sn..Sm), a comma-separated id list 'i,j,k', or 'none'/'0' to "
+    parser.add_argument('--eval-subjects', default='14-15',
+                        help="Subjects held out whole for evaluation (default: 14-15). Either "
+                             "a single id N (subject SN, LOSO-style), an inclusive id range "
+                             "'n-m' (Sn..Sm), a comma-separated id list 'i,j,k', or 'none' to "
                              "train on every subject and skip evaluation (all-users teacher). "
                              "Both loops train on the rest and score on the held-out set.")
     parser.add_argument('--epochs', type=int, default=5, help='Epochs for the normal loop')

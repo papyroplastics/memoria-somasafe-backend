@@ -110,9 +110,10 @@ Training is split into three layers so any model can be run under any loop:
   each run writes its history plot + CSV, its `run.yaml` manifest and eval report under
   `results/<model>/<loop>/` (`normal` or `federated`).
 
-Both loops split the data at **subject** granularity: `--eval-subjects N` (default 2) holds
-out the last N subjects whole, the centralized loop pools the rest and the federated loop
-trains those same subjects as separate clients. So a metric is generalization to an unseen
+Both loops split the data at **subject** granularity: `--eval-subjects` (default `14-15`)
+selects which subjects to hold out whole (a single id, an `n-m` range, or an `i,j,k` list),
+the centralized loop pools the rest and the federated loop trains those same subjects as
+separate clients. So a metric is generalization to an unseen
 subject, and the two loops are directly comparable — `scripts.figures.plot_convergence`
 plots both curves from the `run.yaml` manifests without retraining anything, and refuses to
 overlay runs whose manifests disagree.
@@ -233,7 +234,7 @@ uv run -m scripts.system.train feature-mlp                      # synthetic-anom
 uv run -m scripts.system.train cnn-ae                           # conditional Conv1D autoencoder (focus)
 uv run -m scripts.system.train feature-mlp --loop federated     # simulated FedAvg
 uv run -m scripts.system.train feature-mlp --batch-size 32       # train at a larger batch (GPU-friendly)
-uv run -m scripts.system.train cnn-ae --eval-subjects 3          # hold out the last 3 subjects
+uv run -m scripts.system.train cnn-ae --eval-subjects 3          # hold out just S3 (LOSO-style)
 uv run -m scripts.system.train cnn-ae --eval-subjects 11-15      # hold out S11..S15 (id range)
 uv run -m scripts.system.train cnn-ae --eval-subjects 1,7,14     # hold out exactly S1, S7, S14
 ```
@@ -243,12 +244,13 @@ report section it feeds — and run the pieces you need by hand.
 
 `--loop` selects the training loop (`normal` by default, or `federated`); `--epochs` tunes
 the normal loop while `--rounds` and `--local-epochs` tune the federated one's global rounds
-and local passes per round. `--eval-subjects` (default 2) sets how many subjects are held out
-whole for evaluation — it takes either a count `N` (the last N subjects), an inclusive id
-range `n-m` (subjects `Sn..Sm`), a comma-separated id list `i,j,k`, or `none`/`0` (train on
-every subject, skip evaluation). The run manifest records the resolved `train_subjects` and
-`eval_subjects` **id lists**, not just a count, so an arbitrary or randomized split is
-reproducible and the case-study scripts score the exact subjects held out. `--batch-size`
+and local passes per round. `--eval-subjects` sets which subjects are held out
+whole for evaluation (default `14-15`) — it takes either a single id `N` (subject `SN`,
+LOSO-style), an inclusive id range `n-m` (subjects `Sn..Sm`), a comma-separated id list
+`i,j,k`, or `none` (train on every subject, skip evaluation). The run manifest records the
+resolved `train_subjects` and `eval_subjects` **id lists**, not just a count, so an arbitrary
+split is reproducible and the case-study scripts score the exact subjects held out.
+`--batch-size`
 overrides the model's `default_batch_size`
 (useful for GPU throughput — the on-device default batch is often 1). Each run
 writes `trainable.tflite` (LiteRT-trainable) and `quantized.tflite` (int8, when
@@ -265,7 +267,7 @@ they travel to the firmware alongside the signed model (see `shared/docs/model-s
 non-default `--batch-size` suffixes those artifacts (`trainable_32.tflite`,
 `quantized_32.tflite`, ...) so they don't clobber the canonical default-batch exports.
 
-`--eval-subjects none` (or `0`) trains on **every** subject and skips evaluation (no held-out
+`--eval-subjects none` trains on **every** subject and skips evaluation (no held-out
 set, so no metric plot, reconstruction report, or final metric in the manifest) — how the
 all-users teacher for `knowledge_distillation` is produced. Since a run always writes the
 canonical `trainable.tflite`, produce that teacher and then **rename** its artifact aside
@@ -302,7 +304,7 @@ cp shared/gen/models/cnn-ae/trainable.tflite shared/gen/models/cnn-ae/trainable_
 uv run -m scripts.figures.subject_roc cnn-ae --weights shared/gen/models/cnn-ae/trainable_all.tflite  # per-subject spread, every subject on equal footing
 uv run -m scripts.figures.knowledge_distillation cnn-ae --student feature-mlp \
     --weights shared/gen/models/cnn-ae/trainable_all.tflite             # LOSO personalization
-uv run -m scripts.system.train cnn-ae --eval-subjects 2                 # restore the canonical split teacher
+uv run -m scripts.system.train cnn-ae --eval-subjects 14-15             # restore the canonical split teacher
 ```
 
 The distilled-vs-direct student comparison (does the distilled student match one trained on

@@ -23,8 +23,8 @@ Conventions (see `README.md`, "Layout"):
   computes. `byzantine`, `sensitivity` and `knowledge_distillation` *do* train, because they
   sweep configurations no single `train.py` run produces. `calibrate_fpr` is its own case: it
   calibrates (a dense grid argmax over Youden's J) but does not train — see below.
-- **Every loop holds out whole subjects** (`--eval-subjects`, default 2 = the last 2; also
-  takes an id range `n-m`, a list `i,j,k`, or `none`). The resolved held-out ids are recorded
+- **Every loop holds out whole subjects** (`--eval-subjects`, default `14-15`; also takes a
+  single id, a list `i,j,k`, or `none`). The resolved held-out ids are recorded
   in the manifest, so a metric is generalization to an *unseen subject*, and a centralized and
   a federated run at the same `--eval-subjects` train on the same data and score on the same
   subjects — which is what makes the Sec. 5.3 overlay a claim rather than a coincidence.
@@ -60,14 +60,14 @@ The 5.2 and 5.3 figures are **plotted from training runs, not by training**. Pro
 runs once, then draw both figures from them:
 
 ```bash
-uv run -m scripts.system.train <model> --loop federated --eval-subjects 2
-uv run -m scripts.system.train <model> --loop normal    --eval-subjects 2
+uv run -m scripts.system.train <model> --loop federated --eval-subjects 14-15
+uv run -m scripts.system.train <model> --loop normal    --eval-subjects 14-15
 uv run -m scripts.figures.plot_convergence <model>      # both figures, no training
 ```
 
 | File(s) | Command | Section / claim |
 |---------|---------|-----------------|
-| `results/<model>/<loop>/training.png` + `training.csv` + `run.yaml` (+ `reconstruction.png` for AEs, eval report) | `scripts.system.train <model> --loop {normal,federated} --eval-subjects K` | 5.2/5.3 (the underlying runs; the source both figures below read) |
+| `results/<model>/<loop>/training.png` + `training.csv` + `run.yaml` (+ `reconstruction.png` for AEs, eval report) | `scripts.system.train <model> --loop {normal,federated} --eval-subjects <ids>` | 5.2/5.3 (the underlying runs; the source both figures below read) |
 | `results/<model>/federated/convergence.png` + `.csv` + `.yaml` | `scripts.figures.plot_convergence <model>` | **5.2** federated model improves round over round |
 | `results/<model>/centralized_vs_federated/centralized_vs_federated.png` + `.csv` + `.yaml` | `scripts.figures.plot_convergence <model>` (same run; `--skip-overlay` to omit) | **5.3** FedAvg ≈ centralized without centralizing raw data (central claim) |
 | `results/<model>/anomaly_detection.yaml` | `scripts.figures.anomaly_detection <model>` (split teacher) | **5.4** per-kind recall, clean FPR, detector accuracy·F1 — calibrated on training subjects, scored on the held-out eval subjects |
@@ -107,7 +107,7 @@ uv run -m scripts.system.train <ae> --eval-subjects none                 # all-u
 cp shared/gen/models/<ae>/trainable.tflite shared/gen/models/<ae>/trainable_all.tflite
 uv run -m scripts.figures.knowledge_distillation <ae> --student feature-mlp \
     --weights shared/gen/models/<ae>/trainable_all.tflite
-uv run -m scripts.system.train <ae> --eval-subjects 2                     # restore the canonical split teacher
+uv run -m scripts.system.train <ae> --eval-subjects 14-15                # restore the canonical split teacher
 ```
 
 Training the all-users teacher overwrites the canonical `trainable.tflite` (there is no
