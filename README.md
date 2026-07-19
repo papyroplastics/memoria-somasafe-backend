@@ -234,19 +234,22 @@ uv run -m scripts.system.train cnn-ae                           # conditional Co
 uv run -m scripts.system.train feature-mlp --loop federated     # simulated FedAvg
 uv run -m scripts.system.train feature-mlp --batch-size 32       # train at a larger batch (GPU-friendly)
 uv run -m scripts.system.train cnn-ae --eval-subjects 3          # hold out the last 3 subjects
+uv run -m scripts.system.train cnn-ae --eval-subjects 11-15      # hold out S11..S15 (id range)
+uv run -m scripts.system.train cnn-ae --eval-subjects 1,7,14     # hold out exactly S1, S7, S14
 ```
 
-to produce **every** report result in one go — from an empty database and no exported
-artifacts, with the services/api/worker already up — run `./run_all.sh` (or `make run-all`).
-it sequences training, figures, the autoencoder case studies, seeding and the integration
-harness in dependency order; it is resumable (each step is skipped when its output exists,
-`force=1` redoes them) and tunable via the env vars at the top of the file. see
-[`plots.md`](plots.md) for what each step emits.
+see [`PLOTS.md`](PLOTS.md) for every report result — the file each command emits and the
+report section it feeds — and run the pieces you need by hand.
 
 `--loop` selects the training loop (`normal` by default, or `federated`); `--epochs` tunes
 the normal loop while `--rounds` and `--local-epochs` tune the federated one's global rounds
 and local passes per round. `--eval-subjects` (default 2) sets how many subjects are held out
-whole for evaluation. `--batch-size` overrides the model's `default_batch_size`
+whole for evaluation — it takes either a count `N` (the last N subjects), an inclusive id
+range `n-m` (subjects `Sn..Sm`), a comma-separated id list `i,j,k`, or `none`/`0` (train on
+every subject, skip evaluation). The run manifest records the resolved `train_subjects` and
+`eval_subjects` **id lists**, not just a count, so an arbitrary or randomized split is
+reproducible and the case-study scripts score the exact subjects held out. `--batch-size`
+overrides the model's `default_batch_size`
 (useful for GPU throughput — the on-device default batch is often 1). Each run
 writes `trainable.tflite` (LiteRT-trainable) and `quantized.tflite` (int8, when
 supported) into `shared/gen/models/<model>/`, and a diagnostic plot + history + `run.yaml`
@@ -262,17 +265,12 @@ they travel to the firmware alongside the signed model (see `shared/docs/model-s
 non-default `--batch-size` suffixes those artifacts (`trainable_32.tflite`,
 `quantized_32.tflite`, ...) so they don't clobber the canonical default-batch exports.
 
-`--tag NAME` does the same for a *variant* of a model you also train normally: results go to
-`results/<model>/<loop>-<name>/` and artifacts are suffixed (`trainable_<name>.tflite`), so
-the canonical artifact — the one `seed_db` publishes and the system serves — stays the
-untagged run. It exists because the same model key can be trained under different splits: the
-knowledge-distillation case study needs an all-users teacher (`--tag all --eval-subjects 0`),
-and without a tag it would overwrite the split teacher the convergence figures and
-`anomaly_detection` rely on.
-
-`--eval-subjects 0` trains on **every** subject and skips evaluation (no held-out set, so no
-metric plot, reconstruction report, or final metric in the manifest) — how the all-users
-teacher for `knowledge_distillation` is produced.
+`--eval-subjects none` (or `0`) trains on **every** subject and skips evaluation (no held-out
+set, so no metric plot, reconstruction report, or final metric in the manifest) — how the
+all-users teacher for `knowledge_distillation` is produced. Since a run always writes the
+canonical `trainable.tflite`, produce that teacher and then **rename** its artifact aside
+(`trainable_all.tflite`) so the next split run doesn't clobber it; the case-study scripts take
+the teacher by `--weights`, so the filename is free.
 
 Because the model's batch size is baked into the `.tflite` input signature, the
 GPU-trained large-batch model isn't itself the deliverable. `transfer_learn`
@@ -288,17 +286,23 @@ The source batch size must be `>=` the default; `transfer_learn` re-exports the
 fine-tuned model under the canonical (unsuffixed) artifact names.
 
 For the autoencoder case studies (Sec. 5.4/5.8): `calibrate_fpr` calibrates + plots the FPR
-sweep and ROC curve, and `anomaly_detection` scores the detector on held-out subjects, both
-from the split teacher `train.py` already produced. `knowledge_distillation` needs a teacher
-trained on all users, then runs the leave-one-subject-out personalization end to end (distils
-the soft labels in memory — no tree, no `--dataset-dir` student to train):
+sweep and ROC curve, `anomaly_detection` scores the detector on held-out subjects, and
+`subject_roc` lays every subject's ROC on a shared grid — all from the split teacher
+`train.py` already produced. `knowledge_distillation` needs a teacher trained on all users,
+then runs the leave-one-subject-out personalization end to end (distils the soft labels in
+memory — no tree, no `--dataset-dir` student to train). Training the all-users teacher
+overwrites the canonical `trainable.tflite`, so copy it aside and retrain the split to restore
+the served artifact:
 
 ```bash
 uv run -m scripts.figures.calibrate_fpr cnn-ae                          # FPR sweep + ROC -> results/cnn-ae/calibrate_fpr/
 uv run -m scripts.figures.anomaly_detection cnn-ae                      # detector metrics -> results/cnn-ae/
-uv run -m scripts.system.train cnn-ae --tag all --eval-subjects 0       # all-users teacher -> trainable_all.tflite
+uv run -m scripts.system.train cnn-ae --eval-subjects none              # all-users teacher (overwrites trainable.tflite)
+cp shared/gen/models/cnn-ae/trainable.tflite shared/gen/models/cnn-ae/trainable_all.tflite  # keep it aside
+uv run -m scripts.figures.subject_roc cnn-ae --weights shared/gen/models/cnn-ae/trainable_all.tflite  # per-subject spread, every subject on equal footing
 uv run -m scripts.figures.knowledge_distillation cnn-ae --student feature-mlp \
     --weights shared/gen/models/cnn-ae/trainable_all.tflite             # LOSO personalization
+uv run -m scripts.system.train cnn-ae --eval-subjects 2                 # restore the canonical split teacher
 ```
 
 The distilled-vs-direct student comparison (does the distilled student match one trained on

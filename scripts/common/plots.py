@@ -35,6 +35,34 @@ def line_plot(path: Path, x: list, series: dict[str, list], xlabel: str, ylabel:
     print(f"saved plot to {path}")
 
 
+def roc_grid(path: Path, order: list[str], curves: dict[str, tuple[list, list]],
+             highlight: set[str], xlabel: str, ylabel: str, title: str,
+             ncols: int = 5) -> None:
+    """One small ROC panel per subject on a shared grid, so per-subject detectability is
+    comparable at a glance. ``curves[sid]`` is ``(fpr, recall)``; subjects in ``highlight``
+    are drawn in a contrasting colour (e.g. the run's held-out pair)."""
+    nrows = -(-len(order) // ncols)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3 * ncols, 2.4 * nrows),
+                             sharex=True, sharey=True)
+    for ax, sid in zip(axes.flat, order):
+        fpr, recall = curves[sid]
+        held = sid in highlight
+        ax.plot(fpr, recall, color='C3' if held else 'C0')
+        ax.plot([0, 1], [0, 1], 'k--', linewidth=0.6)
+        ax.set_xlim(0, 1)
+        ax.set_ylim(0, 1)
+        ax.set_title(f'{sid} (held-out)' if held else sid, fontsize=9)
+    for ax in axes.flat[len(order):]:
+        ax.axis('off')
+    fig.supxlabel(xlabel)
+    fig.supylabel(ylabel)
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(path)
+    plt.close(fig)
+    print(f"saved plot to {path}")
+
+
 def bar_plot(path: Path, x: list, values: list[float], xlabel: str, ylabel: str,
              title: str, mean_line: float | None = None) -> None:
     fig, ax = plt.subplots()

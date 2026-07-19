@@ -23,11 +23,12 @@ Conventions (see `README.md`, "Layout"):
   computes. `byzantine`, `sensitivity` and `knowledge_distillation` *do* train, because they
   sweep configurations no single `train.py` run produces. `calibrate_fpr` is its own case: it
   calibrates (a dense grid argmax over Youden's J) but does not train — see below.
-- **Every loop holds out whole subjects** (`--eval-subjects N`, default 2: the last N).
-  A metric is therefore generalization to an *unseen subject*, and a centralized and a
-  federated run at the same `--eval-subjects` train on the same data and score on the same
+- **Every loop holds out whole subjects** (`--eval-subjects`, default 2 = the last 2; also
+  takes an id range `n-m`, a list `i,j,k`, or `none`). The resolved held-out ids are recorded
+  in the manifest, so a metric is generalization to an *unseen subject*, and a centralized and
+  a federated run at the same `--eval-subjects` train on the same data and score on the same
   subjects — which is what makes the Sec. 5.3 overlay a claim rather than a coincidence.
-  `plot_convergence` refuses to draw the overlay if the two manifests disagree.
+  `plot_convergence` refuses to draw the overlay if the two manifests' subject lists disagree.
 - **The Sec. 5.4 scripts key off that same split.** `anomaly_detection` takes a **split**
   teacher: it picks the operating point on the training subjects (inline) and scores the
   detector on the held-out subjects, so its numbers are generalization to an unseen user
@@ -41,14 +42,9 @@ Conventions (see `README.md`, "Layout"):
   fold is leakage-free and none is special.
 
 Run scripts from `backend/` with `uv run -m …`. The training runs and the sweeps are
-compute-heavy; launch them in the background.
-
-**To produce everything at once**, `./run_all.sh` (or `make run-all`) sequences every step
-below in dependency order, from an empty database and no exported artifacts — it assumes the
-services, api and worker are already up. It is resumable (each step is skipped when its
-output exists; `FORCE=1` redoes them) and the scale is tunable via the env vars at the top
-(`ROUNDS`, `EPOCHS`, `EVAL_SUBJECTS`, `MODELS`, …). The rest of this file is the per-file
-reference for running a piece of it by hand.
+compute-heavy; launch them in the background. This file is the per-file reference for
+producing each result by hand, in dependency order (the integration harness needs the
+services, api and worker up and a seeded DB).
 
 ---
 
@@ -77,6 +73,7 @@ uv run -m scripts.figures.plot_convergence <model>      # both figures, no train
 | `results/<model>/anomaly_detection.yaml` | `scripts.figures.anomaly_detection <model>` (split teacher) | **5.4** per-kind recall, clean FPR, detector accuracy·F1 — calibrated on training subjects, scored on the held-out eval subjects |
 | `results/<model>/calibrate_fpr/calibration.png` + `.csv` + `.yaml` | `scripts.figures.calibrate_fpr <model>` (split teacher) | **5.4** recall/empirical FPR/Youden's J vs. expected FPR — the sweep backing "J not F1", with the selected operating point marked |
 | `results/<model>/calibrate_fpr/roc.png` + `.yaml` | `scripts.figures.calibrate_fpr <model>` (same run) | **5.4** the detector's ROC curve (recall vs. empirical clean FPR) on the held-out subjects, with the selected operating point marked |
+| `results/<model>/subject_roc/{roc_by_subject,roc_aggregate}.png` + `.yaml` | `scripts.figures.subject_roc <model> [--weights <all-users teacher>] [--highlight i,j]` | **5.4** per-subject ROC spread + mean±std recall — shows detectability varies by user (point `--weights` at an all-users teacher for equal footing) |
 | `results/feature-mlp/personalization/personalization.csv` + `.yaml` | `scripts.figures.knowledge_distillation <ae> --student feature-mlp --weights <all-users teacher>` (trains) | **5.4/5.8** leave-one-subject-out personalization marginal-positive; int8 ≈ float |
 | `results/<model>/byzantine/byzantine.png` + `.csv` + `.yaml` | `scripts.figures.byzantine <model> --max-malicious N --rounds R [--aggregator trimmed-mean\|average]` | **5.5** outlier filter holds the round (and no more) — trains |
 | `results/footprint/footprint.csv` + `.yaml` | `scripts.figures.footprint` | **5.6** system fits the edge (backend rows; phone/ESP32 rows pasted in) |
@@ -106,13 +103,17 @@ subject's own labels, and both are scored (float + int8) against that subject's 
 labels. Nothing is written to disk but the pooled metrics.
 
 ```bash
-uv run -m scripts.system.train <ae> --tag all --eval-subjects 0          # all-users teacher
+uv run -m scripts.system.train <ae> --eval-subjects none                 # all-users teacher (overwrites trainable.tflite)
+cp shared/gen/models/<ae>/trainable.tflite shared/gen/models/<ae>/trainable_all.tflite
 uv run -m scripts.figures.knowledge_distillation <ae> --student feature-mlp \
     --weights shared/gen/models/<ae>/trainable_all.tflite
+uv run -m scripts.system.train <ae> --eval-subjects 2                     # restore the canonical split teacher
 ```
 
-The teacher needs `--tag all` so its `trainable_all.tflite` lands beside — not on top of —
-the split teacher the convergence figures and `anomaly_detection`/`calibrate_fpr` use. The
+Training the all-users teacher overwrites the canonical `trainable.tflite` (there is no
+`--tag` any more), so copy it aside to `trainable_all.tflite` and retrain the split — the
+convergence figures and `anomaly_detection`/`calibrate_fpr` want the split teacher back as the
+canonical artifact. The scripts take the teacher by `--weights`, so its filename is free. The
 distilled-vs-direct student comparison (does distillation reproduce the teacher?) is deferred
 — it can be folded into this script later.
 

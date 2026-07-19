@@ -20,7 +20,7 @@ import numpy as np
 
 import tensorflow as tf
 from ml.preprocessing import CLEAN_SUBDIR, MIXED_FEATURE_SUBDIR, get_sorted_paths
-from ml.loading import load_signal, window_count, holdout
+from ml.loading import load_signal, window_count
 from ml.metrics import classification_report
 from ml.models.common import AutoencoderTrainer
 
@@ -110,11 +110,6 @@ def pooled_flags(scores: dict[str, dict[str, np.ndarray]],
                  thresholds: dict[str, dict[str, float]],
                  name: str = DETECTOR) -> np.ndarray:
     return np.concatenate([scores[sid][name] > thresholds[sid][name] for sid in scores])
-
-
-def split_subject_ids(data_dir: Path, n_eval: int) -> tuple[list[str], list[str]]:
-    sids = [d.name for d in get_sorted_paths(data_dir / CLEAN_SUBDIR)]
-    return holdout(sids, n_eval)
 
 
 def score_dir_by_subject(trainer: AutoencoderTrainer, signal_dir: Path,

@@ -33,10 +33,9 @@ from ml.models.common import AutoencoderTrainer
 from ml.saving import load_trainable_weights
 
 from ..common.plots import line_plot
-from ..common.reports import get_report_dir, read_eval_subjects, write_metrics_csv, write_yaml
+from ..common.reports import get_report_dir, read_subject_split, write_metrics_csv, write_yaml
 from ..common.scoring import (
-    calibrate_expected_fpr, sweep_expected_fpr, score_dir_by_subject, load_mixed_truth,
-    split_subject_ids)
+    calibrate_expected_fpr, sweep_expected_fpr, score_dir_by_subject, load_mixed_truth)
 
 
 def build_grid(expected_fpr: float, step: float) -> list[float]:
@@ -60,8 +59,7 @@ if __name__ == "__main__":
     trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
     assert isinstance(trainer, AutoencoderTrainer)
 
-    n_eval = read_eval_subjects(args.model, ('normal', 'federated'))
-    train_ids, held_out = split_subject_ids(DATASETS_DIR, n_eval)
+    train_ids, held_out = read_subject_split(args.model, ('normal', 'federated'))
     train, held = set(train_ids), set(held_out)
 
     print(f"Calibrating the expected FPR on the {len(train_ids)} training subjects: "

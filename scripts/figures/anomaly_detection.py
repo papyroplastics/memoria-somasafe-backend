@@ -23,10 +23,10 @@ from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
 from ml.metrics import classification_report
 from ml.saving import load_trainable_weights
-from ..common.reports import get_report_dir, read_eval_subjects, write_yaml
+from ..common.reports import get_report_dir, read_subject_split, write_yaml
 from ..common.scoring import (
     DETECTOR, calibrate_expected_fpr, subject_thresholds, pooled_flags,
-    score_dir_by_subject, load_mixed_truth, split_subject_ids,
+    score_dir_by_subject, load_mixed_truth,
 )
 
 EVAL_REPORT = 'anomaly_detection.yaml'   # detector metrics, from this script
@@ -89,8 +89,7 @@ if __name__ == "__main__":
     trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
     assert isinstance(trainer, AutoencoderTrainer)
 
-    n_eval = read_eval_subjects(args.model, ('normal', 'federated'))
-    train_ids, held_out = split_subject_ids(data_dir, n_eval)
+    train_ids, held_out = read_subject_split(args.model, ('normal', 'federated'))
     train, held = set(train_ids), set(held_out)
 
     print(f"Calibrating expected FPR on the {len(train_ids)} training subjects...")

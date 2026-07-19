@@ -47,11 +47,19 @@ def read_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text())
 
 
-def read_eval_subjects(model: str, loops: tuple[str, ...]) -> int:
+def read_subject_split(model: str, loops: tuple[str, ...]) -> tuple[list[str], list[str]]:
+    """The (train_ids, eval_ids) a previous train.py run recorded — the exact held-out
+    subjects, not merely a count, since the selection may be arbitrary."""
     for loop in loops:
         path = RESULTS_DIR / model / loop / RUN_MANIFEST
         if path.exists():
-            return int(read_yaml(path)['eval_subjects'])
+            run = read_yaml(path)
+            eval_ids = run['eval_subjects']
+            if not eval_ids:
+                raise SystemExit(
+                    f"'{model}' {loop} run held out no subjects (all-users teacher); it has "
+                    f"no held-out set to score. Train a split run first.")
+            return run['train_subjects'], eval_ids
     raise SystemExit(
         f"no run manifest for '{model}' under {list(loops)}; run "
         f"`uv run -m scripts.system.train {model}` first so the held-out split is recorded.")
