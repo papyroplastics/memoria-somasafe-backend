@@ -115,47 +115,47 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
 # Stage 2 — Synthetic anomalies on raw BVP
 # ---------------------------------------------------------------------------
 
-def wavy_noise(n: int, std: float) -> np.ndarray:
-    """Smooth band-limited random noise over ``n`` samples, std-normalized to ``std``."""
-    spacing = int(np.random.randint(8, 25))
-    m = max(3, n // spacing)
-    noise = np.fft.irfft(np.fft.rfft(np.random.normal(0.0, 1.0, size=m)), n)
-    sd = float(noise.std())
-    return noise / sd * std
+def wavy_noise(n: int) -> np.ndarray:
+    n_steps = n // BVP_RATE * 3
+    noise = np.random.uniform(-1.0, 1.0, size=n_steps)
+    wavy = np.fft.irfft(np.fft.rfft(noise), n)
+    return wavy / (wavy.std() * 2)
 
 def stretch_by(factor, x, y):
     m = int(round(len(x) * factor))
     return np.interp(np.linspace(0, len(x) - 1, m), x, y)
 
-def apply_anomaly(segment: np.ndarray, kind: int, sig_std: float) -> np.ndarray:
+def apply_anomaly(segment: np.ndarray, kind: str) -> np.ndarray:
     """Return a perturbed copy of a BVP ``segment`` for ``ANOMALY_KINDS[kind]``."""
     seg = segment.copy()
     n = len(seg)
     src = np.linspace(0, n - 1, n)
 
-    if kind == 0:    # blowup - amplitude blow-up around the local mean
+    if kind == 'blowup':   # amplitude blow-up around the local mean
         mean = float(seg.mean())
-        seg = mean + (seg - mean) * float(np.random.uniform(1.4, 2.0))
+        seg = mean + (seg - mean) * 1.7
 
-    elif kind == 1:  # noise - wavy band-limited interference burst
-        seg += wavy_noise(n, sig_std * float(np.random.uniform(0.25, 0.4)))
+    elif kind == 'noise':  # wavy band-limited interference burst
+        seg += wavy_noise(n) * (seg.max() - seg.min()) / 15
 
-    elif kind == 2:  # tachycardia - increased tempo by shrinking and tiling
-        resampled = stretch_by(0.8, src, seg)
+    elif kind == 'tachy':  # increased tempo by shrinking and tiling
+        resampled = stretch_by(0.7, src, seg)
         seg = np.tile(resampled, int(np.ceil(n / len(resampled))))[:n]
 
-    elif kind == 3:  # bradycardia - decreased tempo by stretching
-        factor = float(np.random.uniform(1.5, 1.65))
-        resampled = stretch_by(factor, src, seg)
+    elif kind == 'brady':  # decreased tempo by stretching
+        resampled = stretch_by(1.7, src, seg)
         seg = resampled[:n]
 
-    else:            # afib - irregularly-irregular rhythm via a jittered monotonic warp
-        n_ctrl = max(2, n // BVP_RATE)   # ~1 speed control point per second
-        speed = np.interp(src, np.linspace(0, n - 1, n_ctrl),
-                          np.random.uniform(0.3, 1.7, size=n_ctrl))
+    elif kind == 'afib':   # irregularly-irregular rhythm via a jittered monotonic warp
+        win_count = n // BVP_RATE
+        speed = np.interp(src, np.linspace(0, n - 1, win_count), 
+                          np.random.beta(0.8, 0.8, size=win_count) * 1.4 + 0.3)
         warp = np.cumsum(speed)
         warp *= (n - 1) / warp[-1]       # normalize to [0, n-1], endpoints fixed
         seg = np.interp(warp, src, seg)
+
+    else: 
+        raise Exception(f"unknown anomaly kind {kind}")
 
     return seg.astype(np.float32)
 
@@ -174,7 +174,6 @@ def inject_mixed(bvp: np.ndarray, anomaly_prob: float) -> tuple[np.ndarray, np.n
     if n_windows == 0:
         return result.astype(np.float32), win_labels
 
-    sig_std   = float(bvp.std())
     target = int(n_windows * anomaly_prob)
 
     while int(win_labels.sum()) < target:
@@ -186,30 +185,26 @@ def inject_mixed(bvp: np.ndarray, anomaly_prob: float) -> tuple[np.ndarray, np.n
             continue
 
         seg = slice(start * BVP_WINDOW, (start + length) * BVP_WINDOW)
-        kind = int(random.randrange(len(ANOMALY_KINDS)))
-        result[seg] = apply_anomaly(result[seg], kind, sig_std)
+        kind = random.choice(ANOMALY_KINDS)
+        result[seg] = apply_anomaly(result[seg], kind)
 
         win_labels[wins] = 1.0
 
     return result.astype(np.float32), win_labels
 
 
-def inject_single_kind(bvp: np.ndarray, kind: int, rng: np.random.Generator) -> np.ndarray:
-    """Apply one anomaly kind to every window of a raw BVP signal by tiling
-    window-aligned spans across it — a fully-anomalous per-type signal for isolated
-    testing (every window is an example of ``kind``)."""
+def inject_single_kind(bvp: np.ndarray, kind: str, rng: np.random.Generator) -> np.ndarray:
+    """Apply one anomaly kind to every window of a raw BVP signal by tiling window-aligned spans across it"""
     result = bvp.copy()
     n_windows = len(bvp) // BVP_WINDOW
     if n_windows == 0:
         return result.astype(np.float32)
 
-    sig_std   = float(bvp.std())
-
     w = 0
     while w < n_windows:
         length = min(int(rng.integers(MIN_ANOMALY_WINDOWS, MAX_ANOMALY_WINDOWS + 1)), n_windows - w)
         seg = slice(w * BVP_WINDOW, (w + length) * BVP_WINDOW)
-        result[seg] = apply_anomaly(result[seg], kind, sig_std)
+        result[seg] = apply_anomaly(result[seg], kind)
         w += length
 
     return result.astype(np.float32)
@@ -222,8 +217,8 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
     """
     rng = np.random.default_rng(SEED)
 
-    for kind, name in enumerate(ANOMALY_KINDS):
-        kind_dir = anomalous_dir / name
+    for kind in ANOMALY_KINDS:
+        kind_dir = anomalous_dir / kind
         subject_dirs = get_sorted_paths(subjects_dir)
         for subject_dir in subject_dirs:
             sid = subject_dir.name
@@ -232,7 +227,7 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
             save_dir = kind_dir / sid
             save_dir.mkdir(parents=True, exist_ok=True)
             np.save(save_dir / 'bvp.npy', anomalous_bvp)
-        print(f"  {name}: {len(subject_dirs)} subjects")
+        print(f"  {kind}: {len(subject_dirs)} subjects")
 
 
 def create_mixed_signals(subjects_dir: Path, mixed_dir: Path):

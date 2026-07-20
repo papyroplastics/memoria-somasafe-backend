@@ -84,9 +84,6 @@ def sweep_expected_fpr(clean: dict[str, np.ndarray], mixed: dict[str, np.ndarray
 def calibrate_expected_fpr(clean: dict[str, np.ndarray], mixed: dict[str, np.ndarray],
                            truth: dict[str, np.ndarray], step: float = 0.0025,
                            thresholds_fn=subject_thresholds) -> float:
-    # Dense grid argmax, not scan-then-ternary: J over the expected FPR is not unimodal
-    # (it peaks then rides a noisy near-flat plateau), so ternary search overshoots and
-    # drifts. The ascending grid resolves ties to the lowest FPR (same J, fewer alarms).
     grid = np.round(np.arange(step, 1.0 + step / 2, step), 6).tolist()
     rows = sweep_expected_fpr(clean, mixed, truth, grid, thresholds_fn)
     best = max(range(len(rows)), key=lambda i: rows[i]['youden_j'])
@@ -107,12 +104,10 @@ def score_dir_by_subject(trainer: AutoencoderTrainer, signal_dir: Path,
             continue
         signal = load_signal(signal_dir, sid)
         count = window_count(signal, window)
-        if count > 0:
-            out[sid] = window_errors(trainer.model, signal, window, count)
+        out[sid] = window_errors(trainer.model, signal, window, count)
     return out
 
 
-def load_mixed_truth(data_dir: Path, scores: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+def load_mixed_truth(data_dir: Path) -> dict[str, np.ndarray]:
     feature_dir = data_dir / MIXED_FEATURE_SUBDIR
-    return {sid: np.load(feature_dir / sid / 'labels.npy').reshape(-1)[:len(sc)]
-            for sid, sc in scores.items()}
+    return {d.name: np.load(d / 'labels.npy').reshape(-1) for d in feature_dir.glob('S*')}

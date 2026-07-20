@@ -97,7 +97,12 @@ class LiteRTClient:
 def infer_int8(tflite_bytes: bytes, X_norm: np.ndarray, signature: str = "infer") -> np.ndarray:
     """Runs a quantized int8 model's single-input/single-output signature over
     per-row logits, quantizing/dequantizing with the tensors' own scale/zero-point
-    exactly as the on-device int8 runtime does."""
+    exactly as the on-device int8 runtime does. The batch size is baked into the
+    model's input shape, so the rows are fed a batch at a time and the tail is padded
+    by repeating the last row (the padding is dropped from the result)."""
+    if len(X_norm) == 0:
+        return np.empty(0, dtype=np.float32)
+
     model = CompiledModel.from_buffer(tflite_bytes)
     sig = model.get_signature_list()[signature]
     in_name, out_name = sig["inputs"][0], sig["outputs"][0]
@@ -106,13 +111,22 @@ def infer_int8(tflite_bytes: bytes, X_norm: np.ndarray, signature: str = "infer"
     iscale, izp = _tensor_quantization(tflite_bytes, in_details["name"])
     oscale, ozp = _tensor_quantization(tflite_bytes, out_details["name"])
 
-    out = np.empty(len(X_norm), dtype=np.float32)
-    for i, x in enumerate(X_norm):
-        q = np.clip(np.round(x / iscale + izp), -128, 127).astype(np.int8).reshape(in_details["shape"])
+    in_shape = tuple(int(d) for d in in_details["shape"])
+    out_count = int(np.prod([int(d) for d in out_details["shape"]]))
+    batch = in_shape[0]
+
+    n = len(X_norm)
+    pad = (-n) % batch
+    rows = np.concatenate([X_norm, np.repeat(X_norm[-1:], pad, axis=0)]) if pad else X_norm
+
+    out = np.empty(n + pad, dtype=np.float32)
+    for start in range(0, n + pad, batch):
+        chunk = rows[start:start + batch]
+        q = np.clip(np.round(chunk / iscale + izp), -128, 127).astype(np.int8).reshape(in_shape)
         input_buffer = model.create_input_buffer_by_name(signature, in_name)
         input_buffer.write(q)
         output_buffer = model.create_output_buffer_by_name(signature, out_name)
         model.run_by_name(signature, {in_name: input_buffer}, {out_name: output_buffer})
-        o = float(output_buffer.read(1, np.int8)[0])
-        out[i] = (o - ozp) * oscale
-    return out
+        o = np.asarray(output_buffer.read(out_count, np.int8), dtype=np.float32).reshape(-1)
+        out[start:start + batch] = (o[:batch] - ozp) * oscale
+    return out[:n]

@@ -4,13 +4,6 @@ from typing import Callable
 import numpy as np
 import tensorflow as tf
 
-
-# The gradients TF registers for Relu and Conv (ReluGrad, Conv2DBackpropFilter) only
-# exist as Flex ops, which the on-device LiteRT runtime cannot execute, so any model
-# whose train signature must run on-device has to use these custom-gradient versions:
-# they keep the stock forward op (conversion and quantization are unchanged) but spell
-# the backward pass in TFLite-builtin ops.
-
 @tf.custom_gradient
 def relu(x: tf.Tensor):
     y = tf.nn.relu(x)

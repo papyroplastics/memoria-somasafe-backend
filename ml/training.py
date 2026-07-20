@@ -61,12 +61,16 @@ def _format(metrics: dict[str, float]) -> str:
 def normal_loop(trainer: Trainer, train_dataset: tf.data.Dataset,
                 eval_dataset: tf.data.Dataset | None, epochs: int) -> History:
     history: History = []
-    for epoch in range(epochs):
-        prefix = f"epoch={epoch + 1}/{epochs}"
-        loss = train_epoch(trainer, train_dataset, prefix)
-        metrics = evaluate(trainer, eval_dataset, prefix) if eval_dataset is not None else {}
-        history.append((epoch, loss, metrics))
-        print(f"{prefix} loss={loss:.4f} {_format(metrics)}", flush=True)
+    try:
+        for epoch in range(epochs):
+            prefix = f"epoch={epoch + 1}/{epochs}"
+            loss = train_epoch(trainer, train_dataset, prefix)
+            metrics = evaluate(trainer, eval_dataset, prefix) if eval_dataset is not None else {}
+            history.append((epoch, loss, metrics))
+            print(f"{prefix} loss={loss:.4f} {_format(metrics)}", flush=True)
+    except KeyboardInterrupt:
+        pass
+
     return history
 
 
@@ -78,22 +82,26 @@ def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Datase
     global_weights = model.save()['weights']
 
     history: History = []
-    for r in range(rounds):
-        round_prefix = f"round={r + 1}/{rounds}"
-        base = np.asarray(global_weights)
-        client_deltas: list[np.ndarray] = []
-        loss = 0.0
-        for s, train_ds in enumerate(subject_train_datasets):
+    try:
+        for r in range(rounds):
+            round_prefix = f"round={r + 1}/{rounds}"
+            base = np.asarray(global_weights)
+            client_deltas: list[np.ndarray] = []
+            loss = 0.0
+            for s, train_ds in enumerate(subject_train_datasets):
+                model.restore(tf.constant(global_weights))
+                for e in range(local_epochs):
+                    prefix = f"{round_prefix} subject={s + 1}/{len(subject_train_datasets)} local={e + 1}/{local_epochs}"
+                    loss = train_epoch(trainer, train_ds, prefix)
+                client_deltas.append(np.asarray(model.save()['weights']) - base)
+
+            global_weights = (base + weighted_average(client_deltas, sizes)).astype(base.dtype)
             model.restore(tf.constant(global_weights))
-            for e in range(local_epochs):
-                prefix = f"{round_prefix} subject={s + 1}/{len(subject_train_datasets)} local={e + 1}/{local_epochs}"
-                loss = train_epoch(trainer, train_ds, prefix)
-            client_deltas.append(np.asarray(model.save()['weights']) - base)
 
-        global_weights = (base + weighted_average(client_deltas, sizes)).astype(base.dtype)
-        model.restore(tf.constant(global_weights))
+            metrics = evaluate(trainer, eval_dataset, round_prefix) if eval_dataset is not None else {}
+            history.append((r, loss, metrics))
+            print(f"{round_prefix} {_format(metrics)}", flush=True)
+    except KeyboardInterrupt:
+        pass
 
-        metrics = evaluate(trainer, eval_dataset, round_prefix) if eval_dataset is not None else {}
-        history.append((r, loss, metrics))
-        print(f"{round_prefix} {_format(metrics)}", flush=True)
     return history

@@ -73,7 +73,7 @@ scripts/   CLI entry points, grouped into subpackages by how each relates to the
                            convergence curves), transfer_learn, export_subject_data, seed_db.
              integration/  multi-user backend verification over the real HTTP API: fed_client,
                            secure_aggregation, queue_aggregation.
-             figures/      report result/figure generators (see PLOTS.md): plot_signals,
+             figures/      report result/figure generators (see RESULTS.md): plot_signals,
                            plot_convergence (reads a previous train.py run — Secs. 5.2+5.3 —
                            and never trains), byzantine + sensitivity (sweeps that do
                            train), footprint, and the autoencoder case studies (a demonstrated
@@ -84,7 +84,7 @@ scripts/   CLI entry points, grouped into subpackages by how each relates to the
 
 Evaluation/experiment output (histories, reports, figures, distilled labels) goes to
 `results/<model>/`; the served `.tflite` artifacts stay in `shared/gen/models/<model>/`.
-[`PLOTS.md`](PLOTS.md) catalogs every figure/report file, the command that produces it, and
+[`RESULTS.md`](RESULTS.md) lists every result Chapter 5 needs, the order to produce them in, and
 the report section it feeds.
 
 Training is split into three layers so any model can be run under any loop:
@@ -213,6 +213,9 @@ The case studies live in three `scripts/figures/` scripts:
   labels, fine-tuned on the held-out subject's own labels, and both are scored (float + int8)
   against that subject's **true** labels. Rotating the held-out subject keeps every fold
   leakage-free (the global never trained on the subject it is judged on) and none special.
+  A fifth variant, `direct_float`, trains the same student on the other subjects' **true**
+  labels instead of the soft ones and is the ceiling: `direct − global` is what distillation
+  costs, i.e. what is lost by having no ground truth on the client.
 
 Nothing is written to disk but the metrics; the student never sees a true label, mirroring
 the on-device setting where only the expected FPR is global.
@@ -239,7 +242,7 @@ uv run -m scripts.system.train cnn-ae --eval-subjects 11-15      # hold out S11.
 uv run -m scripts.system.train cnn-ae --eval-subjects 1,7,14     # hold out exactly S1, S7, S14
 ```
 
-see [`PLOTS.md`](PLOTS.md) for every report result — the file each command emits and the
+see [`RESULTS.md`](RESULTS.md) for every report result — the file each command emits and the
 report section it feeds — and run the pieces you need by hand.
 
 `--loop` selects the training loop (`normal` by default, or `federated`); `--epochs` tunes
@@ -308,8 +311,7 @@ uv run -m scripts.system.train cnn-ae --eval-subjects 14-15             # restor
 ```
 
 The distilled-vs-direct student comparison (does the distilled student match one trained on
-the synthetic ground truth?) is deferred — it can be folded into `knowledge_distillation`
-later.
+the synthetic ground truth?) is the `direct_float` variant of `knowledge_distillation`.
 
 ### Export a subject to the Android app
 

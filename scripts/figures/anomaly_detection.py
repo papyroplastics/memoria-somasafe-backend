@@ -86,15 +86,15 @@ if __name__ == "__main__":
     train, held = set(train_ids), set(held_out)
 
     print(f"Calibrating expected FPR on the {len(train_ids)} training subjects...")
-    mixed_tr = score_dir_by_subject(trainer, data_dir / MIXED_SUBDIR, subjects=train)
-    truth_tr = load_mixed_truth(data_dir, mixed_tr)
+    truth_tr = load_mixed_truth(data_dir)
     clean_tr = score_dir_by_subject(trainer, data_dir / CLEAN_SUBDIR, subjects=train)
+    mixed_tr = score_dir_by_subject(trainer, data_dir / MIXED_SUBDIR, subjects=train)
     expected_fpr = calibrate_expected_fpr(clean_tr, mixed_tr, truth_tr)
 
     print(f"Evaluating on the {len(held_out)} held-out subjects: {', '.join(held_out)}")
-    mixed = score_dir_by_subject(trainer, data_dir / MIXED_SUBDIR, subjects=held)
-    truth = load_mixed_truth(data_dir, mixed)
+    truth = load_mixed_truth(data_dir)
     clean = score_dir_by_subject(trainer, data_dir / CLEAN_SUBDIR, subjects=held)
+    mixed = score_dir_by_subject(trainer, data_dir / MIXED_SUBDIR, subjects=held)
     missing = set(mixed) - set(clean)
     if missing:
         raise SystemExit(f"subjects {sorted(missing)} lack clean windows; "

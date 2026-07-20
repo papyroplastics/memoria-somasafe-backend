@@ -36,6 +36,8 @@ def window_views(data_dir, sid, window, index):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to use')
+    parser.add_argument('--subject', type=int, default=None, help='Subject to use')
+    parser.add_argument('--window', type=int, default=None, help='Window index to use')
     parser.add_argument('--seed', type=int, default=None, help='RNG seed for the subject/window pick')
     args = parser.parse_args()
 
@@ -45,30 +47,31 @@ if __name__ == "__main__":
     trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
     assert isinstance(trainer, AutoencoderTrainer)
 
-    window = trainer.model.seq_len
+    window_len = trainer.model.seq_len
 
     subjects_dir = DATASETS_DIR / CLEAN_SUBDIR
     subject_dirs = get_sorted_paths(subjects_dir)
     if not subject_dirs:
         raise SystemExit(f"{subjects_dir} is empty. Run get_dataset.py first.")
 
-    sid = subject_dirs[rng.integers(len(subject_dirs))].name
-    n_windows = window_count(load_signal(subjects_dir, sid), window)
-    if n_windows == 0:
-        raise SystemExit(f"{sid} has no full {window}-sample window.")
-    index = int(rng.integers(n_windows))
-    print(f"subject={sid} window={index}/{n_windows}")
+    subject_idx = args.subject or rng.integers(len(subject_dirs))
 
-    views = window_views(DATASETS_DIR, sid, window, index)
-    t = np.arange(window) / BVP_RATE
+    sid = f"S{subject_idx}"
+    n_windows = window_count(load_signal(subjects_dir, sid), window_len)
+
+    window_idx = args.window or int(rng.integers(n_windows))
+    print(f"subject={sid} window={window_idx}/{n_windows}")
+
+    views = window_views(DATASETS_DIR, sid, window_len, window_idx)
+    t = np.arange(window_len) / BVP_RATE
 
     signals = np.stack([views[k] for k in KINDS]).astype(np.float32)
     recons = eval_padded(trainer.model, signals)['reconstruction'][:, :, 0]
 
     fig_in, axs_in = plt.subplots(len(KINDS), 1, sharex=True, figsize=(8, 2 * len(KINDS)))
     fig_rec, axs_rec = plt.subplots(len(KINDS), 1, sharex=True, figsize=(8, 2 * len(KINDS)))
-    fig_in.suptitle(f'{sid} window {index} — normalized BVP')
-    fig_rec.suptitle(f'{sid} window {index} — {args.model} reconstruction')
+    fig_in.suptitle(f'{sid} window {window_idx} — normalized BVP')
+    fig_rec.suptitle(f'{sid} window {window_idx} — {args.model} reconstruction')
 
     bvp_mean = trainer.model.signal_mean.numpy()[0]
     bvp_std = trainer.model.signal_std.numpy()[0]
@@ -98,7 +101,7 @@ if __name__ == "__main__":
     print(f"saved input windows to {in_path}")
     print(f"saved reconstructions to {rec_path}")
 
-    sample = {'subject': sid, 'window': index, 'of_windows': n_windows, 'seed': args.seed}
+    sample = {'subject': sid, 'window': window_idx, 'of_windows': n_windows, 'seed': args.seed}
     axes = {'x_axis': {'name': 'seconds', 'range': [0, 8], 'sample_rate_hz': BVP_RATE},
             'y_axis': {'name': 'raw BVP amplitude', 'units': 'sensor units'}}
 

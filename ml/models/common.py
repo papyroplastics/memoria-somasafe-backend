@@ -95,7 +95,7 @@ class TrainableModel(tf.Module):
 
 class TrainableAutoencoder(TrainableModel):
 
-    default_batch_size = 12
+    default_batch_size = 64
 
     def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int,
                  n_outputs, diff_weight, signal_mean, signal_std):
@@ -107,8 +107,6 @@ class TrainableAutoencoder(TrainableModel):
         self.diff_weight = diff_weight
         self.signal_shape = (batch_size, seq_len, n_signals)
 
-        # Inputs arrive raw; the model z-scores them so the device and firmware never
-        # ship or apply normalization params. Signal params broadcast over (batch, seq).
         self.signal_mean = tf.constant(signal_mean, dtype=tf.float32)
         self.signal_std = tf.constant(signal_std, dtype=tf.float32)
 
@@ -116,9 +114,7 @@ class TrainableAutoencoder(TrainableModel):
         """Bind train/eval/infer/save/restore. Call once all layers exist."""
         self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
         signature = [tf.TensorSpec(shape=self.signal_shape, dtype=tf.float32)]
-        # eval/train z-score raw inputs; infer takes already-normalized inputs and is the
-        # only signature exported to the int8 model, so its int8 input calibrates on
-        # normalized values (see saving.optimize_saved_model).
+
         self.eval = tf.function(self.eval_eager, input_signature=signature)
         self.infer = tf.function(self.infer_eager, input_signature=signature)
         self.train = tf.function(self.train_eager, input_signature=signature)

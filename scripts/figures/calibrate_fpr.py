@@ -51,17 +51,17 @@ if __name__ == "__main__":
 
     print(f"Calibrating the expected FPR ({mode} threshold) on the {len(train_ids)} "
           f"training subjects: {', '.join(train_ids)}")
-    mixed_tr = score_dir_by_subject(trainer, DATASETS_DIR / MIXED_SUBDIR, subjects=train)
-    truth_tr = load_mixed_truth(DATASETS_DIR, mixed_tr)
+    truth_tr = load_mixed_truth(DATASETS_DIR)
     clean_tr = score_dir_by_subject(trainer, DATASETS_DIR / CLEAN_SUBDIR, subjects=train)
+    mixed_tr = score_dir_by_subject(trainer, DATASETS_DIR / MIXED_SUBDIR, subjects=train)
     expected_fpr = calibrate_expected_fpr(clean_tr, mixed_tr, truth_tr, thresholds_fn=thresholds_fn)
     print(f"expected_fpr = {expected_fpr:.4f}")
 
     print(f"\nSweeping the FPR curve on the {len(held_out)} held-out subjects: "
           f"{', '.join(held_out)}")
-    mixed = score_dir_by_subject(trainer, DATASETS_DIR / MIXED_SUBDIR, subjects=held)
-    truth = load_mixed_truth(DATASETS_DIR, mixed)
+    truth = load_mixed_truth(DATASETS_DIR)
     clean = score_dir_by_subject(trainer, DATASETS_DIR / CLEAN_SUBDIR, subjects=held)
+    mixed = score_dir_by_subject(trainer, DATASETS_DIR / MIXED_SUBDIR, subjects=held)
 
     grid = build_grid(expected_fpr, args.step)
     sweep = sweep_expected_fpr(clean, mixed, truth, grid, thresholds_fn)

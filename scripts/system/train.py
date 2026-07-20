@@ -102,8 +102,12 @@ if __name__ == "__main__":
         trainer, data_dir, args.loop, eval_ids, args.epochs, args.local_epochs)
 
     batch_size = trainer.model.batch_size
-    postfix = (f'_{batch_size}'
-               if batch_size != type(trainer.model).default_batch_size else '')
+
+    postfix = ''
+    if len(eval_ids) == 0:
+        postfix += '_all'
+    if batch_size != type(trainer.model).default_batch_size:
+        postfix += f'_{batch_size}'
     save_artifacts(trainer, result_dir, eval_dataset, postfix, data_root=data_dir)
 
     if args.epochs == 0:

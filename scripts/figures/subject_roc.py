@@ -48,9 +48,10 @@ if __name__ == "__main__":
     trainer.model.restore(load_trainable_weights(weights))
     assert isinstance(trainer, AutoencoderTrainer)
 
+    truth = load_mixed_truth(DATASETS_DIR)
     clean = score_dir_by_subject(trainer, DATASETS_DIR / CLEAN_SUBDIR)
     mixed = score_dir_by_subject(trainer, DATASETS_DIR / MIXED_SUBDIR)
-    truth = load_mixed_truth(DATASETS_DIR, mixed)
+
     order = [sid for sid in clean if sid in mixed and sid in truth]
     highlight = {f'S{int(i)}' for i in args.highlight.split(',') if i.strip()}
     mode = 'global' if args.global_f else 'per-subject'
