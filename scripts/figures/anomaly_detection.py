@@ -1,14 +1,7 @@
-"""
-Evaluate the autoencoder anomaly detector against the synthetic ground truth (report
-Sec. 5.4). Takes a model trained **with a split**: it picks the expected FPR on the training
-subjects (the model's own labeled population) and scores the detector on the **held-out**
-subjects, so the numbers are generalization to an unseen user, consistent with the
-convergence figures. Calibration happens inline — it is cheap, and this way the script is
-self-contained (calibrate_fpr.py only exists to plot the whole sweep + ROC for the report).
-
-Scores the detector against the true mixed-window labels and the per-type anomalous-signals/
-sets: precision/recall/F1, per-anomaly-kind recall, and the empirical clean false-positive
-rate. Writes the metrics to results/<model>/.
+"""Evaluate the autoencoder detector against synthetic ground truth on the held-out subjects
+(report Sec. 5.4): precision/recall/F1/accuracy, per-anomaly-kind recall, and clean FPR. The
+expected FPR is calibrated inline on the training subjects, so the numbers are generalization
+to an unseen user. Metrics go to results/<model>/.
 """
 
 
@@ -25,16 +18,16 @@ from ml.metrics import classification_report
 from ml.saving import load_trainable_weights
 from ..common.reports import get_report_dir, read_subject_split, write_yaml
 from ..common.scoring import (
-    DETECTOR, calibrate_expected_fpr, subject_thresholds, pooled_flags,
+    calibrate_expected_fpr, subject_thresholds, pooled_flags,
     score_dir_by_subject, load_mixed_truth,
 )
 
 EVAL_REPORT = 'anomaly_detection.yaml'   # detector metrics, from this script
 
 
-def evaluate(trainer, data_dir: Path, clean: dict[str, dict[str, np.ndarray]],
-             mixed: dict[str, dict[str, np.ndarray]], truth: dict[str, np.ndarray],
-             thresholds: dict[str, dict[str, float]],
+def evaluate(trainer, data_dir: Path, clean: dict[str, np.ndarray],
+             mixed: dict[str, np.ndarray], truth: dict[str, np.ndarray],
+             thresholds: dict[str, float],
              subjects: set[str] | None = None) -> dict:
     pooled_truth = np.concatenate([truth[sid] for sid in mixed])
 
@@ -49,7 +42,7 @@ def evaluate(trainer, data_dir: Path, clean: dict[str, dict[str, np.ndarray]],
     per_kind = {}
     for name in ANOMALY_KINDS:
         sc = score_dir_by_subject(trainer, anomalous_dir / name, subjects=subjects)
-        c = sum(len(v[DETECTOR]) for v in sc.values())
+        c = sum(len(v) for v in sc.values())
         per_kind[name] = {
             'count': c,
             'recall': float(pooled_flags(sc, thresholds).mean()) if c else None,
@@ -67,7 +60,7 @@ def evaluate(trainer, data_dir: Path, clean: dict[str, dict[str, np.ndarray]],
 def print_metrics(results: dict, expected_fpr: float):
     d = results['detector']
     print(f"\nexpected_fpr={expected_fpr:.4f}")
-    print(f"detector ({DETECTOR}): accuracy={d['accuracy']:.4f} precision={d['precision']:.4f} "
+    print(f"detector: accuracy={d['accuracy']:.4f} precision={d['precision']:.4f} "
           f"recall={d['recall']:.4f} f1={d['f1']:.4f} clean_fpr={d['clean_fpr']:.4f}")
     print(f"ground-truth anomaly rate={results['gt_anomaly_rate']:.1%}  "
           f"predicted rate={results['pred_anomaly_rate']:.1%}")

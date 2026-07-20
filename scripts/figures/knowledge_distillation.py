@@ -1,22 +1,10 @@
-"""
-Knowledge-distillation round-trip + personalization probe (report Secs. 5.4/5.8), on a
-teacher trained on ALL users. The autoencoder teacher's soft labels train a supervised
-FeatureMLP student that a wearable can run; this script distils those labels in memory and
-measures whether personalizing the student on a user's own labels beats the shared model —
-for both the float and int8 (quantized) deployment.
-
-Personalization is **leave-one-subject-out**: for each subject, a fresh global student is
-trained (centralized, in-script) on the *other* subjects' distilled labels, then fine-tuned
-on the held-out subject's own distilled labels over a chronological train split, and both
-models are scored — float and int8 — on that subject's held-out split against the **true**
-labels (never the distilled ones). Rotating the held-out subject keeps every fold
-leakage-free (the global never trained on the subject it is judged on) and makes none
-special. The teacher trained on all users so every subject's distilled labels are the same
-(teacher-seen) quality, so the folds are comparable.
-
-The expected FPR is calibrated inline (cheap) on all subjects; the labels are the sigmoid of
-each window's reconstruction error past the subject's own threshold, scaled by its own
-clean-error std. Nothing is written to disk but the final metrics.
+"""Distillation + leave-one-subject-out personalization (report Secs. 5.4/5.8) on a teacher
+trained on ALL users. Per fold a fresh FeatureMLP student is trained on the *other* subjects'
+soft labels, fine-tuned on the held-out subject's own soft labels, and both are scored (float
++ int8) against that subject's TRUE labels — rotating the held-out subject keeps every fold
+leakage-free. The expected FPR is calibrated inline; soft labels are the sigmoid of each
+window's reconstruction error past the subject's own threshold, scaled by its clean-error
+std. Only the final metrics are written to disk.
 
     uv run -m scripts.figures.knowledge_distillation cnn-ae --weights <all-users teacher>
 """
@@ -37,8 +25,7 @@ from ml.saving import load_trainable_weights, get_optimized_model
 from ..common.litert import infer_int8
 from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 from ..common.scoring import (
-    DETECTOR, calibrate_expected_fpr, clean_threshold, score_dir_by_subject,
-    load_mixed_truth,
+    calibrate_expected_fpr, clean_threshold, score_dir_by_subject, load_mixed_truth,
 )
 
 VARIANTS = ('global_float', 'global_int8', 'personal_float', 'personal_int8')
@@ -53,17 +40,13 @@ def sigmoid(x: np.ndarray) -> np.ndarray:
     return out
 
 
-def distilled_labels(mixed: dict[str, dict[str, np.ndarray]],
-                     clean: dict[str, dict[str, np.ndarray]], expected_fpr: float
-                     ) -> dict[str, np.ndarray]:
-    """Each subject's soft [0,1] labels: sigmoid of the error's signed distance to the
-    subject's own threshold, scaled by its own clean-error std (label > 0.5 == the hard
-    decision)."""
+def distilled_labels(mixed: dict[str, np.ndarray], clean: dict[str, np.ndarray],
+                     expected_fpr: float) -> dict[str, np.ndarray]:
     labels = {}
     for sid in mixed:
-        thr = clean_threshold(clean[sid][DETECTOR], expected_fpr)
-        scale = float(clean[sid][DETECTOR].std()) + 1e-8
-        labels[sid] = sigmoid((mixed[sid][DETECTOR] - thr) / scale)
+        thr = clean_threshold(clean[sid], expected_fpr)
+        scale = float(clean[sid].std()) + 1e-8
+        labels[sid] = sigmoid((mixed[sid] - thr) / scale)
     return labels
 
 
@@ -77,7 +60,6 @@ def train_on(model, X: np.ndarray, y: np.ndarray, epochs: int, batch_size: int) 
 
 
 def eval_logits_float(model, X: np.ndarray) -> np.ndarray:
-    """Per-window logits from the float model (eval z-scores raw features)."""
     out = np.empty(len(X), dtype=np.float32)
     for i, x in enumerate(X):
         logits = model.eval(tf.constant(x.reshape(1, -1), dtype=tf.float32))['logits']

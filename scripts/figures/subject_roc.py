@@ -1,15 +1,9 @@
-"""
-Per-subject detectability of the autoencoder detector, scored on one set of weights.
-
-Unlike ``calibrate_fpr`` (which tells the split-teacher calibration story on 2 held-out
-subjects), this scores **every** subject on the given model and lays their ROC curves on a
-shared grid, so per-user detectability is comparable at a glance — the answer to "does this
-model just catch some users better than others". Point ``--weights`` at an all-users teacher
-(a renamed ``trainable_all.tflite``) to put every subject on equal footing; note that then
-every subject was trained on, so this is the *population spread*, not a generalization number.
-
-Each subject's threshold is the ``1 - f`` quantile of its own clean scores (as everywhere in
-the detector), swept over ``f``. Two figures + a table land under ``results/<model>/subject_roc/``:
+"""Per-subject ROC of the reconstruction-error detector on one set of weights, to show
+detectability varies by user (report Sec. 5.4). Each subject's threshold is the ``1 - f``
+quantile of its own clean scores, swept over ``f``; ``--global-f`` uses a single pooled
+threshold instead, so each subject's clean FPR drifts off ``f`` by its own error scale.
+Point ``--weights`` at an all-users teacher to put every subject on equal footing. Two
+figures + a table land under ``results/<model>/subject_roc/``:
 
     roc_by_subject.png   one ROC panel per subject (recall vs. empirical clean FPR)
     roc_aggregate.png    mean +/- std recall across subjects vs. expected FPR
@@ -29,7 +23,7 @@ from ml.saving import load_trainable_weights
 
 from ..common.plots import roc_grid
 from ..common.reports import get_report_dir, write_yaml
-from ..common.scoring import DETECTOR, score_dir_by_subject, load_mixed_truth
+from ..common.scoring import score_dir_by_subject, load_mixed_truth
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__,
@@ -42,6 +36,9 @@ if __name__ == "__main__":
     parser.add_argument('--highlight', default='',
                         help="Comma-separated subject ids to draw in red (e.g. a split's "
                              "held-out pair), so you can see where they sit in the pack.")
+    parser.add_argument('--global-f', action='store_true',
+                        help='Threshold with a single pooled clean quantile instead of a '
+                             "per-subject one (each subject's clean FPR then drifts off f)")
     parser.add_argument('--step', type=float, default=0.02,
                         help='Spacing of the FPR sweep (default: 0.02)')
     args = parser.parse_args()
@@ -56,12 +53,15 @@ if __name__ == "__main__":
     truth = load_mixed_truth(DATASETS_DIR, mixed)
     order = [sid for sid in clean if sid in mixed and sid in truth]
     highlight = {f'S{int(i)}' for i in args.highlight.split(',') if i.strip()}
+    mode = 'global' if args.global_f else 'per-subject'
 
     fine = np.round(np.arange(0.0, 1.0 + 1e-9, args.step), 4)
+    gthr = (np.quantile(np.concatenate([clean[sid] for sid in order]), 1.0 - fine)
+            if args.global_f else None)
     curves, per_subject, recalls = {}, {}, []
     for sid in order:
-        c, m, t = clean[sid][DETECTOR], mixed[sid][DETECTOR], truth[sid]
-        thr = np.quantile(c, 1.0 - fine)                       # one threshold per FPR level
+        c, m, t = clean[sid], mixed[sid], truth[sid]
+        thr = gthr if args.global_f else np.quantile(c, 1.0 - fine)
         fpr = (c[:, None] > thr).mean(axis=0)
         anom = m[t == 1]
         recall = (anom[:, None] > thr).mean(axis=0) if len(anom) else np.full_like(fpr, np.nan)
@@ -73,7 +73,7 @@ if __name__ == "__main__":
     report_dir = get_report_dir(args.model, 'subject_roc')
     roc_grid(report_dir / 'roc_by_subject.png', order, curves, highlight,
              'empirical clean FPR', 'recall',
-             f'{args.model} — per-subject ROC ({weights.name})')
+             f'{args.model} — per-subject ROC, {mode} threshold ({weights.name})')
 
     stack = np.vstack(recalls)
     mean, std = np.nanmean(stack, axis=0), np.nanstd(stack, axis=0)
@@ -85,7 +85,8 @@ if __name__ == "__main__":
     ax.set_ylim(0, 1)
     ax.set_xlabel('expected FPR')
     ax.set_ylabel('recall')
-    ax.set_title(f'{args.model} — recall vs. expected FPR, mean ± std over {len(order)} subjects')
+    ax.set_title(f'{args.model} — recall vs. expected FPR, {mode} threshold, '
+                 f'mean ± std over {len(order)} subjects')
     ax.legend()
     fig.savefig(report_dir / 'roc_aggregate.png')
     plt.close(fig)
@@ -98,6 +99,11 @@ if __name__ == "__main__":
                  "the mean +/- std recall across subjects. Answers whether the detector just "
                  "catches some users better than others.",
         'weights': str(weights),
+        'threshold': ("single global threshold (the 1-f quantile of all subjects' pooled "
+                      "clean scores) — each subject's clean FPR drifts off f by its own "
+                      "error scale" if args.global_f else
+                      "per-subject threshold (the 1-f quantile of each subject's own clean "
+                      "scores) — each subject's clean FPR is f by construction"),
         'x_axis': {'name': 'empirical clean FPR (grid) / expected FPR (aggregate)',
                    'range': [0, 1]},
         'y_axis': {'name': 'recall', 'range': [0, 1]},
