@@ -21,7 +21,7 @@ import argparse
 from ml.model_list import MODELS
 from ..common.plots import line_plot
 from ..common.reports import (
-    get_report_dir, read_history_csv, read_run, write_metrics_csv, write_yaml)
+    get_report_dir, loop_dir, read_history_csv, read_run, write_metrics_csv, write_yaml)
 
 # The manifest fields both runs must agree on for the overlay to compare like with like.
 COMPARABLE = ('metric', 'eval_subjects', 'train_subjects', 'batch_size', 'dataset_dir')
@@ -31,10 +31,10 @@ def better_direction(metric: str) -> str:
     return 'lower' if 'error' in metric or 'loss' in metric else 'higher'
 
 
-def load_curve(model: str, loop: str) -> tuple[dict, list[float]]:
+def load_curve(model: str, loop: str, tag: str | None = None) -> tuple[dict, list[float]]:
     """A previous run's manifest and its held-out metric per step."""
-    run = read_run(model, loop)
-    history = read_history_csv(get_report_dir(model, loop))
+    run = read_run(model, loop, tag)
+    history = read_history_csv(get_report_dir(model, loop_dir(loop, tag)))
     metric = run['metric']
     if not history or any(metric not in row for row in history):
         raise SystemExit(f"the {loop} history for '{model}' has no '{metric}' column; "
@@ -63,8 +63,8 @@ def plot_convergence(model: str, run: dict, values: list[float]) -> None:
                   'aggregation': 'weighted average'},
         'headline': {'first_round': values[0], 'last_round': values[-1],
                      'delta': values[-1] - values[0]},
-        'source': {'run': f'results/{model}/federated/run.yaml', 'seed': run['seed'],
-                   'reproducible': True},
+        'source': {'run': f"results/{model}/{loop_dir('federated', run['tag'])}/run.yaml",
+                   'seed': run['seed'], 'reproducible': True},
     })
 
 
@@ -109,8 +109,8 @@ def plot_overlay(model: str, fed_run: dict, fed_values: list[float],
                      'federated_final': fed_values[-1],
                      'gap_fed_minus_cen': fed_values[-1] - cen_values[-1]},
         'caveats': caveats,
-        'source': {'federated_run': f'results/{model}/federated/run.yaml',
-                   'centralized_run': f'results/{model}/normal/run.yaml',
+        'source': {'federated_run': f"results/{model}/{loop_dir('federated', fed_run['tag'])}/run.yaml",
+                   'centralized_run': f"results/{model}/{loop_dir('normal', cen_run['tag'])}/run.yaml",
                    'seed': fed_run['seed'], 'reproducible': True},
     })
 
@@ -133,15 +133,19 @@ def main() -> None:
     parser.add_argument('--skip-overlay', action='store_true',
                         help='Only plot the federated convergence curve, even if a '
                              'centralized run exists')
+    parser.add_argument('--tag', default=None,
+                        help='Tag of the train.py runs to plot (default: the canonical '
+                             'untagged normal_/federated_ runs). Reads normal_<tag>/ and '
+                             'federated_<tag>/ under results/<model>/.')
     args = parser.parse_args()
 
-    fed_run, fed_values = load_curve(args.model, 'federated')
+    fed_run, fed_values = load_curve(args.model, 'federated', args.tag)
     plot_convergence(args.model, fed_run, fed_values)
 
     if args.skip_overlay:
         return
 
-    cen_run, cen_values = load_curve(args.model, 'normal')
+    cen_run, cen_values = load_curve(args.model, 'normal', args.tag)
     check_comparable(fed_run, cen_run)
     plot_overlay(args.model, fed_run, fed_values, cen_run, cen_values)
 

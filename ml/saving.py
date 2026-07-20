@@ -70,6 +70,10 @@ def load_trainable_weights(tflite_path: Path) -> np.ndarray:
     return output_map['weights'].read(count, np.float32).astype(np.float32)
 
 
+def trainable_path(model_dir: Path, tag: str | None = None) -> Path:
+    return model_dir / (f'trainable_{tag}.tflite' if tag else 'trainable.tflite')
+
+
 def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset: tf.data.Dataset | None,
                    postfix: str = '', data_root: Path | None = None):
     trainable_file = result_dir / f'trainable{postfix}.tflite'

@@ -21,6 +21,10 @@ def get_report_dir(model: str, subdir: str | None = None) -> Path:
     return report_dir
 
 
+def loop_dir(loop: str, tag: str | None = None) -> str:
+    return f'{loop}_{tag}' if tag else loop
+
+
 def _plain(value):
     """Coerce numpy scalars and Paths into types yaml.safe_dump accepts."""
     if isinstance(value, dict):
@@ -47,34 +51,38 @@ def read_yaml(path: Path) -> dict:
     return yaml.safe_load(path.read_text())
 
 
-def read_subject_split(model: str, loops: tuple[str, ...]) -> tuple[list[str], list[str]]:
+def read_subject_split(model: str, loops: tuple[str, ...],
+                       tag: str | None = None) -> tuple[list[str], list[str]]:
     """The (train_ids, eval_ids) a previous train.py run recorded — the exact held-out
     subjects, not merely a count, since the selection may be arbitrary."""
     for loop in loops:
-        path = RESULTS_DIR / model / loop / RUN_MANIFEST
+        path = RESULTS_DIR / model / loop_dir(loop, tag) / RUN_MANIFEST
         if path.exists():
             run = read_yaml(path)
             eval_ids = run['eval_subjects']
             if not eval_ids:
                 raise SystemExit(
-                    f"'{model}' {loop} run held out no subjects (all-users teacher); it has "
-                    f"no held-out set to score. Train a split run first.")
+                    f"'{model}' {loop_dir(loop, tag)} run held out no subjects (all-users "
+                    f"teacher); it has no held-out set to score. Train a split run first.")
             return run['train_subjects'], eval_ids
+    tag_flag = f' --tag {tag}' if tag else ''
     raise SystemExit(
-        f"no run manifest for '{model}' under {list(loops)}; run "
-        f"`uv run -m scripts.system.train {model}` first so the held-out split is recorded.")
+        f"no run manifest for '{model}' under {[loop_dir(l, tag) for l in loops]}; run "
+        f"`uv run -m scripts.system.train {model}{tag_flag}` first so the held-out split "
+        f"is recorded.")
 
 
-def read_run(model: str, loop: str) -> dict:
+def read_run(model: str, loop: str, tag: str | None = None) -> dict:
     """The manifest of a previous `train.py <model> --loop <loop>` run. The figure
     scripts read this instead of re-running the loop, so it must carry everything they
     need to label and cross-check a curve."""
-    path = RESULTS_DIR / model / loop / RUN_MANIFEST
+    path = RESULTS_DIR / model / loop_dir(loop, tag) / RUN_MANIFEST
     if not path.exists():
+        tag_flag = f' --tag {tag}' if tag else ''
         raise SystemExit(
-            f"no {loop} run for '{model}' at {path}. Run "
-            f"`uv run -m scripts.system.train {model} --loop {loop}` first — the figure "
-            f"scripts plot a previous run's history, they do not train.")
+            f"no {loop_dir(loop, tag)} run for '{model}' at {path}. Run "
+            f"`uv run -m scripts.system.train {model} --loop {loop}{tag_flag}` first — the "
+            f"figure scripts plot a previous run's history, they do not train.")
     return read_yaml(path)
 
 

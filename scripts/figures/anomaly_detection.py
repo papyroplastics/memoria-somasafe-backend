@@ -15,7 +15,7 @@ from ml.preprocessing import ANOMALOUS_SUBDIR, ANOMALY_KINDS, CLEAN_SUBDIR, MIXE
 from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
 from ml.metrics import classification_report
-from ml.saving import load_trainable_weights
+from ml.saving import load_trainable_weights, trainable_path
 from ..common.reports import get_report_dir, read_subject_split, write_yaml
 from ..common.scoring import (
     calibrate_expected_fpr, subject_thresholds, pooled_flags,
@@ -74,15 +74,20 @@ def print_metrics(results: dict, expected_fpr: float):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to evaluate')
+    parser.add_argument('--tag', default=None,
+                        help='Tag of the train.py run to evaluate (default: the canonical '
+                             'untagged run). Selects both trainable_<tag>.tflite and the '
+                             'normal_<tag>/federated_<tag> run.yaml it was trained with.')
     args = parser.parse_args()
 
     data_dir = DATASETS_DIR
 
     trainer = MODELS[args.model].build_trainer(data_dir)
-    trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
+    weights = trainable_path(MODELS_DIR / args.model, args.tag)
+    trainer.model.restore(load_trainable_weights(weights))
     assert isinstance(trainer, AutoencoderTrainer)
 
-    train_ids, held_out = read_subject_split(args.model, ('normal', 'federated'))
+    train_ids, held_out = read_subject_split(args.model, ('normal', 'federated'), args.tag)
     train, held = set(train_ids), set(held_out)
 
     print(f"Calibrating expected FPR on the {len(train_ids)} training subjects...")

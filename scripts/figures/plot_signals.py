@@ -15,7 +15,7 @@ from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
 from ml.preprocessing import CLEAN_SUBDIR, ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_RATE, get_sorted_paths
 from ml.loading import load_signal, window_count
-from ml.saving import load_trainable_weights
+from ml.saving import load_trainable_weights, trainable_path
 from ..common.reports import get_report_dir, write_yaml
 
 KINDS = ('clean', *ANOMALY_KINDS)
@@ -39,12 +39,16 @@ if __name__ == "__main__":
     parser.add_argument('--subject', type=int, default=None, help='Subject to use')
     parser.add_argument('--window', type=int, default=None, help='Window index to use')
     parser.add_argument('--seed', type=int, default=None, help='RNG seed for the subject/window pick')
+    parser.add_argument('--tag', default=None,
+                        help='Tag of the train.py run to use (default: the canonical '
+                             'untagged trainable.tflite).')
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
 
     trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
-    trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
+    weights = trainable_path(MODELS_DIR / args.model, args.tag)
+    trainer.model.restore(load_trainable_weights(weights))
     assert isinstance(trainer, AutoencoderTrainer)
 
     window_len = trainer.model.seq_len

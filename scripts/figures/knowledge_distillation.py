@@ -12,7 +12,7 @@ other respect. `direct - global` is what distillation costs — what is lost by 
 ground truth on the client, and in practice how much the teacher's label quality caps the
 student. It is float only; the int8 pairs already answer the quantization question.
 
-    uv run -m scripts.figures.knowledge_distillation cnn-ae --weights <all-users teacher>
+    uv run -m scripts.figures.knowledge_distillation cnn-ae --tag <all-users teacher tag>
 """
 
 
@@ -28,7 +28,7 @@ from ml.preprocessing import MIXED_FEATURE_SUBDIR, CLEAN_SUBDIR, MIXED_SUBDIR, g
 from ml.metrics import classification_report
 from ml.model_list import MODELS
 from ml.models.common import AutoencoderTrainer
-from ml.saving import load_trainable_weights, get_optimized_model
+from ml.saving import load_trainable_weights, get_optimized_model, trainable_path
 from ..common.litert import infer_int8
 from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 from ..common.scoring import (
@@ -90,9 +90,10 @@ if __name__ == "__main__":
                         help='Autoencoder trained on ALL users, whose soft labels train the student')
     parser.add_argument('--student', default='feature-mlp', choices=sorted(MODELS),
                         help='Student model to distil into + personalize (default: feature-mlp)')
-    parser.add_argument('--weights', type=Path, default=None,
-                        help='Teacher all-users trainable .tflite '
-                             '(default: shared/gen/models/<teacher>/trainable.tflite)')
+    parser.add_argument('--tag', default=None,
+                        help='Tag of the teacher\'s all-users train.py run (default: the '
+                             'canonical untagged trainable.tflite). Selects '
+                             'shared/gen/models/<teacher>/trainable_<tag>.tflite.')
     parser.add_argument('--global-epochs', type=int, default=5,
                         help="Epochs to train each fold's global student (default: 5)")
     parser.add_argument('--epochs', type=int, default=5,
@@ -107,7 +108,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     data_dir = DATASETS_DIR
-    weights_path = args.weights or (MODELS_DIR / args.teacher / 'trainable.tflite')
+    weights_path = trainable_path(MODELS_DIR / args.teacher, args.tag)
     if not weights_path.exists():
         raise SystemExit(f"teacher weights not found at {weights_path}.")
 

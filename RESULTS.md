@@ -6,7 +6,8 @@ necesita, el orden lógico en que deben ejecutarse, y qué falta programar. Reem
 cada cosa* en `../report/planificacion/obtencion-de-resultados.md`; la organización de los
 scripts en `README.md` ("Layout").
 
-Todo se corre desde `backend/` con `uv run -m …`.
+Todo se corre desde `backend/` con `uv run -m …` y se debe añadir `2>/dev/null` para no ver 
+todos los logs de tensorflow y tflite.
 
 ## Convenciones
 
@@ -25,6 +26,12 @@ Todo se corre desde `backend/` con `uv run -m …`.
 - Las curvas del informe salen de los **bucles simulados** (reproducibles, semilla en
   `scripts/__init__.py`), no del cliente headless sobre HTTP, que es verificación de
   integración.
+- `train.py --tag <nombre>` sufija tanto los artefactos (`trainable_<nombre>.tflite`) como
+  el directorio de resultados (`results/<modelo>/<loop>_<nombre>/`), sin tocar la corrida
+  canónica sin tag. Los scripts que leen `run.yaml` o un artefacto (`calibrate_fpr`,
+  `anomaly_detection`, `plot_signals`, `plot_convergence`, `subject_roc`,
+  `knowledge_distillation`) aceptan el mismo `--tag` para leerla de vuelta. Útil para correr
+  esta lista de pruebas sin pisar los resultados reales.
 
 ---
 
@@ -119,7 +126,7 @@ split). Ninguno de los tres entrena.
 ```bash
 uv run -m scripts.figures.calibrate_fpr     cnn-ae
 uv run -m scripts.figures.anomaly_detection cnn-ae
-uv run -m scripts.figures.plot_signals      cnn-ae
+uv run -m scripts.figures.plot_signals      cnn-ae --subject 10 --window 1196
 ```
 
 | Salida | Sección |
@@ -137,12 +144,10 @@ Entrenarlo sobrescribe el `trainable.tflite` canónico, así que hay que apartar
 restaurar el maestro con split.
 
 ```bash
-uv run -m scripts.system.train cnn-ae --eval-subjects none --epochs 10 # crea artefacto llamado trainable_all.tflite
+uv run -m scripts.system.train cnn-ae --eval-subjects none --epochs 10 --tag all # crea trainable_all.tflite
 
-uv run -m scripts.figures.subject_roc cnn-ae \
-    --weights shared/gen/models/cnn-ae/trainable_all.tflite
-uv run -m scripts.figures.knowledge_distillation cnn-ae --student feature-mlp \
-    --weights shared/gen/models/cnn-ae/trainable_all.tflite
+uv run -m scripts.figures.subject_roc cnn-ae --tag all
+uv run -m scripts.figures.knowledge_distillation cnn-ae --student feature-mlp --tag all
 ```
 
 | Salida | Sección |

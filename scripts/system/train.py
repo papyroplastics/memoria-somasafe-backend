@@ -7,6 +7,10 @@ Both loops hold out whole subjects (--eval-subjects: an id, an id range, a list,
 and score on them, so a centralized and a federated run at the same --eval-subjects train on
 the same data and are directly comparable — that overlay is what scripts.figures.plot_convergence
 draws from the manifests this writes. The resolved held-out ids are recorded, not just a count.
+
+--tag suffixes both the served artifacts and results/<model>/<loop>_<tag>/, so an ad-hoc run
+(a different batch size, an all-users teacher, a test sweep) doesn't clobber the canonical
+unsuffixed one. The figure scripts take the same --tag to read it back.
 """
 
 import argparse
@@ -21,7 +25,7 @@ from ml.training import normal_loop, federated_loop, History
 from ml.model_list import MODELS
 from common.config import MODELS_DIR, DATASETS_DIR, SEED
 from ..common.plots import plot_history
-from ..common.reports import RUN_MANIFEST, get_report_dir, write_history_csv, write_yaml
+from ..common.reports import RUN_MANIFEST, get_report_dir, loop_dir, write_history_csv, write_yaml
 
 LOOP_OPTIONS = ['normal', 'federated']
 
@@ -79,8 +83,11 @@ if __name__ == "__main__":
     parser.add_argument('--epochs', type=int, default=5, help='Epochs for the normal loop')
     parser.add_argument('--local-epochs', type=int, default=2, help='Local epochs per round (federated)')
     parser.add_argument('--batch-size', type=int, default=None,
-                        help='Override the model default batch size. Artifacts from a '
-                             'non-default batch size are suffixed (e.g. trainable_32.tflite).')
+                        help='Override the model default batch size.')
+    parser.add_argument('--tag', default=None,
+                        help='Suffix for this run\'s artifacts (trainable_<tag>.tflite, '
+                             'quantized_<tag>.tflite) and results (results/<model>/'
+                             '<loop>_<tag>/), so it does not clobber the canonical run.')
     parser.add_argument('--dataset-dir', type=Path, default=DATASETS_DIR,
                         help='Dataset directory to train on (default: datasets). Point this '
                              'at an alternative source with the same structure as datasets/ '
@@ -93,7 +100,7 @@ if __name__ == "__main__":
     result_dir = MODELS_DIR / args.model
     result_dir.mkdir(parents=True, exist_ok=True)
 
-    report_dir = get_report_dir(args.model, args.loop)
+    report_dir = get_report_dir(args.model, loop_dir(args.loop, args.tag))
 
     trainer = MODELS[args.model].build_trainer(data_dir, batch_size=args.batch_size)
     sids = [d.name for d in subject_dirs(data_dir, trainer.data_subdir)]
@@ -103,11 +110,7 @@ if __name__ == "__main__":
 
     batch_size = trainer.model.batch_size
 
-    postfix = ''
-    if len(eval_ids) == 0:
-        postfix += '_all'
-    if batch_size != type(trainer.model).default_batch_size:
-        postfix += f'_{batch_size}'
+    postfix = f'_{args.tag}' if args.tag else ''
     save_artifacts(trainer, result_dir, eval_dataset, postfix, data_root=data_dir)
 
     if args.epochs == 0:
@@ -122,6 +125,7 @@ if __name__ == "__main__":
     write_yaml(report_dir / RUN_MANIFEST, {
         'model': args.model,
         'loop': args.loop,
+        'tag': args.tag,
         'metric': trainer.primary_metric,
         'epochs': args.epochs,
         'step_unit': 'round' if args.loop == 'federated' else 'epoch',

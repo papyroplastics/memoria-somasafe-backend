@@ -12,7 +12,7 @@ from common.config import DATASETS_DIR, MODELS_DIR
 from ml.model_list import MODELS
 from ml.preprocessing import CLEAN_SUBDIR, MIXED_SUBDIR
 from ml.models.common import AutoencoderTrainer
-from ml.saving import load_trainable_weights
+from ml.saving import load_trainable_weights, trainable_path
 
 from ..common.plots import line_plot
 from ..common.reports import get_report_dir, read_subject_split, write_metrics_csv, write_yaml
@@ -37,16 +37,21 @@ if __name__ == "__main__":
     parser.add_argument('--global-f', action='store_true',
                         help='Threshold with a single pooled clean quantile instead of a '
                              "per-subject one (each subject's clean FPR then drifts off f)")
+    parser.add_argument('--tag', default=None,
+                        help='Tag of the train.py run to calibrate (default: the canonical '
+                             'untagged run). Selects both trainable_<tag>.tflite and the '
+                             'normal_<tag>/federated_<tag> run.yaml it was trained with.')
     args = parser.parse_args()
 
     thresholds_fn = global_thresholds if args.global_f else subject_thresholds
     mode = 'global' if args.global_f else 'per-subject'
 
     trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
-    trainer.model.restore(load_trainable_weights(MODELS_DIR / args.model / 'trainable.tflite'))
+    weights = trainable_path(MODELS_DIR / args.model, args.tag)
+    trainer.model.restore(load_trainable_weights(weights))
     assert isinstance(trainer, AutoencoderTrainer)
 
-    train_ids, held_out = read_subject_split(args.model, ('normal', 'federated'))
+    train_ids, held_out = read_subject_split(args.model, ('normal', 'federated'), args.tag)
     train, held = set(train_ids), set(held_out)
 
     print(f"Calibrating the expected FPR ({mode} threshold) on the {len(train_ids)} "
