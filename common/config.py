@@ -57,7 +57,7 @@ FED_AGG_INTERVAL_SECONDS = int(os.environ.get("FED_AGG_INTERVAL_SECONDS", DAY))
 FED_MIN_SUBMISSIONS = int(os.environ.get("FED_MIN_SUBMISSIONS", 1))
 # Fraction of values the trimmed-mean aggregator drops from each side of every
 # coordinate. Must be in [0, 0.5); below 1/n it trims nothing and is a plain mean.
-FED_TRIM_RATIO = float(os.environ.get("FED_TRIM_RATIO", 0.1))
+FED_TRIM_RATIO = float(os.environ.get("FED_TRIM_RATIO", 0.2))
 
 # --- Secure aggregation (see worker.tasks.secure_aggregation) ---
 # Per-coordinate clipping bound B: each client clips its delta to +/-B before

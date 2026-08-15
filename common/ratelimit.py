@@ -34,8 +34,7 @@ class RateLimit(str, Enum):
 # Model-scoped actions, keyed by model key — the ones a federated round clears so
 # clients can immediately re-pull and re-submit. (``ota_download`` is per-interface
 # and unrelated to a model round.)
-_MODEL_ACTIONS = (RateLimit.model_download, RateLimit.weights_download,
-                  RateLimit.weight_submit)
+_MODEL_ACTIONS = (RateLimit.model_download, RateLimit.weights_download, RateLimit.weight_submit)
 
 
 def _key(action: RateLimit, user_id: int, resource: str) -> str:
@@ -63,7 +62,6 @@ def add_usage(action: RateLimit, user_id: int, resource: str, window: int) -> No
 
 
 def clear_model_limits(model_key: str) -> None:
-    """Drop the artifact-download/weights-download/submit counters for a model across all users."""
     for action in _MODEL_ACTIONS:
         keys = list(client.scan_iter(match=f"rl:{action.value}:*:{model_key}"))
         if keys:

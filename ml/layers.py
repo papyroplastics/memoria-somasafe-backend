@@ -31,6 +31,8 @@ def conv1d_same(x: tf.Tensor, kernel: tf.Tensor, stride: int) -> tf.Tensor:
     pad_total = max((out_len - 1) * stride + kernel_size - seq_len, 0)
     pad_left = pad_total // 2
 
+    #return tf.nn.conv1d(x, kernel, stride=stride, padding='SAME')
+
     @tf.custom_gradient
     def call(x: tf.Tensor, kernel: tf.Tensor):
         y = tf.nn.conv1d(x, kernel, stride=stride, padding='SAME')

@@ -54,10 +54,10 @@ siguientes. Los dos bucles con el **mismo** `--eval-subjects`, o el solapamiento
 lo mismo (`plot_convergence` se niega a dibujarlo si los manifiestos discrepan).
 
 ```bash
-uv run -m scripts.system.train cnn-ae      --loop normal    --eval-subjects 14-15 --epochs 10
-uv run -m scripts.system.train cnn-ae      --loop federated --eval-subjects 14-15 --epochs 10
-uv run -m scripts.system.train feature-mlp --loop normal    --eval-subjects 14-15
-uv run -m scripts.system.train feature-mlp --loop federated --eval-subjects 14-15
+uv run -m scripts.system.train cnn-ae      --loop normal    --eval-subjects 14-15 --epochs 15
+uv run -m scripts.system.train cnn-ae      --loop federated --eval-subjects 14-15 --epochs 15
+uv run -m scripts.system.train feature-mlp --loop normal    --eval-subjects 14-15 --epochs 15
+uv run -m scripts.system.train feature-mlp --loop federated --eval-subjects 14-15 --epochs 15
 ```
 
 | Salida | Alimenta |
@@ -144,7 +144,7 @@ Entrenarlo sobrescribe el `trainable.tflite` canónico, así que hay que apartar
 restaurar el maestro con split.
 
 ```bash
-uv run -m scripts.system.train cnn-ae --eval-subjects none --epochs 10 --tag all # crea trainable_all.tflite
+uv run -m scripts.system.train cnn-ae --eval-subjects none --epochs 15 --tag all # crea trainable_all.tflite
 
 uv run -m scripts.figures.subject_roc cnn-ae --tag all
 uv run -m scripts.figures.knowledge_distillation cnn-ae --student feature-mlp --tag all

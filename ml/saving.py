@@ -38,7 +38,8 @@ def get_trainable_model(model: TrainableModel) -> bytes:
         })
 
         converter = tf.lite.TFLiteConverter.from_saved_model(str(saved_dir))  # type: ignore
-        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]  # type: ignore
+        #converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]  # type: ignore
+        converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]  # type: ignore
         converter.experimental_enable_resource_variables = True
         return converter.convert()
 
