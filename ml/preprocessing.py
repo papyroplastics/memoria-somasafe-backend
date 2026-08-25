@@ -23,9 +23,11 @@ MIXED_FEATURE_SUBDIR = 'mixed-features'     # features windowed from mixed-signa
 CLEAN_FEATURE_SUBDIR = 'clean-features'     # features windowed from clean-signals (all-normal)
 NORM_PARAMS_FILE = 'norm-params.npy'
 FEATURE_STATS_FILE = 'feature_stats.npy'
+ACTIVITY_FILE = 'activity.npy'
 
 BVP_RATE = 64
 ACC_RATE = 32
+ACTIVITY_RATE = 4
 WINDOW_SECONDS = 8
 BVP_WINDOW = BVP_RATE * WINDOW_SECONDS    # 512 samples
 ACC_WINDOW = ACC_RATE * WINDOW_SECONDS    # 256 samples
@@ -35,6 +37,17 @@ MAX_ANOMALY_WINDOWS = 30
 
 ANOMALY_KINDS = ('blowup', 'noise', 'tachy', 'brady', 'afib')
 N_FEATURES = 17
+
+# PPG-DaLiA's protocol activities, as stored in SX.pkl['activity'] at 4 Hz. ID 0 marks the
+# transient periods between activities (mostly walking to the next location).
+ACTIVITIES = {
+    0: 'transient', 1: 'sitting', 2: 'stairs', 3: 'table-soccer', 4: 'cycling',
+    5: 'driving', 6: 'lunch', 7: 'walking', 8: 'working',
+}
+
+# The activities a subject stays essentially still through. Anything else is dominated by
+# motion artefacts, which swamp the waveform morphology an anomaly detector reads.
+LOW_ACTIVITY = (1, 5, 6, 8)
 
 class DatasetUnavailibleError(FileNotFoundError):
     def __init__(self, data_dir: str | Path):

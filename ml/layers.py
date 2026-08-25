@@ -27,7 +27,7 @@ def upsample2(x: tf.Tensor) -> tf.Tensor:
 def conv1d_same(x: tf.Tensor, kernel: tf.Tensor, stride: int) -> tf.Tensor:
     batch, seq_len, in_ch = (int(d) for d in x.shape)
     kernel_size, _, out_ch = (int(d) for d in kernel.shape)
-    out_len = -(-seq_len // stride)
+    out_len = seq_len // stride
     pad_total = max((out_len - 1) * stride + kernel_size - seq_len, 0)
     pad_left = pad_total // 2
 
@@ -135,8 +135,12 @@ class Conv1D(tf.Module):
     def __init__(self, in_ch: int, out_ch: int, kernel_size: int, stride: int = 1,
                  activation: Callable | None = None):
         limit = math.sqrt(6.0 / (kernel_size * (in_ch + out_ch)))
-        self.kernel = tf.Variable(tf.random.uniform(
-            shape=[kernel_size, in_ch, out_ch], minval=-limit, maxval=limit), name='conv_kernel')
+        self.kernel = tf.Variable(
+                tf.random.uniform(
+                    shape=[kernel_size, in_ch, out_ch],
+                    minval=-limit, 
+                    maxval=limit
+                ), name='conv_kernel')
         self.bias = tf.Variable(tf.zeros(shape=[out_ch]), name='conv_bias')
         self.stride = stride
         self.activation = activation if activation else (lambda x: x)

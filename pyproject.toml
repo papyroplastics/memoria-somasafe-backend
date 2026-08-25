@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = "==3.13.*"
 dependencies = [
     "tensorflow>=2.21.0",
-    "ai-edge-litert>=2.1.5",
+    "ai-edge-litert>=2.1.6",
     "numpy>=2.4.6",
     "pandas>=2.2",
     "matplotlib>=3.10.9",

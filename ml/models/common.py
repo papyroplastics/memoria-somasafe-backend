@@ -270,7 +270,7 @@ class AutoencoderTrainer(Trainer):
     n_eval_inputs = 1
     contract_version = 2   # norm layout: signal mean/std (1 each)
 
-    default_shift = BVP_RATE * 3
+    default_shift = BVP_RATE * 3 # shift 3 seconds
 
     def __init__(self, model: TrainableAutoencoder, shift: int = default_shift,
                  data_subdir: str = CLEAN_SUBDIR):
