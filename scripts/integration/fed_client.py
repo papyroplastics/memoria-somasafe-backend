@@ -176,9 +176,9 @@ def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
     spec = MODELS[key]
     strategy = _strategy_for(spec.submission_type)
     trainer = spec.build_trainer(DATASETS_DIR)
-    client_datasets, held_out = holdout(trainer.subject_datasets(DATASETS_DIR), eval_subjects)
+    client_datasets, held_out = holdout(trainer.subject_datasets(), eval_subjects)
     # Materialize each held-out subject and concatenate at the Python level, so the
-    # already-cached subject datasets are never re-combined into a new tf pipeline.
+    # already-built subject datasets are never re-combined into a new tf pipeline.
     eval_data = [dp for ds in held_out for dp in list(ds)]
     strategy.setup(len(client_datasets))
 

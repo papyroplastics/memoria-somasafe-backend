@@ -49,14 +49,18 @@ api/       FastAPI gateway (no TensorFlow): routers for auth/device/model (route
            rate-limiting + attestation-challenge helpers (lib/), and a pytest suite
            mirroring the routers (test/).
 ml/        TensorFlow models + training, imported by worker + scripts, never by api.
-           model_list.py is the registry (key -> metadata + trainer builder), the single
-           source of truth. models/ holds one file per architecture (FeatureMLP,
-           CNN/LSTM/GRU autoencoders) built on shared bases in common.py. Everything
-           else is model-agnostic and shared across architectures: preprocessing.py
-           (raw download -> arrays on disk; no TensorFlow) and loading.py (the cached
-           tf.data pipelines over them) split the dataset work, and training.py holds
-           the loops plus the aggregation rules (average, weighted_average,
-           trimmed_mean), alongside optimizers, saving/export, layers, metrics.
+           Two parallel registries are the single source of truth: model_list.py (key ->
+           metadata + model/trainer builders) and dataset_list.py (key -> a DataSource
+           builder, plus which dataset training and int8 calibration use). models/ holds
+           one file per architecture (FeatureMLP, CNN/LSTM/GRU autoencoders) built on
+           shared bases in common.py; sources/ mirrors it with one file per dataset
+           (dalia.py) over the DataSource base in common.py. Everything else is
+           model-agnostic and shared across architectures: preprocessing.py (raw download
+           -> arrays on disk; no TensorFlow), sources/ (reading those arrays back, with
+           the activity filter applied) and loading.py (the tf.data plumbing over them)
+           split the dataset work, and training.py holds the loops plus the aggregation
+           rules (average, weighted_average, trimmed_mean), alongside optimizers,
+           saving/export, layers, metrics.
            layers.py in particular reimplements a few ops with custom gradients because
            the stock TF gradients only exist as Flex ops the phone's LiteRT runtime
            can't execute.
@@ -93,14 +97,24 @@ Training is split into three layers so any model can be run under any loop:
   `transfer_from` (copy compatible trainable weights from another instance of the same
   architecture, transferring the overlapping region where a shape differs — used for
   cross-batch-size transfer learning).
-- **Trainer** (`Trainer`): only what is model-specific — `subject_dataset` (read one
-  subject off disk), `normalize_feed` (the int8 calibration feed), `norm_param_bytes`
-  and `eval_metrics` (accuracy for the MLP, reconstruction error for the autoencoders).
-  It stores no data and no batch size: `subject_datasets(data_root)` is its single data
-  entry point, returning every subject's batched, cached dataset in subject order, which
-  `ml.loading.holdout` splits and `ml.loading.pool` merges. Each model class declares a
-  `default_batch_size` and each model module exposes `get_trainer(data_root,
-  batch_size=None)` (falling back to that default when `batch_size` is `None`).
+- **DataSource** (`ml/sources/`): everything about reading one dataset off disk —
+  subjects, window grids, the activity filter, normalization stats and the int8
+  calibration sample. Sources hand back numpy arrays, so a filter is a boolean mask and
+  the scoring path in `scripts/common/scoring.py` consumes them directly. Which datasets
+  exist is declared in `ml/dataset_list.py`.
+- **Trainer** (`Trainer`): only what is model-specific — `subject_arrays` (shape one
+  subject's datapoints), `calibration_arrays`, `normalize_feed` (the int8 calibration
+  feed), `norm_param_bytes` and `eval_metrics` (accuracy for the MLP, reconstruction
+  error for the autoencoders). It is built with a data root and pins itself to the
+  training dataset; `subject_datasets()` is its single data entry point, returning every
+  subject's batched dataset in subject order, which `ml.loading.holdout` splits and
+  `ml.loading.pool` merges. It offers no way to select a dataset — its consumers are the
+  system itself (`train.py`, `fed_client.py`, `worker.tasks`), which trains on one dataset
+  by definition; the figure scripts that already know their architecture build a bare
+  model with `ModelSpec.build_model` and pick a source themselves. Each model class
+  declares a `default_batch_size` and each model module exposes `get_model(data_root,
+  batch_size=None)` and `get_trainer(data_root, batch_size=None)` (both falling back to
+  that default when `batch_size` is `None`).
 - **Loop** (`training.py`): orchestration only — `normal_loop` and `federated_loop`
   (simulated FedAvg, aggregating each round's client deltas with `weighted_average`),
   over the generic
@@ -137,6 +151,36 @@ distilled into the student.
 See [`shared/docs/model-types.md`](shared/docs/model-types.md) for what each model
 architecture is and how normalization works; this section covers the backend-specific
 dataset and training-pipeline details.
+
+### Datasets and the activity filter
+
+PPG-DaLiA records every subject through eight protocol activities. Extraction stores the
+`activity` track upsampled onto the BVP grid at `clean-signals/S*/activity.npy`, one id
+per BVP sample, so it indexes exactly like `bvp.npy` and every windowing grid (the
+non-overlapping 8 s one the labels and features live on, the sliding one the autoencoders
+train on) derives its own per-window activity from that single array.
+
+`ml/dataset_list.py` registers what that buys, mirroring `ml/model_list.py`:
+
+| key | what it serves |
+| --- | --- |
+| `ppg-dalia` | every window |
+| `ppg-dalia-low` | only the low-activity windows — sitting, driving, lunch, working |
+
+The filter is **strict**: a window survives only if *every* sample in it carries an
+allowed id, so windows straddling an activity change and the transient periods between
+activities (id 0) are dropped. It is applied at load time, never on disk, and identically
+across `clean-signals`, `mixed-signals`, `anomalous-signals` and the feature dirs, so a
+window index means the same eight seconds everywhere.
+
+Training and its in-loop evaluation always run on `ppg-dalia-low` (`TRAINING_DATASET`):
+motion artefacts during cycling, stairs, table soccer and walking dominate the waveform,
+so an autoencoder trained across all of them spends its capacity on motion rather than on
+the morphology the detector reads. int8 calibration deliberately stays on the unfiltered
+`ppg-dalia` (`CALIBRATION_DATASET`) — the device runs everywhere, so the tensor scales
+must cover the full range — and so do `norm-params.npy` and `feature_stats.npy`, which are
+baked into the model as its z-score constants. The analysis scripts take `--dataset` to
+score the same weights either way.
 
 ### `FeatureMLP` dataset — synthetic anomaly injection
 
@@ -189,6 +233,13 @@ own clean-error spread makes the ramp calibrated per subject (reconstruction-err
 varies between people), and `label > 0.5` reproduces the hard decision. Soft targets carry
 the teacher's confidence — proper knowledge distillation, not just pseudo-labeling.
 
+`calibrate_fpr`, `anomaly_detection`, `subject_roc`, `plot_signals` and
+`knowledge_distillation` all take `--dataset` (default `ppg-dalia`), so the same weights can be
+scored over every window and over the low-activity ones only; the dataset key goes into the
+report path, so the runs sit side by side instead of clobbering each other. They build the
+model directly from `ModelSpec.build_model` and pick their own source — they already know
+they hold an autoencoder, so a `Trainer` would only pin them to the training dataset.
+
 The case studies live in three `scripts/figures/` scripts:
 
 - **`calibrate_fpr.py`** picks the expected FPR maximizing Youden's J on the split teacher's
@@ -197,7 +248,7 @@ The case studies live in three `scripts/figures/` scripts:
   subjects instead — each subject's threshold is a quantile of its own clean scores, so a
   sweep measured on the calibration subjects would show the empirical FPR tracking the
   expected FPR almost exactly by construction, not a generalization number. Writes two
-  figures to `results/<model>/calibrate_fpr/`: `calibration.png` (recall/FPR/J vs. expected
+  figures to `results/<model>/calibrate_fpr/<dataset>/`: `calibration.png` (recall/FPR/J vs. expected
   FPR) and `roc.png` (the ROC curve — recall vs. empirical FPR), plus the sweep table
   (`.csv`/`.yaml`). It exists only to justify calibrating on J rather than F1 for the report;
   nothing imports it, and the two scripts below re-pick the FPR internally (it is cheap).
@@ -205,7 +256,8 @@ The case studies live in three `scripts/figures/` scripts:
   FPR inline on the training subjects and scores the detector against the true mixed-window
   labels and the per-type `anomalous-signals/` sets on the **held-out** subjects —
   precision/recall/F1, per-anomaly-kind recall and clean FPR. Held-out only, so the numbers
-  are generalization to an unseen user.
+  are generalization to an unseen user. Writes
+  `results/<model>/anomaly_detection.<dataset>.yaml`.
 - **`knowledge_distillation.py`** takes a teacher trained on **all** users (so every
   subject's soft labels are the same, teacher-seen quality) and shows a distilled student can
   be personalized. It distils the soft labels in memory and runs **leave-one-subject-out**:
@@ -303,8 +355,9 @@ memory — no tree, no `--dataset-dir` student to train). Tag the all-users teac
 doesn't overwrite the canonical split teacher's `trainable.tflite`:
 
 ```bash
-uv run -m scripts.figures.calibrate_fpr cnn-ae                          # FPR sweep + ROC -> results/cnn-ae/calibrate_fpr/
-uv run -m scripts.figures.anomaly_detection cnn-ae                      # detector metrics -> results/cnn-ae/
+uv run -m scripts.figures.calibrate_fpr cnn-ae                          # FPR sweep + ROC -> results/cnn-ae/calibrate_fpr/ppg-dalia/
+uv run -m scripts.figures.anomaly_detection cnn-ae                      # detector metrics -> results/cnn-ae/anomaly_detection.ppg-dalia.yaml
+uv run -m scripts.figures.anomaly_detection cnn-ae --dataset ppg-dalia-low   # the same, on the windows it trained on
 uv run -m scripts.system.train cnn-ae --eval-subjects none --tag all    # all-users teacher -> trainable_all.tflite
 uv run -m scripts.figures.subject_roc cnn-ae --tag all                  # per-subject spread, every subject on equal footing
 uv run -m scripts.figures.knowledge_distillation cnn-ae --student feature-mlp --tag all  # LOSO personalization

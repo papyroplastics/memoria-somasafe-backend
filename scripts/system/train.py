@@ -8,6 +8,11 @@ and score on them, so a centralized and a federated run at the same --eval-subje
 the same data and are directly comparable — that overlay is what scripts.figures.plot_convergence
 draws from the manifests this writes. The resolved held-out ids are recorded, not just a count.
 
+Training and its in-loop evaluation both run on the low-activity dataset
+(ml.dataset_list.TRAINING_DATASET): only the windows a subject spent sitting, driving,
+at lunch or working, so motion artefacts do not stand in for the waveform. The int8
+calibration feed deliberately stays unfiltered.
+
 --tag suffixes both the served artifacts and results/<model>/<loop>_<tag>/, so an ad-hoc run
 (a different batch size, an all-users teacher, a test sweep) doesn't clobber the canonical
 unsuffixed one. The figure scripts take the same --tag to read it back.
@@ -18,7 +23,8 @@ import re
 from pathlib import Path
 import tensorflow as tf
 
-from ml.loading import pool, subject_dirs
+from ml.dataset_list import TRAINING_DATASET
+from ml.loading import pool
 from ml.models.common import Trainer
 from ml.saving import save_artifacts
 from ml.training import normal_loop, federated_loop, History
@@ -45,11 +51,11 @@ def parse_eval_selection(value: str, sids: list[str]) -> list[str]:
     return [s for s in sids if s in ids]
 
 
-def run_loop(trainer: Trainer, data_dir: Path, loop: str, eval_ids: list[str],
+def run_loop(trainer: Trainer, loop: str, eval_ids: list[str],
              steps: int, local_epochs: int
              ) -> tuple[History, tf.data.Dataset, list[str], list[str]]:
-    datasets = trainer.subject_datasets(data_dir)
-    sids = [d.name for d in subject_dirs(data_dir, trainer.data_subdir)]
+    datasets = trainer.subject_datasets()
+    sids = trainer.subject_ids()
     held = set(eval_ids)
     train_subjects = [ds for ds, sid in zip(datasets, sids) if sid not in held]
     held_out = [ds for ds, sid in zip(datasets, sids) if sid in held]
@@ -103,15 +109,14 @@ if __name__ == "__main__":
     report_dir = get_report_dir(args.model, loop_dir(args.loop, args.tag))
 
     trainer = MODELS[args.model].build_trainer(data_dir, batch_size=args.batch_size)
-    sids = [d.name for d in subject_dirs(data_dir, trainer.data_subdir)]
-    eval_ids = parse_eval_selection(args.eval_subjects, sids)
+    eval_ids = parse_eval_selection(args.eval_subjects, trainer.subject_ids())
     history, eval_dataset, train_ids, held_ids = run_loop(
-        trainer, data_dir, args.loop, eval_ids, args.epochs, args.local_epochs)
+        trainer, args.loop, eval_ids, args.epochs, args.local_epochs)
 
     batch_size = trainer.model.batch_size
 
     postfix = f'_{args.tag}' if args.tag else ''
-    save_artifacts(trainer, result_dir, eval_dataset, postfix, data_root=data_dir)
+    save_artifacts(trainer, result_dir, postfix)
 
     if args.epochs == 0:
         exit()
@@ -134,6 +139,7 @@ if __name__ == "__main__":
         'train_subjects': train_ids,
         'eval_subjects': held_ids,
         'batch_size': batch_size,
+        'dataset': TRAINING_DATASET,
         'dataset_dir': args.dataset_dir,
         'seed': SEED,
         'history': 'training.csv',

@@ -1,7 +1,8 @@
 """Calibrate the detector's expected FPR (max Youden's J on the training subjects) and plot
 the FPR sweep + ROC on the held-out subjects (report Sec. 5.4): two figures + the sweep
-table under ``results/<model>/calibrate_fpr/``. ``--global-f`` swaps the per-subject
-threshold for a single pooled one (population-level operating point).
+table under ``results/<model>/calibrate_fpr/<dataset>/``. ``--global-f`` swaps the
+per-subject threshold for a single pooled one (population-level operating point), and
+``--dataset`` picks which windows the detector is calibrated and swept on.
 """
 
 import argparse
@@ -9,16 +10,16 @@ import argparse
 import numpy as np
 
 from common.config import DATASETS_DIR, MODELS_DIR
+from ml.dataset_list import DATASETS
 from ml.model_list import MODELS
-from ml.preprocessing import CLEAN_SUBDIR, MIXED_SUBDIR
-from ml.models.common import AutoencoderTrainer
 from ml.saving import load_trainable_weights, trainable_path
+from ml.sources.dalia import CLEAN, MIXED
 
 from ..common.plots import line_plot
 from ..common.reports import get_report_dir, read_subject_split, write_metrics_csv, write_yaml
 from ..common.scoring import (
     calibrate_expected_fpr, sweep_expected_fpr, subject_thresholds, global_thresholds,
-    score_dir_by_subject, load_mixed_truth)
+    score_subjects, mixed_truth)
 
 
 def build_grid(expected_fpr: float, step: float) -> list[float]:
@@ -41,32 +42,37 @@ if __name__ == "__main__":
                         help='Tag of the train.py run to calibrate (default: the canonical '
                              'untagged run). Selects both trainable_<tag>.tflite and the '
                              'normal_<tag>/federated_<tag> run.yaml it was trained with.')
+    parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia',
+                        help='Dataset to calibrate and sweep on (default: ppg-dalia, every '
+                             'window). ppg-dalia-low keeps only the low-activity windows, '
+                             'which is what the model was trained on.')
     args = parser.parse_args()
 
     thresholds_fn = global_thresholds if args.global_f else subject_thresholds
     mode = 'global' if args.global_f else 'per-subject'
+    source = DATASETS[args.dataset].build(DATASETS_DIR)
 
-    trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
+    model = MODELS[args.model].build_model(DATASETS_DIR)
     weights = trainable_path(MODELS_DIR / args.model, args.tag)
-    trainer.model.restore(load_trainable_weights(weights))
-    assert isinstance(trainer, AutoencoderTrainer)
+    model.restore(load_trainable_weights(weights))
 
     train_ids, held_out = read_subject_split(args.model, ('normal', 'federated'), args.tag)
     train, held = set(train_ids), set(held_out)
 
+    print(f"Scoring {DATASETS[args.dataset].name}")
     print(f"Calibrating the expected FPR ({mode} threshold) on the {len(train_ids)} "
           f"training subjects: {', '.join(train_ids)}")
-    truth_tr = load_mixed_truth(DATASETS_DIR)
-    clean_tr = score_dir_by_subject(trainer, DATASETS_DIR / CLEAN_SUBDIR, subjects=train)
-    mixed_tr = score_dir_by_subject(trainer, DATASETS_DIR / MIXED_SUBDIR, subjects=train)
+    truth_tr = mixed_truth(source, subjects=train)
+    clean_tr = score_subjects(model, source, CLEAN, subjects=train)
+    mixed_tr = score_subjects(model, source, MIXED, subjects=train)
     expected_fpr = calibrate_expected_fpr(clean_tr, mixed_tr, truth_tr, thresholds_fn=thresholds_fn)
     print(f"expected_fpr = {expected_fpr:.4f}")
 
     print(f"\nSweeping the FPR curve on the {len(held_out)} held-out subjects: "
           f"{', '.join(held_out)}")
-    truth = load_mixed_truth(DATASETS_DIR)
-    clean = score_dir_by_subject(trainer, DATASETS_DIR / CLEAN_SUBDIR, subjects=held)
-    mixed = score_dir_by_subject(trainer, DATASETS_DIR / MIXED_SUBDIR, subjects=held)
+    truth = mixed_truth(source, subjects=held)
+    clean = score_subjects(model, source, CLEAN, subjects=held)
+    mixed = score_subjects(model, source, MIXED, subjects=held)
 
     grid = build_grid(expected_fpr, args.step)
     sweep = sweep_expected_fpr(clean, mixed, truth, grid, thresholds_fn)
@@ -81,7 +87,7 @@ if __name__ == "__main__":
           f"subjects; F1 is prevalence-dependent and the mixed set is 50% anomalous by "
           f"construction)")
 
-    report_dir = get_report_dir(args.model, 'calibrate_fpr')
+    report_dir = get_report_dir(args.model, f'calibrate_fpr/{args.dataset}')
     levels = [row['expected_fpr'] for row in sweep]
 
     line_plot(report_dir / 'calibration.png', levels,
@@ -111,6 +117,7 @@ if __name__ == "__main__":
 
     write_metrics_csv(sweep, report_dir, 'calibration.csv')
     write_yaml(report_dir / 'calibration.yaml', {
+        'dataset': {'key': args.dataset, 'name': DATASETS[args.dataset].name},
         'shows': "Detector calibration sweep: how recall and the empirical clean "
                  "false-positive rate trade off as the expected FPR varies, and the "
                  "operating point selected from it.",
@@ -143,6 +150,7 @@ if __name__ == "__main__":
         'source': {'reproducible': True},
     })
     write_yaml(report_dir / 'roc.yaml', {
+        'dataset': {'key': args.dataset, 'name': DATASETS[args.dataset].name},
         'shows': "The detector's ROC curve on the held-out subjects: recall against the "
                  "empirical clean false-positive rate as the expected FPR sweeps from 0 to "
                  "1, with the selected operating point marked. See calibration.yaml/csv for "

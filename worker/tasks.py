@@ -69,7 +69,7 @@ def _load_models(**_) -> None:
         try:
             trainer = MODELS[key].build_trainer(DATASETS_DIR)
             fingerprint = trainer.arch_fingerprint()
-            rep = trainer.representative_dataset(data_root=DATASETS_DIR)
+            rep = trainer.representative_dataset()
             _models[key] = (trainer.model, rep, fingerprint,
                             trainer.contract_version, trainer.norm_param_bytes())
         except Exception as exc:  # missing dataset / build error — skip, don't crash boot

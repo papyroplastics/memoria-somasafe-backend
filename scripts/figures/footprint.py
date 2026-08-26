@@ -43,7 +43,7 @@ def main() -> None:
     rows = []
     for key in sorted(MODELS):
         try:
-            params = MODELS[key].build_trainer(DATASETS_DIR).model.total_weight_size
+            params = MODELS[key].build_model(DATASETS_DIR).total_weight_size
         except Exception as e:
             print(f"skipped {key}: {e}")
             continue

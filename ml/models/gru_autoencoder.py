@@ -55,11 +55,14 @@ class GRUAutoencoder(TrainableAutoencoder):
         return tf.stack(outputs, axis=1)
 
 
-def get_trainer(data_root: Path, batch_size: int | None = None) -> AutoencoderTrainer:
+def get_model(data_root: Path, batch_size: int | None = None) -> GRUAutoencoder:
     sig_mean, sig_std = autoencoder_norm_params(data_root)
-    model = GRUAutoencoder(
+    return GRUAutoencoder(
         name='dalia_gru_ae', batch_size=batch_size or TrainableAutoencoder.default_batch_size,
         seq_len=BVP_WINDOW,
         signal_mean=sig_mean, signal_std=sig_std,
     )
-    return AutoencoderTrainer(model)
+
+
+def get_trainer(data_root: Path, batch_size: int | None = None) -> AutoencoderTrainer:
+    return AutoencoderTrainer(get_model(data_root, batch_size), data_root)

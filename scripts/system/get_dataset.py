@@ -1,9 +1,11 @@
 """
-Download + sequence the (idempotent) preprocessing stages in ml/data.py:
+Download + sequence the (idempotent) preprocessing stages in ml/preprocessing.py:
 
-Stage 1 → datasets/clean-signals/S*/    raw BVP (64 Hz) + ACC mag (32 Hz); global BVP
-mean/std (norm-params.npy). ACC is stored for feature extraction only — no model takes
-it as an input, so it needs no normalization params.
+Stage 1 → datasets/clean-signals/S*/    raw BVP (64 Hz) + ACC mag (32 Hz) + the activity
+track upsampled to the BVP grid (activity.npy); global BVP mean/std (norm-params.npy). ACC
+is stored for feature extraction only — no model takes it as an input, so it needs no
+normalization params. activity.npy is what ml.sources.dalia filters windows by, so the
+low-activity dataset needs no separate stage.
 Stage 2 → datasets/anomalous-signals/<kind>/S*/  per-type fully-anomalous BVP (one kind
 applied to every window) — for isolated per-kind recall in anomaly_detection.py
 Stage 3 → datasets/mixed-signals/S*/      raw BVP with a window-aligned ~50% mix of anomaly

@@ -5,8 +5,8 @@ import tensorflow as tf
 
 from ..layers import Dense, relu
 from .common import TrainableModel, Trainer
-from ..preprocessing import MIXED_FEATURE_SUBDIR, N_FEATURES
-from ..loading import load_feature_stats
+from ..dataset_list import calibration_source
+from ..preprocessing import N_FEATURES
 from ..optimizers import Adam
 
 
@@ -83,20 +83,20 @@ class FeatureMLPTrainer(Trainer):
     dataset_tensors = ['features', 'labels']
     n_eval_inputs = 1
     contract_version = 1   # norm layout: mean[17] then std[17], LE float32
-    data_subdir = MIXED_FEATURE_SUBDIR
 
-    def __init__(self, model: FeatureMLP):
+    def __init__(self, model: FeatureMLP, data_root: Path):
+        super().__init__(model, data_root)
         self.model: FeatureMLP = model # type: ignore
 
     def norm_param_bytes(self):
         return np.concatenate([self.model.feat_mean.numpy(),
                                self.model.feat_std.numpy()]).astype('<f4').tobytes()
 
-    def subject_dataset(self, subject_dir):
-        x = np.load(subject_dir / 'features.npy').astype(np.float32)   # raw; model normalizes
-        y = np.load(subject_dir / 'labels.npy')
+    def subject_arrays(self, sid):
+        return self.data.features(sid)   # raw features; the model normalizes them
 
-        return tf.data.Dataset.from_tensor_slices((x, y))
+    def calibration_arrays(self):
+        return self.calibration.calibration_features()
 
     def normalize_feed(self, features, labels):
         return {'features': (features - self.model.feat_mean) / self.model.feat_std}
@@ -140,11 +140,14 @@ class FeatureMLPTrainer(Trainer):
             total += float(y.size)
         return {'accuracy': correct / total if total else 0.0}
 
-def get_trainer(data_root: Path, batch_size: int | None = None) -> FeatureMLPTrainer:
-    mean, std = load_feature_stats(data_root / MIXED_FEATURE_SUBDIR)
-    model = FeatureMLP(
+def get_model(data_root: Path, batch_size: int | None = None) -> FeatureMLP:
+    mean, std = calibration_source(data_root).feature_norm_stats()
+    return FeatureMLP(
         name='feature_anomaly',
         batch_size=batch_size or FeatureMLP.default_batch_size,
         feat_mean=mean, feat_std=std,
     )
-    return FeatureMLPTrainer(model)
+
+
+def get_trainer(data_root: Path, batch_size: int | None = None) -> FeatureMLPTrainer:
+    return FeatureMLPTrainer(get_model(data_root, batch_size), data_root)

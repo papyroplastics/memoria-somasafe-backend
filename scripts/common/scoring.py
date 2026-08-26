@@ -4,15 +4,12 @@ pooled. See ../../../shared/docs/anomalies-and-distillation.md for why the expec
 calibrated on Youden's J.
 """
 
-from pathlib import Path
-
 import numpy as np
 
 import tensorflow as tf
-from ml.preprocessing import MIXED_FEATURE_SUBDIR, get_sorted_paths
-from ml.loading import load_signal, window_count
 from ml.metrics import classification_report
-from ml.models.common import AutoencoderTrainer
+from ml.models.common import TrainableAutoencoder
+from ml.sources.common import DataSource
 
 
 def eval_padded(model, *arrays: np.ndarray) -> dict[str, np.ndarray]:
@@ -32,13 +29,10 @@ def eval_padded(model, *arrays: np.ndarray) -> dict[str, np.ndarray]:
     return {k: np.concatenate([c[k] for c in chunks])[:n] for k in chunks[0]}
 
 
-def window_errors(model, signal: np.ndarray, window: int, n_windows: int) -> np.ndarray:
-    n_windows = min(n_windows, len(signal) // window)
-    if n_windows <= 0:
+def window_errors(model, windows: np.ndarray) -> np.ndarray:
+    if not len(windows):
         return np.empty(0, dtype=np.float32)
-    windows = (signal[:n_windows * window]
-               .reshape(n_windows, window, model.n_signals).astype(np.float32))
-    out = eval_padded(model, windows)
+    out = eval_padded(model, windows.astype(np.float32))
     return out['error'].reshape(-1).astype(np.float32)
 
 
@@ -90,24 +84,21 @@ def calibrate_expected_fpr(clean: dict[str, np.ndarray], mixed: dict[str, np.nda
     return float(rows[best]['expected_fpr'])
 
 
-def score_dir_by_subject(trainer: AutoencoderTrainer, signal_dir: Path,
-                         subjects: set[str] | None = None) -> dict[str, np.ndarray]:
-    window = trainer.model.seq_len
-    subject_dirs = get_sorted_paths(signal_dir)
-    if not subject_dirs:
-        raise SystemExit(f"{signal_dir} is empty. Run get_dataset.py first.")
-
-    out: dict[str, np.ndarray] = {}
-    for d in subject_dirs:
-        sid = d.name
-        if subjects is not None and sid not in subjects:
-            continue
-        signal = load_signal(signal_dir, sid)
-        count = window_count(signal, window)
-        out[sid] = window_errors(trainer.model, signal, window, count)
-    return out
+def scored_subjects(source: DataSource, subjects: set[str] | None = None) -> list[str]:
+    return [sid for sid in source.subject_ids()
+            if subjects is None or sid in subjects]
 
 
-def load_mixed_truth(data_dir: Path) -> dict[str, np.ndarray]:
-    feature_dir = data_dir / MIXED_FEATURE_SUBDIR
-    return {d.name: np.load(d / 'labels.npy').reshape(-1) for d in feature_dir.glob('S*')}
+def score_subjects(model: TrainableAutoencoder, source: DataSource, variant: str,
+                   subjects: set[str] | None = None) -> dict[str, np.ndarray]:
+    """Per-window reconstruction error for one signal variant, on the non-overlapping
+    window grid the labels live on — so the scores index-align with ``mixed_truth``."""
+    window = model.seq_len
+    return {sid: window_errors(model, source.signal_windows(sid, variant, window, window))
+            for sid in scored_subjects(source, subjects)}
+
+
+def mixed_truth(source: DataSource,
+                subjects: set[str] | None = None) -> dict[str, np.ndarray]:
+    return {sid: source.window_labels(sid)
+            for sid in scored_subjects(source, subjects)}

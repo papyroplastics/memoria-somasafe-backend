@@ -2,30 +2,33 @@
 (report Sec. 5.4): precision/recall/F1/accuracy, per-anomaly-kind recall, and clean FPR. The
 expected FPR is calibrated inline on the training subjects, so the numbers are generalization
 to an unseen user. Metrics go to results/<model>/.
+
+``--dataset`` picks which dataset the detector is scored on, so the same weights can be
+measured over every window and over the low-activity ones only; the report file carries the
+dataset key, so the runs sit side by side.
 """
 
 
 import argparse
-from pathlib import Path
 
 import numpy as np
 
 from common.config import DATASETS_DIR, MODELS_DIR
-from ml.preprocessing import ANOMALOUS_SUBDIR, ANOMALY_KINDS, CLEAN_SUBDIR, MIXED_SUBDIR
+from ml.dataset_list import DATASETS
+from ml.preprocessing import ANOMALY_KINDS
 from ml.model_list import MODELS
-from ml.models.common import AutoencoderTrainer
+from ml.sources.common import DataSource
+from ml.sources.dalia import CLEAN, MIXED
 from ml.metrics import classification_report
 from ml.saving import load_trainable_weights, trainable_path
 from ..common.reports import get_report_dir, read_subject_split, write_yaml
 from ..common.scoring import (
     calibrate_expected_fpr, subject_thresholds, pooled_flags,
-    score_dir_by_subject, load_mixed_truth,
+    score_subjects, mixed_truth,
 )
 
-EVAL_REPORT = 'anomaly_detection.yaml'   # detector metrics, from this script
 
-
-def evaluate(trainer, data_dir: Path, clean: dict[str, np.ndarray],
+def evaluate(model, source: DataSource, clean: dict[str, np.ndarray],
              mixed: dict[str, np.ndarray], truth: dict[str, np.ndarray],
              thresholds: dict[str, float],
              subjects: set[str] | None = None) -> dict:
@@ -38,10 +41,9 @@ def evaluate(trainer, data_dir: Path, clean: dict[str, np.ndarray],
         'clean_fpr': float(pooled_flags(clean, thresholds).mean()),
     }
 
-    anomalous_dir = data_dir / ANOMALOUS_SUBDIR
     per_kind = {}
     for name in ANOMALY_KINDS:
-        sc = score_dir_by_subject(trainer, anomalous_dir / name, subjects=subjects)
+        sc = score_subjects(model, source, name, subjects=subjects)
         c = sum(len(v) for v in sc.values())
         per_kind[name] = {
             'count': c,
@@ -78,28 +80,33 @@ if __name__ == "__main__":
                         help='Tag of the train.py run to evaluate (default: the canonical '
                              'untagged run). Selects both trainable_<tag>.tflite and the '
                              'normal_<tag>/federated_<tag> run.yaml it was trained with.')
+    parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia',
+                        help='Dataset to score on (default: ppg-dalia, every window). '
+                             'ppg-dalia-low keeps only the low-activity windows, which is '
+                             'what the model was trained on.')
     args = parser.parse_args()
 
     data_dir = DATASETS_DIR
+    source = DATASETS[args.dataset].build(data_dir)
 
-    trainer = MODELS[args.model].build_trainer(data_dir)
+    model = MODELS[args.model].build_model(data_dir)
     weights = trainable_path(MODELS_DIR / args.model, args.tag)
-    trainer.model.restore(load_trainable_weights(weights))
-    assert isinstance(trainer, AutoencoderTrainer)
+    model.restore(load_trainable_weights(weights))
 
     train_ids, held_out = read_subject_split(args.model, ('normal', 'federated'), args.tag)
     train, held = set(train_ids), set(held_out)
 
+    print(f"Scoring {DATASETS[args.dataset].name}")
     print(f"Calibrating expected FPR on the {len(train_ids)} training subjects...")
-    truth_tr = load_mixed_truth(data_dir)
-    clean_tr = score_dir_by_subject(trainer, data_dir / CLEAN_SUBDIR, subjects=train)
-    mixed_tr = score_dir_by_subject(trainer, data_dir / MIXED_SUBDIR, subjects=train)
+    truth_tr = mixed_truth(source, subjects=train)
+    clean_tr = score_subjects(model, source, CLEAN, subjects=train)
+    mixed_tr = score_subjects(model, source, MIXED, subjects=train)
     expected_fpr = calibrate_expected_fpr(clean_tr, mixed_tr, truth_tr)
 
     print(f"Evaluating on the {len(held_out)} held-out subjects: {', '.join(held_out)}")
-    truth = load_mixed_truth(data_dir)
-    clean = score_dir_by_subject(trainer, data_dir / CLEAN_SUBDIR, subjects=held)
-    mixed = score_dir_by_subject(trainer, data_dir / MIXED_SUBDIR, subjects=held)
+    truth = mixed_truth(source, subjects=held)
+    clean = score_subjects(model, source, CLEAN, subjects=held)
+    mixed = score_subjects(model, source, MIXED, subjects=held)
     missing = set(mixed) - set(clean)
     if missing:
         raise SystemExit(f"subjects {sorted(missing)} lack clean windows; "
@@ -108,11 +115,12 @@ if __name__ == "__main__":
     thresholds = subject_thresholds(clean, expected_fpr)
 
     print("Scoring per-type anomalous windows + evaluating...")
-    results = evaluate(trainer, data_dir, clean, mixed, truth, thresholds, subjects=held)
+    results = evaluate(model, source, clean, mixed, truth, thresholds, subjects=held)
     print_metrics(results, expected_fpr)
 
     report_dir = get_report_dir(args.model)
-    write_yaml(report_dir / EVAL_REPORT, {
+    write_yaml(report_dir / f'anomaly_detection.{args.dataset}.yaml', {
+        'dataset': {'key': args.dataset, 'name': DATASETS[args.dataset].name},
         'shows': f"Detector evaluation for {args.model} (report Sec. 5.4): precision/"
                  f"recall/F1/accuracy and clean false-positive rate against the true "
                  f"mixed-window labels, plus per-anomaly-kind recall, on held-out subjects.",

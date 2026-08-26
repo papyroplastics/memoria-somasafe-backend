@@ -7,11 +7,11 @@ import tensorflow as tf
 
 from ..optimizers import Adam
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
-from ..preprocessing import CLEAN_SUBDIR, BVP_RATE
-from ..loading import norm_stats, batched, cached, subject_dirs, subject_windows
-
-# Batches of a run's eval set fed to the int8 converter to fix its tensor scales.
-CALIBRATION_BATCHES = 150
+from ..preprocessing import BVP_RATE
+from ..dataset_list import calibration_source, training_source
+from ..loading import batched, to_dataset
+from ..sources.common import DataSource
+from ..sources.dalia import CLEAN
 
 
 class UnboundError(NotImplementedError):
@@ -149,14 +149,18 @@ class TrainableAutoencoder(TrainableModel):
 
 
 class Trainer(ABC):
-    """The model-specific half of a training run: how to read this model's data off
-    disk, how to score it, and how to feed the int8 converter. Everything generic —
-    the loops, the splits, the dataset plumbing — lives in ml.training and ml.loading,
-    so any model works under any loop."""
+    """The model-specific half of a training run: how to shape this model's datapoints,
+    how to score them, and how to feed the int8 converter. Everything generic — the
+    loops, the splits, the dataset plumbing — lives in ml.training and ml.loading, so any
+    model works under any loop.
+
+    A trainer is pinned to the training dataset and offers no way to select another: its
+    consumers are the system itself (scripts.system.train, scripts.integration.fed_client,
+    worker.tasks), which trains on one dataset by definition. Scripts that already know
+    which architecture they hold build a source from ml.dataset_list directly instead."""
 
     model: TrainableModel
     primary_metric: str
-    data_subdir: str
     # Names of the tensors each dataset batch yields, in order — used to match
     # dataset arrays to the model's signature inputs by name (see scripts/fed_client.py).
     dataset_tensors: list[str]
@@ -167,9 +171,20 @@ class Trainer(ABC):
     # I/O signature semantics. Part of the signed model bytes (see ml.payload).
     contract_version: int
 
+    def __init__(self, model: TrainableModel, data_root: Path):
+        self.model = model
+        self.data: DataSource = training_source(data_root)
+        self.calibration: DataSource = calibration_source(data_root)
+
     @abstractmethod
-    def subject_dataset(self, subject_dir: Path) -> tf.data.Dataset:
-        """One subject's datapoints, unbatched."""
+    def subject_arrays(self, sid: str) -> tuple[np.ndarray, ...]:
+        """One subject's datapoints as raw arrays, one per entry of ``dataset_tensors``."""
+
+    @abstractmethod
+    def calibration_arrays(self) -> np.ndarray:
+        """Datapoints the int8 converter calibrates its tensor scales on, drawn from the
+        unfiltered dataset — the device runs under every activity, not only the ones the
+        model trained on."""
 
     @abstractmethod
     def normalize_feed(self, *tensors: tf.Tensor) -> dict[str, tf.Tensor]:
@@ -197,11 +212,6 @@ class Trainer(ABC):
         """Optional model-specific artifact."""
         pass
 
-    def dataset_key(self) -> tuple:
-        """Everything besides the data root and the subject that changes the datapoints,
-        so two trainers only share a cached dataset when it means the same thing."""
-        return (type(self).__name__, self.model.batch_size)
-
     def arch_fingerprint(self) -> str:
         """Stable hash of the weight-compatibility boundary: the ordered
         trainable-variable layout (name/shape/dtype) plus the baked normalization
@@ -215,53 +225,38 @@ class Trainer(ABC):
         return hashlib.sha256(
             repr(manifest).encode() + self.norm_param_bytes()).hexdigest()[:16]
 
-    def subject_datasets(self, data_root: Path) -> list[tf.data.Dataset]:
-        """Every subject's batched, cached dataset, in subject order. Split it with
+    def subject_ids(self) -> list[str]:
+        return self.data.subject_ids()
+
+    def subject_datasets(self) -> list[tf.data.Dataset]:
+        """Every subject's batched dataset, in subject order. Split it with
         ml.loading.holdout and merge it with ml.loading.pool."""
-        key = self.dataset_key()
-        return [cached((str(data_root), self.data_subdir, d.name, *key),
-                       lambda d=d: batched(self.subject_dataset(d), self.model.batch_size))
-                for d in subject_dirs(data_root, self.data_subdir)]
+        return [batched(to_dataset(*self.subject_arrays(sid)), self.model.batch_size)
+                for sid in self.subject_ids()]
 
-    def representative_dataset(self, dataset: tf.data.Dataset | None = None,
-                               data_root: Path | None = None) -> tf.data.Dataset:
-        """Feed-dict stream for the int8 TFLite converter. Calibrates on ``dataset`` when
-        given (a run's eval set), otherwise on a small sample drawn from ``data_root`` —
-        the worker builds this for every model at startup and must not window the whole
-        dataset to do it."""
-        if dataset is None:
-            if data_root is None:
-                raise ValueError("Either dataset or data_root must be passed")
-            dataset = self.calibration_feed(data_root)
-        else:
-            dataset = dataset.take(CALIBRATION_BATCHES)
-        return dataset.map(self.normalize_feed)
-
-    def calibration_feed(self, data_root: Path, per_subject: int = 10) -> tf.data.Dataset:
-        """A few random datapoints from each subject, batched — enough to fix the int8
-        tensor scales without building the full training pipeline. Sampled across every
-        subject rather than off the head of each: all subjects start at rest, so a
-        prefix would calibrate on an at-rest range and clip everything above it."""
-        parts = []
-        for d in subject_dirs(data_root, self.data_subdir):
-            ds = self.subject_dataset(d)
-            if len(ds):
-                parts.append(ds.shuffle(len(ds), reshuffle_each_iteration=False)
-                               .take(min(per_subject, len(ds))))
-        merged = parts[0]
-        for part in parts[1:]:
-            merged = merged.concatenate(part)
-        return merged.batch(self.model.batch_size, drop_remainder=True)
+    def representative_dataset(self) -> tf.data.Dataset:
+        """Feed-dict stream for the int8 TFLite converter, always built from a small
+        sample of the unfiltered dataset on disk — the worker builds one for every model
+        at startup and must not window the whole dataset to do it."""
+        return (to_dataset(self.calibration_arrays())
+                .batch(self.model.batch_size, drop_remainder=True)
+                .map(self.normalize_feed))
 
 
 class TrainerBuilder(Protocol):
     def __call__(self, data_root: Path, batch_size: int | None = None) -> Trainer: ...
 
 
-def autoencoder_norm_params(data_root: Path, data_subdir: str = CLEAN_SUBDIR):
+class ModelBuilder(Protocol):
+    def __call__(self, data_root: Path,
+                 batch_size: int | None = None) -> TrainableModel: ...
+
+
+def autoencoder_norm_params(data_root: Path):
     """z-score params baked into an autoencoder so it normalizes its own raw input:
-    the BVP signal. ACC is not a model input — it only feeds feature extraction."""
-    return norm_stats(data_root / data_subdir)
+    the BVP signal. ACC is not a model input — it only feeds feature extraction.
+    Computed over every activity: the device normalizes the same way everywhere."""
+    return calibration_source(data_root).signal_norm_stats()
 
 class AutoencoderTrainer(Trainer):
 
@@ -272,23 +267,22 @@ class AutoencoderTrainer(Trainer):
 
     default_shift = BVP_RATE * 3 # shift 3 seconds
 
-    def __init__(self, model: TrainableAutoencoder, shift: int = default_shift,
-                 data_subdir: str = CLEAN_SUBDIR):
+    def __init__(self, model: TrainableAutoencoder, data_root: Path,
+                 shift: int = default_shift):
+        super().__init__(model, data_root)
         self.model: TrainableAutoencoder = model # type: ignore
         self.shift = shift
-        self.data_subdir = data_subdir
-
-    def dataset_key(self):
-        return (*super().dataset_key(), self.model.seq_len, self.shift)
 
     def norm_param_bytes(self):
         return np.concatenate([
             self.model.signal_mean.numpy(), self.model.signal_std.numpy(),
         ]).astype('<f4').tobytes()
 
-    def subject_dataset(self, subject_dir):
-        return subject_windows(subject_dir.parent, subject_dir.name,
-                               self.model.seq_len, self.shift)
+    def subject_arrays(self, sid):
+        return (self.data.signal_windows(sid, CLEAN, self.model.seq_len, self.shift),)
+
+    def calibration_arrays(self):
+        return self.calibration.calibration_windows(self.model.seq_len, self.shift)
 
     def normalize_feed(self, signal):
         return {'signal': (signal - self.model.signal_mean) / self.model.signal_std}

@@ -47,6 +47,14 @@ Idempotente; salta descarga y procesamiento si ya está.
 uv run -m scripts.system.get_dataset
 ```
 
+La etapa 1 ahora también guarda `clean-signals/S*/activity.npy` (la actividad del protocolo,
+remuestreada a la grilla del BVP), que es de donde sale el filtro de baja actividad. Si el
+dataset se generó antes de eso hay que rehacer esa etapa — el resto no cambia:
+
+```bash
+rm -rf shared/gen/datasets/clean-signals && uv run -m scripts.system.get_dataset
+```
+
 ### 1. Corridas de entrenamiento base
 
 Fuente de las curvas de la Sec. 5.2 y de los pesos que consumen casi todas las etapas
@@ -123,17 +131,23 @@ programar", ítems 1 y 2).
 Consume los pesos de `cnn-ae` de la etapa 1 (el `trainable.tflite` canónico, entrenado con
 split). Ninguno de los tres entrena.
 
+Cada script toma `--dataset` (por defecto `ppg-dalia`, todas las ventanas). Correrlos también
+con `ppg-dalia-low` mide el detector sobre las mismas ventanas con las que fue entrenado; la
+clave del dataset va en la ruta de salida, así que las dos corridas conviven.
+
 ```bash
 uv run -m scripts.figures.calibrate_fpr     cnn-ae
+uv run -m scripts.figures.calibrate_fpr     cnn-ae --dataset ppg-dalia-low
 uv run -m scripts.figures.anomaly_detection cnn-ae
+uv run -m scripts.figures.anomaly_detection cnn-ae --dataset ppg-dalia-low
 uv run -m scripts.figures.plot_signals      cnn-ae --subject 10 --window 1196
 ```
 
 | Salida | Sección |
 |--------|---------|
-| `results/<modelo>/calibrate_fpr/calibration.{png,csv,yaml}` | **Cap. 4** (Fig. de calibración) — recall / FPR empírico / índice J vs. FPR esperado, con el punto elegido marcado |
-| `results/<modelo>/calibrate_fpr/roc.{png,yaml}` | anexo — curva ROC del detector sobre los sujetos retenidos |
-| `results/<modelo>/anomaly_detection.yaml` | **5.6.1** — precisión/recall/F1, recall por tipo de anomalía, FPR empírico en limpio |
+| `results/<modelo>/calibrate_fpr/<dataset>/calibration.{png,csv,yaml}` | **Cap. 4** (Fig. de calibración) — recall / FPR empírico / índice J vs. FPR esperado, con el punto elegido marcado |
+| `results/<modelo>/calibrate_fpr/<dataset>/roc.{png,yaml}` | anexo — curva ROC del detector sobre los sujetos retenidos |
+| `results/<modelo>/anomaly_detection.<dataset>.yaml` | **5.6.1** — precisión/recall/F1, recall por tipo de anomalía, FPR empírico en limpio; comparar `ppg-dalia` contra `ppg-dalia-low` es lo que cuantifica el filtro de actividad |
 | `results/<modelo>/{signals,signals_reconstructed}.{png,yaml}` | **Cap. 4** + Anexo de anomalías sintéticas |
 
 ### 5. Caso de uso: destilación (maestro sobre todos los usuarios)
@@ -150,10 +164,12 @@ uv run -m scripts.figures.subject_roc cnn-ae --tag all
 uv run -m scripts.figures.knowledge_distillation cnn-ae --student feature-mlp --tag all
 ```
 
+Ambos también toman `--dataset`.
+
 | Salida | Sección |
 |--------|---------|
-| `results/<modelo>/subject_roc/{roc_by_subject,roc_aggregate}.{png,yaml}` | **5.6.1** — figura del cuerpo: dispersión de detectabilidad entre sujetos, media ± desviación |
-| `results/feature-mlp/personalization/personalization.{csv,yaml}` | **5.6.2** — LOSO: global vs. personalizado, float vs. int8, más la cota superior `direct_float` (estudiante entrenado con etiquetas verdaderas) |
+| `results/<modelo>/subject_roc/<dataset>/{roc_by_subject,roc_aggregate}.{png,yaml}` | **5.6.1** — figura del cuerpo: dispersión de detectabilidad entre sujetos, media ± desviación |
+| `results/feature-mlp/personalization/<dataset>/personalization.{csv,yaml}` | **5.6.2** — LOSO: global vs. personalizado, float vs. int8, más la cota superior `direct_float` (estudiante entrenado con etiquetas verdaderas) |
 
 Estado actual (maestro `cnn-ae` sobre todos los sujetos, $f = 0{,}22$, lote 128), F1 agregado:
 

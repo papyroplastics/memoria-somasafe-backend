@@ -76,14 +76,27 @@ def weighted_mean_std(stats: list[tuple[int, float, float]]) -> tuple[float, flo
     return mean, std
 
 
+def upsample_activity(activity: np.ndarray, length: int) -> np.ndarray:
+    """The 4 Hz activity track resampled onto the BVP sample grid, so it indexes exactly
+    like bvp.npy. Held constant across each 4 Hz step; a short tail is padded with 0
+    (transient), which no activity filter accepts."""
+    upsampled = np.repeat(activity.reshape(-1), BVP_RATE // ACTIVITY_RATE)[:length]
+    pad = length - len(upsampled)
+    if pad > 0:
+        upsampled = np.concatenate([upsampled, np.zeros(pad, dtype=upsampled.dtype)])
+    return upsampled.astype(np.uint8)
+
+
 def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
-    """Extract raw BVP (64 Hz) and ACC magnitude (32 Hz) per subject.
+    """Extract raw BVP (64 Hz), ACC magnitude (32 Hz) and the activity track per subject.
 
     BVP and ACC are stored raw (un-normalized, different lengths) so anomaly
     injection and load-time normalization can work from a single source. The global
     BVP mean/std (size-weighted across subjects) goes to norm-params.npy. ACC is
     stored for feature extraction only; it is not fed to any model, so it needs no
-    normalization params.
+    normalization params. The activity track is upsampled to the BVP grid and stored
+    alongside it, so every windowing grid can derive its own per-window activity from
+    one array (see ml.sources.dalia).
     """
     subjects_dir.mkdir(parents=True, exist_ok=True)
 
@@ -103,15 +116,20 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
         acc_g = wrist['ACC'] / 64.0
         acc = np.sqrt(np.sum(acc_g ** 2, axis=1)).astype(np.float32)
 
+        activity = upsample_activity(np.asarray(raw['activity']), len(bvp))
+
         save_dir = subjects_dir / subject_dir_name
         save_dir.mkdir(parents=True, exist_ok=True)
         np.save(save_dir / 'bvp.npy', bvp)
         np.save(save_dir / 'acc.npy', acc)
+        np.save(save_dir / ACTIVITY_FILE, activity)
 
         bvp_stats.append((len(bvp), float(bvp.mean()), float(bvp.std())))
         processed.append(subject_dir_name)
 
-        print(f"  {subject_dir_name}: BVP {len(bvp)} samples @ {BVP_RATE} Hz, ACC {len(acc)} samples @ {ACC_RATE} Hz")
+        low = float(np.isin(activity, LOW_ACTIVITY).mean())
+        print(f"  {subject_dir_name}: BVP {len(bvp)} samples @ {BVP_RATE} Hz, "
+              f"ACC {len(acc)} samples @ {ACC_RATE} Hz, {low:.1%} low-activity")
 
     if not processed:
         return []

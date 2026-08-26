@@ -2,6 +2,9 @@
 Plot one random 8-second window from a random subject for the
 clean signal and every anomaly kind, then a second figure with
 those same windows reconstructed by a trained autoencoder.
+
+``--dataset`` restricts which windows can be drawn, so the clean reference can be taken
+from a low-activity stretch instead of a cycling one.
 """
 
 import argparse
@@ -11,74 +14,73 @@ import numpy as np
 
 from common.config import DATASETS_DIR, MODELS_DIR
 from ..common.scoring import eval_padded
+from ml.dataset_list import DATASETS
 from ml.model_list import MODELS
-from ml.models.common import AutoencoderTrainer
-from ml.preprocessing import CLEAN_SUBDIR, ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_RATE, get_sorted_paths
-from ml.loading import load_signal, window_count
+from ml.preprocessing import ANOMALY_KINDS, BVP_RATE
 from ml.saving import load_trainable_weights, trainable_path
+from ml.sources.common import DataSource
+from ml.sources.dalia import CLEAN
 from ..common.reports import get_report_dir, write_yaml
 
-KINDS = ('clean', *ANOMALY_KINDS)
+KINDS = (CLEAN, *ANOMALY_KINDS)
 
 
-def window_views(data_dir, sid, window, index):
-    """The raw BVP window for the clean signal and each anomaly kind, all sliced at the
-    same window ``index``."""
-    views = {}
-    for kind in KINDS:
-        src = (data_dir / CLEAN_SUBDIR if kind == 'clean'
-               else data_dir / ANOMALOUS_SUBDIR / kind)
-        signal = load_signal(src, sid)
-        views[kind] = signal[index * window:(index + 1) * window]
-    return views
+def window_views(source: DataSource, sid: str, window: int, index: int):
+    """The raw BVP window for the clean signal and each anomaly kind, all taken at the
+    same window ``index`` of the windows the source keeps."""
+    return {kind: source.signal_windows(sid, kind, window, window)[index]
+            for kind in KINDS}
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to use')
     parser.add_argument('--subject', type=int, default=None, help='Subject to use')
-    parser.add_argument('--window', type=int, default=None, help='Window index to use')
+    parser.add_argument('--window', type=int, default=None,
+                        help="Window index to use, counted over the windows --dataset keeps")
     parser.add_argument('--seed', type=int, default=None, help='RNG seed for the subject/window pick')
     parser.add_argument('--tag', default=None,
                         help='Tag of the train.py run to use (default: the canonical '
                              'untagged trainable.tflite).')
+    parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia',
+                        help='Dataset the window is drawn from (default: ppg-dalia, every '
+                             'window). ppg-dalia-low draws only from low-activity windows.')
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
+    source = DATASETS[args.dataset].build(DATASETS_DIR)
 
-    trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
+    model = MODELS[args.model].build_model(DATASETS_DIR)
     weights = trainable_path(MODELS_DIR / args.model, args.tag)
-    trainer.model.restore(load_trainable_weights(weights))
-    assert isinstance(trainer, AutoencoderTrainer)
+    model.restore(load_trainable_weights(weights))
 
-    window_len = trainer.model.seq_len
+    window_len = model.seq_len
 
-    subjects_dir = DATASETS_DIR / CLEAN_SUBDIR
-    subject_dirs = get_sorted_paths(subjects_dir)
-    if not subject_dirs:
-        raise SystemExit(f"{subjects_dir} is empty. Run get_dataset.py first.")
+    subject_ids = source.subject_ids()
+    sid = f"S{args.subject}" if args.subject else str(rng.choice(subject_ids))
+    if sid not in subject_ids:
+        raise SystemExit(f"subject {sid} not found among {subject_ids}")
 
-    subject_idx = args.subject or rng.integers(len(subject_dirs))
+    n_windows = len(source.signal_windows(sid, CLEAN, window_len, window_len))
+    if not n_windows:
+        raise SystemExit(f"{sid} has no windows in {DATASETS[args.dataset].name}")
 
-    sid = f"S{subject_idx}"
-    n_windows = window_count(load_signal(subjects_dir, sid), window_len)
+    window_idx = args.window if args.window is not None else int(rng.integers(n_windows))
+    print(f"dataset={args.dataset} subject={sid} window={window_idx}/{n_windows}")
 
-    window_idx = args.window or int(rng.integers(n_windows))
-    print(f"subject={sid} window={window_idx}/{n_windows}")
-
-    views = window_views(DATASETS_DIR, sid, window_len, window_idx)
+    views = window_views(source, sid, window_len, window_idx)
     t = np.arange(window_len) / BVP_RATE
 
     signals = np.stack([views[k] for k in KINDS]).astype(np.float32)
-    recons = eval_padded(trainer.model, signals)['reconstruction'][:, :, 0]
+    recons = eval_padded(model, signals)['reconstruction'][:, :, 0]
 
     fig_in, axs_in = plt.subplots(len(KINDS), 1, sharex=True, figsize=(8, 2 * len(KINDS)))
     fig_rec, axs_rec = plt.subplots(len(KINDS), 1, sharex=True, figsize=(8, 2 * len(KINDS)))
     fig_in.suptitle(f'{sid} window {window_idx} — normalized BVP')
     fig_rec.suptitle(f'{sid} window {window_idx} — {args.model} reconstruction')
 
-    bvp_mean = trainer.model.signal_mean.numpy()[0]
-    bvp_std = trainer.model.signal_std.numpy()[0]
+    bvp_mean = model.signal_mean.numpy()[0]
+    bvp_std = model.signal_std.numpy()[0]
 
     for i, (ax_in, ax_rec, kind) in enumerate(zip(axs_in, axs_rec, KINDS)):
         bvp = views[kind][:, 0]
@@ -105,7 +107,8 @@ if __name__ == "__main__":
     print(f"saved input windows to {in_path}")
     print(f"saved reconstructions to {rec_path}")
 
-    sample = {'subject': sid, 'window': window_idx, 'of_windows': n_windows, 'seed': args.seed}
+    sample = {'dataset': args.dataset, 'subject': sid, 'window': window_idx,
+              'of_windows': n_windows, 'seed': args.seed}
     axes = {'x_axis': {'name': 'seconds', 'range': [0, 8], 'sample_rate_hz': BVP_RATE},
             'y_axis': {'name': 'raw BVP amplitude', 'units': 'sensor units'}}
 

@@ -75,13 +75,15 @@ def trainable_path(model_dir: Path, tag: str | None = None) -> Path:
     return model_dir / (f'trainable_{tag}.tflite' if tag else 'trainable.tflite')
 
 
-def save_artifacts(trainer: Trainer, result_dir: Path, eval_dataset: tf.data.Dataset | None,
-                   postfix: str = '', data_root: Path | None = None):
+def save_artifacts(trainer: Trainer, result_dir: Path, postfix: str = ''):
     trainable_file = result_dir / f'trainable{postfix}.tflite'
     trainable_file.write_bytes(get_trainable_model(trainer.model))
     print(f"Saved trainable model to {trainable_file}")
+
+    # The calibration feed comes off disk, so a failure there is a broken dataset, not a
+    # conversion that happens not to quantize — only the latter degrades to a warning.
+    rep_dataset = trainer.representative_dataset()
     try:
-        rep_dataset = trainer.representative_dataset(dataset=eval_dataset, data_root=data_root)
         quantized_file = result_dir / f'quantized{postfix}.tflite'
         quantized_file.write_bytes(get_optimized_model(trainer.model, rep_dataset))
         print(f"Saved quantized model to {quantized_file}")

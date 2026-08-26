@@ -16,24 +16,22 @@ student. It is float only; the int8 pairs already answer the quantization questi
 """
 
 
-from ml.models.feature_mlp import FeatureMLPTrainer
 import argparse
-from pathlib import Path
 
 import numpy as np
 import tensorflow as tf
 
 from common.config import MODELS_DIR, DATASETS_DIR
-from ml.preprocessing import MIXED_FEATURE_SUBDIR, CLEAN_SUBDIR, MIXED_SUBDIR, get_sorted_paths
+from ml.dataset_list import DATASETS
 from ml.metrics import classification_report
 from ml.model_list import MODELS
-from ml.models.common import AutoencoderTrainer
 from ml.saving import load_trainable_weights, get_optimized_model, trainable_path
+from ml.sources.common import DataSource
+from ml.sources.dalia import CLEAN, MIXED
 from ..common.litert import infer_int8
 from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 from ..common.scoring import (
-    calibrate_expected_fpr, clean_threshold, eval_padded, score_dir_by_subject,
-    load_mixed_truth,
+    calibrate_expected_fpr, clean_threshold, eval_padded, score_subjects, mixed_truth,
 )
 
 VARIANTS = ('global_float', 'global_int8', 'personal_float', 'personal_int8', 'direct_float')
@@ -74,13 +72,13 @@ def eval_logits_float(model, X: np.ndarray) -> np.ndarray:
     return out['logits'].reshape(-1).astype(np.float32)
 
 
-def load_features(data_dir: Path, sid: str) -> np.ndarray:
-    return np.load(data_dir / MIXED_FEATURE_SUBDIR / sid / 'features.npy').astype(np.float32)
+def load_features(source: DataSource, sid: str) -> np.ndarray:
+    return source.features(sid)[0]
 
 
 
-def load_true(data_dir: Path, sid: str) -> np.ndarray:
-    return np.load(data_dir / MIXED_FEATURE_SUBDIR / sid / 'labels.npy').reshape(-1) > 0.5
+def load_true(source: DataSource, sid: str) -> np.ndarray:
+    return source.window_labels(sid) > 0.5
 
 
 if __name__ == "__main__":
@@ -105,35 +103,40 @@ if __name__ == "__main__":
                         help='Batch size for training, fine-tuning and evaluation '
                              '(default: 128). Evaluation pads the tail, so every window '
                              'is scored regardless of the batch.')
+    parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia',
+                        help='Dataset the teacher scores and the student trains on '
+                             '(default: ppg-dalia, every window). ppg-dalia-low keeps only '
+                             'the low-activity windows.')
     args = parser.parse_args()
 
     data_dir = DATASETS_DIR
+    source = DATASETS[args.dataset].build(data_dir)
     weights_path = trainable_path(MODELS_DIR / args.teacher, args.tag)
     if not weights_path.exists():
         raise SystemExit(f"teacher weights not found at {weights_path}.")
 
-    teacher = MODELS[args.teacher].build_trainer(data_dir)
-    teacher.model.restore(load_trainable_weights(weights_path))
-    assert isinstance(teacher, AutoencoderTrainer)
+    teacher = MODELS[args.teacher].build_model(data_dir)
+    teacher.restore(load_trainable_weights(weights_path))
 
-    print("Scoring the teacher over all subjects + calibrating the expected FPR...")
-    truth = load_mixed_truth(data_dir)
-    clean = score_dir_by_subject(teacher, data_dir / CLEAN_SUBDIR)
-    mixed = score_dir_by_subject(teacher, data_dir / MIXED_SUBDIR)
+    print(f"Scoring the teacher over all subjects of {DATASETS[args.dataset].name} "
+          f"+ calibrating the expected FPR...")
+    truth = mixed_truth(source)
+    clean = score_subjects(teacher, source, CLEAN)
+    mixed = score_subjects(teacher, source, MIXED)
 
     expected_fpr = calibrate_expected_fpr(clean, mixed, truth)
     distilled = distilled_labels(mixed, clean, expected_fpr)
     print(f"expected_fpr={expected_fpr:.4f}; distilled soft labels for {len(distilled)} subjects")
 
     # Population calibration set for int8 export — shared by every model so the int8
-    # comparison isolates the weights, not the calibration feed.
+    # comparison isolates the weights, not the calibration feed. The only thing a trainer
+    # is needed for here: it owns the feed dict the int8 converter expects.
     base = MODELS[args.student].build_trainer(data_dir, args.batch_size)
-    assert isinstance(base, FeatureMLPTrainer)
-    rep_dataset = base.representative_dataset(data_root=data_dir)
+    rep_dataset = base.representative_dataset()
     feat_mean = base.model.feat_mean.numpy()
     feat_std = base.model.feat_std.numpy()
 
-    subjects = [d.name for d in get_sorted_paths(data_dir / MIXED_FEATURE_SUBDIR)]
+    subjects = source.subject_ids()
     print(f"\nLeave-one-subject-out personalization over {len(subjects)} subjects "
           f"(global_epochs={args.global_epochs}, epochs={args.epochs}, "
           f"train_split={args.train_split}):\n")
@@ -149,47 +152,44 @@ if __name__ == "__main__":
         for s in subjects:
             if s == sid:
                 continue
-            Xo, yo, yt = load_features(data_dir, s), distilled[s], load_true(data_dir, s)
-            n = min(len(Xo), len(yo), len(yt))
-            Xs.append(Xo[:n]); ys.append(yo[:n]); ys_true.append(yt[:n])
+            Xs.append(load_features(source, s))
+            ys.append(distilled[s])
+            ys_true.append(load_true(source, s))
         X_global = np.concatenate(Xs)
         y_global, y_global_true = np.concatenate(ys), np.concatenate(ys_true)
 
-        gtrainer = MODELS[args.student].build_trainer(data_dir, args.batch_size)
-        train_on(gtrainer.model, X_global, y_global, args.global_epochs, args.batch_size)
-        global_weights = np.asarray(gtrainer.model.save()['weights'])
+        gmodel = MODELS[args.student].build_model(data_dir, args.batch_size)
+        train_on(gmodel, X_global, y_global, args.global_epochs, args.batch_size)
+        global_weights = np.asarray(gmodel.save()['weights'])
 
-        dtrainer = MODELS[args.student].build_trainer(data_dir, args.batch_size)
-        train_on(dtrainer.model, X_global, y_global_true, args.global_epochs,
-                 args.batch_size)
-        direct_weights = np.asarray(dtrainer.model.save()['weights'])
+        dmodel = MODELS[args.student].build_model(data_dir, args.batch_size)
+        train_on(dmodel, X_global, y_global_true, args.global_epochs, args.batch_size)
+        direct_weights = np.asarray(dmodel.save()['weights'])
 
         # Held-out subject: chronological split; fine-tune on its own distilled labels,
         # evaluate against the true ones.
-        X, y_true = load_features(data_dir, sid), load_true(data_dir, sid)
+        X, y_true = load_features(source, sid), load_true(source, sid)
         y_distill = distilled[sid]
-        n = min(len(X), len(y_true), len(y_distill))
-        X, y_true, y_distill = X[:n], y_true[:n], y_distill[:n]
-        n_train = int(n * args.train_split)
+        n_train = int(len(X) * args.train_split)
         X_ev, y_ev = X[n_train:], y_true[n_train:]
         X_ev_norm = (X_ev - feat_mean) / feat_std
 
-        global_model = MODELS[args.student].build_trainer(data_dir, args.batch_size).model
+        global_model = MODELS[args.student].build_model(data_dir, args.batch_size)
         global_model.restore(tf.constant(global_weights, dtype=tf.float32))
         global_int8 = get_optimized_model(global_model, rep_dataset)
 
-        ptrainer = MODELS[args.student].build_trainer(data_dir, args.batch_size)
-        ptrainer.model.restore(tf.constant(global_weights, dtype=tf.float32))
-        train_on(ptrainer.model, X[:n_train], y_distill[:n_train], args.epochs, args.batch_size)
-        personal_int8 = get_optimized_model(ptrainer.model, rep_dataset)
+        personal_model = MODELS[args.student].build_model(data_dir, args.batch_size)
+        personal_model.restore(tf.constant(global_weights, dtype=tf.float32))
+        train_on(personal_model, X[:n_train], y_distill[:n_train], args.epochs, args.batch_size)
+        personal_int8 = get_optimized_model(personal_model, rep_dataset)
 
-        direct_model = MODELS[args.student].build_trainer(data_dir, args.batch_size).model
+        direct_model = MODELS[args.student].build_model(data_dir, args.batch_size)
         direct_model.restore(tf.constant(direct_weights, dtype=tf.float32))
 
         logits = {
             'global_float': eval_logits_float(global_model, X_ev),
             'global_int8': infer_int8(global_int8, X_ev_norm),
-            'personal_float': eval_logits_float(ptrainer.model, X_ev),
+            'personal_float': eval_logits_float(personal_model, X_ev),
             'personal_int8': infer_int8(personal_int8, X_ev_norm),
             'direct_float': eval_logits_float(direct_model, X_ev),
         }
@@ -220,9 +220,10 @@ if __name__ == "__main__":
     print(f"distillation cost Δf1 (direct − global):  "
           f"float={overall['direct_float']['f1'] - overall['global_float']['f1']:+.4f}")
 
-    report_dir = get_report_dir(args.student, 'personalization')
+    report_dir = get_report_dir(args.student, f'personalization/{args.dataset}')
     write_metrics_csv(rows, report_dir, 'personalization.csv')
     write_yaml(report_dir / 'personalization.yaml', {
+        'dataset': {'key': args.dataset, 'name': DATASETS[args.dataset].name},
         'shows': f"Leave-one-subject-out personalization of a distilled {args.student} "
                  f"student against a {args.teacher} teacher (report Secs. 5.4/5.8): per-"
                  f"fold precision/recall/F1/accuracy for the global vs. personalized "
@@ -248,6 +249,7 @@ if __name__ == "__main__":
             'teacher': args.teacher, 'student': args.student, 'expected_fpr': expected_fpr,
             'global_epochs': args.global_epochs, 'epochs': args.epochs,
             'train_split': args.train_split, 'batch_size': args.batch_size,
+            'dataset': args.dataset,
         },
         'headline': overall,
         'personalization_delta_f1': {

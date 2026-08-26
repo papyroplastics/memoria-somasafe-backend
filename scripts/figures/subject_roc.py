@@ -15,14 +15,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from common.config import DATASETS_DIR, MODELS_DIR
+from ml.dataset_list import DATASETS
 from ml.model_list import MODELS
-from ml.preprocessing import CLEAN_SUBDIR, MIXED_SUBDIR
-from ml.models.common import AutoencoderTrainer
 from ml.saving import load_trainable_weights, trainable_path
+from ml.sources.dalia import CLEAN, MIXED
 
 from ..common.plots import roc_grid
 from ..common.reports import get_report_dir, write_yaml
-from ..common.scoring import score_dir_by_subject, load_mixed_truth
+from ..common.scoring import score_subjects, mixed_truth
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__,
@@ -40,16 +40,21 @@ if __name__ == "__main__":
                              "per-subject one (each subject's clean FPR then drifts off f)")
     parser.add_argument('--step', type=float, default=0.02,
                         help='Spacing of the FPR sweep (default: 0.02)')
+    parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia',
+                        help='Dataset to score on (default: ppg-dalia, every window). '
+                             'ppg-dalia-low keeps only the low-activity windows, which is '
+                             'what the model was trained on.')
     args = parser.parse_args()
 
+    source = DATASETS[args.dataset].build(DATASETS_DIR)
     weights = trainable_path(MODELS_DIR / args.model, args.tag)
-    trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
-    trainer.model.restore(load_trainable_weights(weights))
-    assert isinstance(trainer, AutoencoderTrainer)
+    model = MODELS[args.model].build_model(DATASETS_DIR)
+    model.restore(load_trainable_weights(weights))
 
-    truth = load_mixed_truth(DATASETS_DIR)
-    clean = score_dir_by_subject(trainer, DATASETS_DIR / CLEAN_SUBDIR)
-    mixed = score_dir_by_subject(trainer, DATASETS_DIR / MIXED_SUBDIR)
+    print(f"Scoring {DATASETS[args.dataset].name}")
+    truth = mixed_truth(source)
+    clean = score_subjects(model, source, CLEAN)
+    mixed = score_subjects(model, source, MIXED)
 
     order = [sid for sid in clean if sid in mixed and sid in truth]
     highlight = {f'S{int(i)}' for i in args.highlight.split(',') if i.strip()}
@@ -70,7 +75,7 @@ if __name__ == "__main__":
         per_subject[sid] = {'auc': float(np.trapezoid(recall, fpr)),
                             'anomalous_windows': int((t == 1).sum())}
 
-    report_dir = get_report_dir(args.model, 'subject_roc')
+    report_dir = get_report_dir(args.model, f'subject_roc/{args.dataset}')
     roc_grid(report_dir / 'roc_by_subject.png', order, curves, highlight,
              'empirical clean FPR', 'recall',
              f'{args.model} — per-subject ROC, {mode} threshold ({weights.name})')
@@ -94,6 +99,7 @@ if __name__ == "__main__":
 
     aucs = [s['auc'] for s in per_subject.values()]
     write_yaml(report_dir / 'subject_roc.yaml', {
+        'dataset': {'key': args.dataset, 'name': DATASETS[args.dataset].name},
         'shows': "Per-subject detectability of the reconstruction-error detector on one set "
                  "of weights: each subject's ROC (recall vs. its own empirical clean FPR) and "
                  "the mean +/- std recall across subjects. Answers whether the detector just "

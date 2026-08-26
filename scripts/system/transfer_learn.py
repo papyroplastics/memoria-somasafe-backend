@@ -53,11 +53,11 @@ if __name__ == "__main__":
     print(f"Transferred weights from {source_path} into a batch-size "
           f"{target_batch_size} {args.model}")
 
-    train_subjects, held_out = holdout(target_trainer.subject_datasets(data_dir),
+    train_subjects, held_out = holdout(target_trainer.subject_datasets(),
                                        args.eval_subjects)
     eval_dataset = pool(held_out)
     history = normal_loop(target_trainer, pool(train_subjects), eval_dataset, args.epochs)
 
-    save_artifacts(target_trainer, result_dir, eval_dataset)
+    save_artifacts(target_trainer, result_dir)
     plot_history(history, target_trainer.primary_metric, report_dir)
     target_trainer.report(report_dir, eval_dataset)

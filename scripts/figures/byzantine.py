@@ -108,7 +108,7 @@ def main() -> None:
 
     trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
     metric = trainer.primary_metric
-    clients, held_out = holdout(trainer.subject_datasets(DATASETS_DIR), args.eval_subjects)
+    clients, held_out = holdout(trainer.subject_datasets(), args.eval_subjects)
     eval_dataset = pool(held_out)
 
     counts = list(range(0, args.max_malicious + 1))
@@ -118,7 +118,7 @@ def main() -> None:
         values = {}
         for label, aggregate in aggregators.items():
             # Fresh trainer per run so a loop that mutates the weights never leaks into
-            # the next configuration; the subject datasets come back from the cache.
+            # the next configuration; the subject datasets are built once, above.
             trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
             # Fresh RNG per config, seeded off the global SEED + n, so the attack is
             # reproducible and both aggregators see the same malicious draws.

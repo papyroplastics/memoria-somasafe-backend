@@ -11,7 +11,7 @@ configuration. Three sweeps, each emitting a figure + CSV + companion summary:
 
 Like byzantine.py these have to train (they sweep configurations no train.py run
 produces), but every run trains a fresh model over the same subject datasets, which are
-built once (ml.loading caches them) since they never depend on the weights.
+built once up front since they never depend on the weights.
 
     uv run -m scripts.figures.sensitivity cnn-ae --rounds 5
     uv run -m scripts.figures.sensitivity cnn-ae --sweep loso --loso-folds 5
@@ -37,7 +37,7 @@ def final_metric(key: str, clients: list, eval_dataset, local_epochs: int,
                  rounds: int) -> float:
     """The held-out primary metric after the last round of one federated run. The model
     is rebuilt per run so a loop that mutates the weights never leaks into the next
-    configuration; the subject datasets come back from ml.loading's cache."""
+    configuration; the subject datasets are built once by the caller and reused."""
     trainer = MODELS[key].build_trainer(DATASETS_DIR)
     history = federated_loop(trainer, clients, eval_dataset, local_epochs, rounds)
     return history[-1][2][trainer.primary_metric]
@@ -157,7 +157,7 @@ def main() -> None:
     args = parser.parse_args()
 
     trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
-    subjects = trainer.subject_datasets(DATASETS_DIR)
+    subjects = trainer.subject_datasets()
     report_dir = get_report_dir(args.model, 'sensitivity')
 
     chosen = list(SWEEPS) if args.sweep == 'all' else [args.sweep]
