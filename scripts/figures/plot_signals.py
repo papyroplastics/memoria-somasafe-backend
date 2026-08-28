@@ -1,10 +1,6 @@
 """
-Plot one random 8-second window from a random subject for the
-clean signal and every anomaly kind, then a second figure with
-those same windows reconstructed by a trained autoencoder.
-
-``--dataset`` restricts which windows can be drawn, so the clean reference can be taken
-from a low-activity stretch instead of a cycling one.
+Plot one 8-second window from a subject for the clean signal and every anomaly kind, then a
+second figure with those same windows reconstructed by a trained autoencoder.
 """
 
 import argparse
@@ -17,7 +13,7 @@ from ..common.scoring import eval_padded
 from ml.dataset_list import DATASETS
 from ml.model_list import MODELS
 from ml.preprocessing import ANOMALY_KINDS, BVP_RATE
-from ml.saving import load_trainable_weights, trainable_path
+from ml.saving import load_weights, weights_path
 from ml.sources.common import DataSource
 from ml.sources.dalia import CLEAN
 from ..common.reports import get_report_dir, write_yaml
@@ -37,22 +33,21 @@ if __name__ == "__main__":
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to use')
     parser.add_argument('--subject', type=int, default=None, help='Subject to use')
     parser.add_argument('--window', type=int, default=None,
-                        help="Window index to use, counted over the windows --dataset keeps")
+                        help='Window index to use, counted over the windows the dataset keeps')
     parser.add_argument('--seed', type=int, default=None, help='RNG seed for the subject/window pick')
     parser.add_argument('--tag', default=None,
-                        help='Tag of the train.py run to use (default: the canonical '
-                             'untagged trainable.tflite).')
+                        help='Tag of the train.py run to use')
     parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia',
-                        help='Dataset the window is drawn from (default: ppg-dalia, every '
-                             'window). ppg-dalia-low draws only from low-activity windows.')
+                        help='Dataset the window is drawn from; ppg-dalia-low draws only '
+                             'from low-activity windows')
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
     source = DATASETS[args.dataset].build(DATASETS_DIR)
 
     model = MODELS[args.model].build_model(DATASETS_DIR)
-    weights = trainable_path(MODELS_DIR / args.model, args.tag)
-    model.restore(load_trainable_weights(weights))
+    weights = weights_path(MODELS_DIR / args.model, args.tag)
+    model.restore(load_weights(weights))
 
     window_len = model.seq_len
 

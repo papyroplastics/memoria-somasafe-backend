@@ -1,9 +1,6 @@
 """Calibrate the detector's expected FPR (max Youden's J on the training subjects) and plot
-the FPR sweep + ROC on the held-out subjects (report Sec. 5.4): two figures + the sweep
-table under ``results/<model>/calibrate_fpr/<dataset>/``. ``--global-f`` swaps the
-per-subject threshold for a single pooled one (population-level operating point), and
-``--dataset`` picks which windows the detector is calibrated and swept on.
-"""
+the FPR sweep + ROC on the held-out ones (report Sec. 5.4): two figures + the sweep table
+under ``results/<model>/calibrate_fpr/<dataset>/``."""
 
 import argparse
 
@@ -12,7 +9,7 @@ import numpy as np
 from common.config import DATASETS_DIR, MODELS_DIR
 from ml.dataset_list import DATASETS
 from ml.model_list import MODELS
-from ml.saving import load_trainable_weights, trainable_path
+from ml.saving import load_weights, weights_path
 from ml.sources.dalia import CLEAN, MIXED
 
 from ..common.plots import line_plot
@@ -29,23 +26,19 @@ def build_grid(expected_fpr: float, step: float) -> list[float]:
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to calibrate')
     parser.add_argument('--step', type=float, default=0.05,
-                        help='Spacing of the expected-FPR sweep plotted on the held-out '
-                             'subjects (default: 0.05)')
+                        help='Spacing of the expected-FPR sweep')
     parser.add_argument('--global-f', action='store_true',
                         help='Threshold with a single pooled clean quantile instead of a '
                              "per-subject one (each subject's clean FPR then drifts off f)")
     parser.add_argument('--tag', default=None,
-                        help='Tag of the train.py run to calibrate (default: the canonical '
-                             'untagged run). Selects both trainable_<tag>.tflite and the '
-                             'normal_<tag>/federated_<tag> run.yaml it was trained with.')
+                        help='Tag of the train.py run to calibrate, selecting both its '
+                             'weights and the run.yaml it was trained with')
     parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia',
-                        help='Dataset to calibrate and sweep on (default: ppg-dalia, every '
-                             'window). ppg-dalia-low keeps only the low-activity windows, '
-                             'which is what the model was trained on.')
+                        help='Dataset to calibrate and sweep on; ppg-dalia-low keeps only '
+                             'the low-activity windows the model was trained on')
     args = parser.parse_args()
 
     thresholds_fn = global_thresholds if args.global_f else subject_thresholds
@@ -53,8 +46,8 @@ if __name__ == "__main__":
     source = DATASETS[args.dataset].build(DATASETS_DIR)
 
     model = MODELS[args.model].build_model(DATASETS_DIR)
-    weights = trainable_path(MODELS_DIR / args.model, args.tag)
-    model.restore(load_trainable_weights(weights))
+    weights = weights_path(MODELS_DIR / args.model, args.tag)
+    model.restore(load_weights(weights))
 
     train_ids, held_out = read_subject_split(args.model, ('normal', 'federated'), args.tag)
     train, held = set(train_ids), set(held_out)

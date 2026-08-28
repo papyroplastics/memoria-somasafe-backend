@@ -308,7 +308,9 @@ split is reproducible and the case-study scripts score the exact subjects held o
 `--batch-size`
 overrides the model's `default_batch_size`
 (useful for GPU throughput — the on-device default batch is often 1). Each run
-writes `trainable.tflite` (LiteRT-trainable) and `quantized.tflite` (int8, when
+writes `weights.npy` (the flat trainable-parameter buffer, in the same layout the model's
+`save`/`restore` signatures use), `trainable.tflite` (LiteRT-trainable) and
+`quantized.tflite` (int8, when
 supported) into `shared/gen/models/<model>/`, and a diagnostic plot + history + `run.yaml`
 into `results/<model>/<loop>/`; the intermediate
 `SavedModel`s only exist in a temp dir during conversion. Models z-score their own
@@ -320,17 +322,30 @@ per-tensor int8 scale calibrates on normalized values (feeding raw heterogeneous
 through one scale collapses precision). The device applies the params before that model;
 they travel to the firmware alongside the signed model (see `shared/docs/model-signing.md`).
 
-`--tag <name>` suffixes both the served artifacts (`trainable_<name>.tflite`,
+`--no-tflite` skips the two `.tflite` exports and writes only `weights.npy` — every
+offline consumer (`transfer_learn` and the figure scripts) restores the model from that
+buffer, so a run that is never served (a case-study teacher, a sweep) doesn't need the
+conversion. `seed_db` is the exception: it seeds the initial snapshot from `weights.npy` and
+skips any model whose `trainable.tflite` is missing, since that is what the backend serves.
+
+`--tag <name>` suffixes the weights (`weights_<name>.npy`), the served artifacts
+(`trainable_<name>.tflite`,
 `quantized_<name>.tflite`) and the results directory (`results/<model>/<loop>_<name>/`), so an
 ad-hoc run — a non-default batch size, an all-users teacher, a test sweep — doesn't clobber the
 canonical untagged one. The figure scripts below take the same `--tag` to read a tagged run
 back, identifying both its artifact and its `run.yaml` from one flag.
 
+`--load-weights` restores that same tag's `weights.npy` into the model before training, so a
+run continues from where an earlier one left off instead of from a fresh init (more epochs on
+a model that hadn't converged, a different loop or dataset on top of it). It overwrites the
+weights, artifacts and results it started from, which is the intent — tag the run first if you
+want to keep the original.
+
 `--eval-subjects none` trains on **every** subject and skips evaluation (no held-out
 set, so no metric plot, reconstruction report, or final metric in the manifest) — how the
 all-users teacher for `knowledge_distillation` is produced. Tag that run (e.g. `--tag all`)
-so it writes `trainable_all.tflite` instead of clobbering the canonical split teacher's
-`trainable.tflite`; the case-study scripts take the same tag with `--tag`.
+so it writes `weights_all.npy` instead of clobbering the canonical split teacher's
+`weights.npy`; the case-study scripts take the same tag with `--tag`.
 
 Because the model's batch size is baked into the `.tflite` input signature, the
 GPU-trained large-batch model isn't itself the deliverable. `transfer_learn`
@@ -338,13 +353,14 @@ bridges that: it seeds a fresh default-batch model from the large-batch artifact
 weights (via `TrainableModel.transfer_from`) and fine-tunes it for a few epochs.
 
 ```bash
-uv run -m scripts.system.train feature-mlp --batch-size 32 --tag 32  # 1) fast GPU training -> trainable_32.tflite
+uv run -m scripts.system.train feature-mlp --batch-size 32 --tag 32 --no-tflite  # 1) fast GPU training -> weights_32.npy
 uv run -m scripts.system.transfer_learn feature-mlp 32 --epochs 3    # 2) transfer -> default-batch + fine-tune
 ```
 
 The source batch size must be `>=` the default; `transfer_learn` looks for the source under
-`trainable_<source_batch_size>.tflite`, so tag that run to match, and it re-exports the
-fine-tuned model under the canonical (unsuffixed) artifact names.
+`weights_<source_batch_size>.npy`, so tag that run to match (the large-batch `.tflite`s are
+never served, so `--no-tflite` skips them), and it re-exports the fine-tuned model under
+the canonical (unsuffixed) artifact names.
 
 For the autoencoder case studies (Sec. 5.4/5.8): `calibrate_fpr` calibrates + plots the FPR
 sweep and ROC curve, `anomaly_detection` scores the detector on held-out subjects, and
@@ -352,13 +368,13 @@ sweep and ROC curve, `anomaly_detection` scores the detector on held-out subject
 `train.py` already produced. `knowledge_distillation` needs a teacher trained on all users,
 then runs the leave-one-subject-out personalization end to end (distils the soft labels in
 memory — no tree, no `--dataset-dir` student to train). Tag the all-users teacher so it
-doesn't overwrite the canonical split teacher's `trainable.tflite`:
+doesn't overwrite the canonical split teacher's `weights.npy`:
 
 ```bash
 uv run -m scripts.figures.calibrate_fpr cnn-ae                          # FPR sweep + ROC -> results/cnn-ae/calibrate_fpr/ppg-dalia/
 uv run -m scripts.figures.anomaly_detection cnn-ae                      # detector metrics -> results/cnn-ae/anomaly_detection.ppg-dalia.yaml
 uv run -m scripts.figures.anomaly_detection cnn-ae --dataset ppg-dalia-low   # the same, on the windows it trained on
-uv run -m scripts.system.train cnn-ae --eval-subjects none --tag all    # all-users teacher -> trainable_all.tflite
+uv run -m scripts.system.train cnn-ae --eval-subjects none --tag all --no-tflite  # all-users teacher -> weights_all.npy
 uv run -m scripts.figures.subject_roc cnn-ae --tag all                  # per-subject spread, every subject on equal footing
 uv run -m scripts.figures.knowledge_distillation cnn-ae --student feature-mlp --tag all  # LOSO personalization
 ```

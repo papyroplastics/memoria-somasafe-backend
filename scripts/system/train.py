@@ -1,21 +1,7 @@
 """
-Train a SomaSafe model with a chosen training loop. Serving artifacts
-(trainable/quantized .tflite) go to shared/gen/models/<model>; the training
-history, plot, run manifest and eval report go to results/<model>/<loop>.
-
-Both loops hold out whole subjects (--eval-subjects: an id, an id range, a list, or none)
-and score on them, so a centralized and a federated run at the same --eval-subjects train on
-the same data and are directly comparable — that overlay is what scripts.figures.plot_convergence
-draws from the manifests this writes. The resolved held-out ids are recorded, not just a count.
-
-Training and its in-loop evaluation both run on the low-activity dataset
-(ml.dataset_list.TRAINING_DATASET): only the windows a subject spent sitting, driving,
-at lunch or working, so motion artefacts do not stand in for the waveform. The int8
-calibration feed deliberately stays unfiltered.
-
---tag suffixes both the served artifacts and results/<model>/<loop>_<tag>/, so an ad-hoc run
-(a different batch size, an all-users teacher, a test sweep) doesn't clobber the canonical
-unsuffixed one. The figure scripts take the same --tag to read it back.
+Train a SomaSafe model with a chosen loop on the low-activity dataset, holding out whole
+subjects for evaluation. Weights and serving artifacts go to shared/gen/models/<model>;
+the history, plots, run manifest and eval report to results/<model>/<loop>.
 """
 
 import argparse
@@ -26,7 +12,7 @@ import tensorflow as tf
 from ml.dataset_list import TRAINING_DATASET
 from ml.loading import pool
 from ml.models.common import Trainer
-from ml.saving import save_artifacts
+from ml.saving import load_weights, save_artifacts, weights_path
 from ml.training import normal_loop, federated_loop, History
 from ml.model_list import MODELS
 from common.config import MODELS_DIR, DATASETS_DIR, SEED
@@ -79,26 +65,26 @@ def run_loop(trainer: Trainer, loop: str, eval_ids: list[str],
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Model to train')
-    parser.add_argument('--loop', choices=LOOP_OPTIONS, default='normal', help='Training loop (default: normal)')
+    parser.add_argument('--loop', choices=LOOP_OPTIONS, default='normal', help='Training loop')
     parser.add_argument('--eval-subjects', default='14-15',
-                        help="Subjects held out whole for evaluation (default: 14-15). Either "
-                             "a single id N (subject SN, LOSO-style), an inclusive id range "
-                             "'n-m' (Sn..Sm), a comma-separated id list 'i,j,k', or 'none' to "
-                             "train on every subject and skip evaluation (all-users teacher). "
-                             "Both loops train on the rest and score on the held-out set.")
+                        help="Subjects held out whole for evaluation: an id N, an inclusive "
+                             "range 'n-m', a list 'i,j,k', or 'none' to train on everyone "
+                             "and skip evaluation")
     parser.add_argument('--epochs', type=int, default=5, help='Epochs for the normal loop')
     parser.add_argument('--local-epochs', type=int, default=2, help='Local epochs per round (federated)')
     parser.add_argument('--batch-size', type=int, default=None,
-                        help='Override the model default batch size.')
+                        help='Override the model default batch size')
     parser.add_argument('--tag', default=None,
-                        help='Suffix for this run\'s artifacts (trainable_<tag>.tflite, '
-                             'quantized_<tag>.tflite) and results (results/<model>/'
-                             '<loop>_<tag>/), so it does not clobber the canonical run.')
+                        help="Suffix for this run's weights, artifacts and results "
+                             'directory, so it does not clobber the canonical run')
+    parser.add_argument('--no-tflite', action='store_true',
+                        help='Skip the .tflite exports and write only the weights')
+    parser.add_argument('--load-weights', action='store_true',
+                        help='Keep training the weights already saved under --tag instead '
+                             'of starting from a fresh model')
     parser.add_argument('--dataset-dir', type=Path, default=DATASETS_DIR,
-                        help='Dataset directory to train on (default: datasets). Point this '
-                             'at an alternative source with the same structure as datasets/ '
-                             'to train against alternative labels (e.g. a teacher\'s distilled '
-                             'ones) instead of the synthetic ground truth.')
+                        help='Dataset directory to train on, e.g. one holding a '
+                             "teacher's distilled labels")
     args = parser.parse_args()
 
     data_dir = args.dataset_dir
@@ -109,6 +95,14 @@ if __name__ == "__main__":
     report_dir = get_report_dir(args.model, loop_dir(args.loop, args.tag))
 
     trainer = MODELS[args.model].build_trainer(data_dir, batch_size=args.batch_size)
+
+    if args.load_weights:
+        source = weights_path(result_dir, args.tag)
+        if not source.exists():
+            raise SystemExit(f"no weights to continue from at {source}")
+        trainer.model.restore(load_weights(source))
+        print(f"Loaded weights from {source}")
+
     eval_ids = parse_eval_selection(args.eval_subjects, trainer.subject_ids())
     history, eval_dataset, train_ids, held_ids = run_loop(
         trainer, args.loop, eval_ids, args.epochs, args.local_epochs)
@@ -116,7 +110,7 @@ if __name__ == "__main__":
     batch_size = trainer.model.batch_size
 
     postfix = f'_{args.tag}' if args.tag else ''
-    save_artifacts(trainer, result_dir, postfix)
+    save_artifacts(trainer, result_dir, postfix, tflite=not args.no_tflite)
 
     if args.epochs == 0:
         exit()

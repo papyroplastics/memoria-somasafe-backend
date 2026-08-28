@@ -16,7 +16,7 @@ def to_dataset(*arrays: np.ndarray) -> tf.data.Dataset:
 
 
 def batched(ds: tf.data.Dataset, batch_size: int) -> tf.data.Dataset:
-    return (ds.shuffle(len(ds), reshuffle_each_iteration=False)
+    return (ds.shuffle(1000, reshuffle_each_iteration=False)
               .batch(batch_size, drop_remainder=True)
               .cache())
 

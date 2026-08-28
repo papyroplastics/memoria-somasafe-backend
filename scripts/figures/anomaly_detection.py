@@ -1,11 +1,6 @@
 """Evaluate the autoencoder detector against synthetic ground truth on the held-out subjects
-(report Sec. 5.4): precision/recall/F1/accuracy, per-anomaly-kind recall, and clean FPR. The
-expected FPR is calibrated inline on the training subjects, so the numbers are generalization
-to an unseen user. Metrics go to results/<model>/.
-
-``--dataset`` picks which dataset the detector is scored on, so the same weights can be
-measured over every window and over the low-activity ones only; the report file carries the
-dataset key, so the runs sit side by side.
+(report Sec. 5.4): precision/recall/F1/accuracy, per-anomaly-kind recall and clean FPR, with
+the expected FPR calibrated inline on the training subjects. Metrics go to results/<model>/.
 """
 
 
@@ -20,7 +15,7 @@ from ml.model_list import MODELS
 from ml.sources.common import DataSource
 from ml.sources.dalia import CLEAN, MIXED
 from ml.metrics import classification_report
-from ml.saving import load_trainable_weights, trainable_path
+from ml.saving import load_weights, weights_path
 from ..common.reports import get_report_dir, read_subject_split, write_yaml
 from ..common.scoring import (
     calibrate_expected_fpr, subject_thresholds, pooled_flags,
@@ -77,21 +72,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to evaluate')
     parser.add_argument('--tag', default=None,
-                        help='Tag of the train.py run to evaluate (default: the canonical '
-                             'untagged run). Selects both trainable_<tag>.tflite and the '
-                             'normal_<tag>/federated_<tag> run.yaml it was trained with.')
+                        help='Tag of the train.py run to evaluate, selecting both its '
+                             'weights and the run.yaml it was trained with')
     parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia',
-                        help='Dataset to score on (default: ppg-dalia, every window). '
-                             'ppg-dalia-low keeps only the low-activity windows, which is '
-                             'what the model was trained on.')
+                        help='Dataset to score on; ppg-dalia-low keeps only the '
+                             'low-activity windows the model was trained on')
     args = parser.parse_args()
 
     data_dir = DATASETS_DIR
     source = DATASETS[args.dataset].build(data_dir)
 
     model = MODELS[args.model].build_model(data_dir)
-    weights = trainable_path(MODELS_DIR / args.model, args.tag)
-    model.restore(load_trainable_weights(weights))
+    weights = weights_path(MODELS_DIR / args.model, args.tag)
+    model.restore(load_weights(weights))
 
     train_ids, held_out = read_subject_split(args.model, ('normal', 'federated'), args.tag)
     train, held = set(train_ids), set(held_out)

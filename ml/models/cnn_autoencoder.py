@@ -19,7 +19,7 @@ class CNNAutoencoder(TrainableAutoencoder):
 
     def __init__(self, name: str, batch_size: int, seq_len: int,
                  signal_mean, signal_std, n_signals: int = 1,
-                 hidden_dim: int = 32, latent_dim: int = 32,
+                 hidden_dim: int = 32, latent_dim: int = 48,
                  kernel_size: int = 5, n_outputs: int = 1,
                  diff_weight: float = 1.0, learning_rate: float = 5e-4,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
@@ -28,7 +28,7 @@ class CNNAutoencoder(TrainableAutoencoder):
                          diff_weight=diff_weight,
                          signal_mean=signal_mean, signal_std=signal_std)
 
-        self.conv_blocks = 4
+        self.conv_blocks = 5
         self.subsample_factor = 2 ** self.conv_blocks
 
         self.enc_in = Conv1D(n_signals, hidden_dim, kernel_size, activation=relu)

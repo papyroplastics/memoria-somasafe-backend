@@ -1,12 +1,6 @@
-"""Seed the database with default rows: the model registry, exported firmware
-builds, a default user, and a device from a factory NVS partition definition.
-
-Idempotent — run it after the services are up to bootstrap a fresh database:
-
-    uv run -m scripts.system.seed_db # use default nvs path
-    uv run -m scripts.system.seed_db <nvs definition csv> # use specific device
-    uv run -m scripts.system.seed_db --assign-device # assign the device to the seed user
-"""
+"""Bootstrap a fresh database with its default rows: the model registry and each model's
+initial weights, exported firmware builds, a default user, and a device from a factory NVS
+partition definition. Idempotent, and meant to run once the services are up."""
 
 import argparse
 import csv
@@ -47,7 +41,7 @@ from common.db import (
 from ml.preprocessing import CLEAN_SUBDIR, get_sorted_paths
 from ml.model_list import MODELS
 from ml.payload import sign_blob, sign_model
-from ml.saving import load_trainable_weights
+from ml.saving import load_weights, trainable_path, weights_path
 
 default_nvs = "shared/gen/factory_nvs.csv"
 default_firmware_dir = "shared/gen/firmware"
@@ -97,9 +91,11 @@ def reset_weights(session: Session, key: str) -> None:
 
 def seed_models(session: Session, reseed: bool = False) -> None:
     for key, spec in MODELS.items():
-        tflite = MODELS_DIR / key / "trainable.tflite"
-        if not tflite.exists():
-            print(f"  - model '{key}' skipped (no {tflite})")
+        tflite = trainable_path(MODELS_DIR / key)
+        weights_file = weights_path(MODELS_DIR / key)
+        missing = [path for path in (tflite, weights_file) if not path.exists()]
+        if missing:
+            print(f"  - model '{key}' skipped (no {', '.join(str(p) for p in missing)})")
             continue
 
         trainer = spec.build_trainer(DATASETS_DIR)
@@ -167,7 +163,7 @@ def seed_models(session: Session, reseed: bool = False) -> None:
                 raise SystemExit(
                     f"no key at {SERVER_PRIVATE_KEY_FILE}; cannot seed signed "
                     f"artifacts for '{key}'")
-            weights = load_trainable_weights(tflite)
+            weights = load_weights(weights_file)
             trainable_bytes = tflite.read_bytes()
             quantized_file = MODELS_DIR / key / "quantized.tflite"
             quantized = quantized_file.read_bytes() if quantized_file.exists() else None
@@ -324,13 +320,10 @@ def main() -> None:
                         help="create a test_N user (owning a placeholder device) per "
                              "dataset subject, for the headless federated harness")
     parser.add_argument("--reseed", action="store_true",
-                        help="re-seed every model from the artifacts now on disk, "
-                             "ignoring the idempotency checks: each model's weight "
-                             "snapshots (and the submissions, quantization jobs and "
-                             "secure rounds based on them) are dropped, and an existing "
-                             "version's row is overwritten in place — including a moved "
-                             "architecture fingerprint, which otherwise aborts. Use "
-                             "after retraining or changing a model that is already seeded")
+                        help="re-seed every model from the artifacts now on disk, dropping "
+                             "its weight snapshots (and everything anchored to them) and "
+                             "overwriting the version row in place, moved fingerprint "
+                             "included")
     args = parser.parse_args()
 
     if not args.factory_nvs.exists():

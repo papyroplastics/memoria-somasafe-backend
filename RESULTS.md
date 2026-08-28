@@ -26,9 +26,13 @@ todos los logs de tensorflow y tflite.
 - Las curvas del informe salen de los **bucles simulados** (reproducibles, semilla en
   `scripts/__init__.py`), no del cliente headless sobre HTTP, que es verificación de
   integración.
-- `train.py --tag <nombre>` sufija tanto los artefactos (`trainable_<nombre>.tflite`) como
+- `train.py --tag <nombre>` sufija tanto los pesos y artefactos (`weights_<nombre>.npy`,
+  `trainable_<nombre>.tflite`) como
   el directorio de resultados (`results/<modelo>/<loop>_<nombre>/`), sin tocar la corrida
-  canónica sin tag. Los scripts que leen `run.yaml` o un artefacto (`calibrate_fpr`,
+  canónica sin tag. `--no-tflite` omite los `.tflite` y guarda sólo `weights.npy`, que es
+  lo que leen todos los scripts offline, y `--load-weights` retoma los pesos ya guardados bajo
+  ese mismo tag en vez de partir de un modelo nuevo (más épocas sobre una corrida que no había
+  convergido). Los scripts que leen `run.yaml` o los pesos (`calibrate_fpr`,
   `anomaly_detection`, `plot_signals`, `plot_convergence`, `subject_roc`,
   `knowledge_distillation`) aceptan el mismo `--tag` para leerla de vuelta. Útil para correr
   esta lista de pruebas sin pisar los resultados reales.
@@ -128,7 +132,7 @@ programar", ítems 1 y 2).
 
 ### 4. Caso de uso: detección (maestro con split)
 
-Consume los pesos de `cnn-ae` de la etapa 1 (el `trainable.tflite` canónico, entrenado con
+Consume los pesos de `cnn-ae` de la etapa 1 (el `weights.npy` canónico, entrenado con
 split). Ninguno de los tres entrena.
 
 Cada script toma `--dataset` (por defecto `ppg-dalia`, todas las ventanas). Correrlos también
@@ -154,11 +158,11 @@ uv run -m scripts.figures.plot_signals      cnn-ae --subject 10 --window 1196
 
 `knowledge_distillation` y `subject_roc` quieren un maestro entrenado sobre **todos** los
 sujetos, para que la calidad de las etiquetas sea uniforme y ningún fold sea especial.
-Entrenarlo sobrescribe el `trainable.tflite` canónico, así que hay que apartarlo y después
-restaurar el maestro con split.
+Con `--tag all` sus pesos quedan en `weights_all.npy`, sin pisar el maestro con split, y
+`--no-tflite` evita exportar unos `.tflite` que esa corrida nunca sirve.
 
 ```bash
-uv run -m scripts.system.train cnn-ae --eval-subjects none --epochs 15 --tag all # crea trainable_all.tflite
+uv run -m scripts.system.train cnn-ae --eval-subjects none --epochs 15 --tag all --no-tflite # crea weights_all.npy
 
 uv run -m scripts.figures.subject_roc cnn-ae --tag all
 uv run -m scripts.figures.knowledge_distillation cnn-ae --student feature-mlp --tag all

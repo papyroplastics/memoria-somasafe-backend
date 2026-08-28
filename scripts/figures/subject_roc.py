@@ -1,13 +1,6 @@
 """Per-subject ROC of the reconstruction-error detector on one set of weights, to show
-detectability varies by user (report Sec. 5.4). Each subject's threshold is the ``1 - f``
-quantile of its own clean scores, swept over ``f``; ``--global-f`` uses a single pooled
-threshold instead, so each subject's clean FPR drifts off ``f`` by its own error scale.
-Point ``--tag`` at an all-users teacher's tag to put every subject on equal footing. Two
-figures + a table land under ``results/<model>/subject_roc/``:
-
-    roc_by_subject.png   one ROC panel per subject (recall vs. empirical clean FPR)
-    roc_aggregate.png    mean +/- std recall across subjects vs. expected FPR
-"""
+detectability varies by user (report Sec. 5.4): one ROC panel per subject and the mean +/-
+std recall across them, under ``results/<model>/subject_roc/``."""
 
 import argparse
 
@@ -17,7 +10,7 @@ import matplotlib.pyplot as plt
 from common.config import DATASETS_DIR, MODELS_DIR
 from ml.dataset_list import DATASETS
 from ml.model_list import MODELS
-from ml.saving import load_trainable_weights, trainable_path
+from ml.saving import load_weights, weights_path
 from ml.sources.dalia import CLEAN, MIXED
 
 from ..common.plots import roc_grid
@@ -25,31 +18,27 @@ from ..common.reports import get_report_dir, write_yaml
 from ..common.scoring import score_subjects, mixed_truth
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description=__doc__,
-                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Trained autoencoder to score')
     parser.add_argument('--tag', default=None,
-                        help='Tag of the train.py run to score (default: the canonical '
-                             'untagged trainable.tflite). Point at an all-users teacher\'s '
-                             'tag to compare every subject on equal footing.')
+                        help='Tag of the train.py run to score, e.g. an all-users '
+                             "teacher's, which puts every subject on equal footing")
     parser.add_argument('--highlight', default='',
-                        help="Comma-separated subject ids to draw in red (e.g. a split's "
-                             "held-out pair), so you can see where they sit in the pack.")
+                        help='Comma-separated subject ids to draw in red')
     parser.add_argument('--global-f', action='store_true',
                         help='Threshold with a single pooled clean quantile instead of a '
                              "per-subject one (each subject's clean FPR then drifts off f)")
     parser.add_argument('--step', type=float, default=0.02,
-                        help='Spacing of the FPR sweep (default: 0.02)')
+                        help='Spacing of the FPR sweep')
     parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia',
-                        help='Dataset to score on (default: ppg-dalia, every window). '
-                             'ppg-dalia-low keeps only the low-activity windows, which is '
-                             'what the model was trained on.')
+                        help='Dataset to score on; ppg-dalia-low keeps only the '
+                             'low-activity windows the model was trained on')
     args = parser.parse_args()
 
     source = DATASETS[args.dataset].build(DATASETS_DIR)
-    weights = trainable_path(MODELS_DIR / args.model, args.tag)
+    weights = weights_path(MODELS_DIR / args.model, args.tag)
     model = MODELS[args.model].build_model(DATASETS_DIR)
-    model.restore(load_trainable_weights(weights))
+    model.restore(load_weights(weights))
 
     print(f"Scoring {DATASETS[args.dataset].name}")
     truth = mixed_truth(source)
