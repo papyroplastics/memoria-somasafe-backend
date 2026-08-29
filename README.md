@@ -52,7 +52,7 @@ ml/        TensorFlow models + training, imported by worker + scripts, never by 
            Two parallel registries are the single source of truth: model_list.py (key ->
            metadata + model/trainer builders) and dataset_list.py (key -> a DataSource
            builder, plus which dataset training and int8 calibration use). models/ holds
-           one file per architecture (FeatureMLP, CNN/LSTM/GRU autoencoders) built on
+           one file per architecture (FeatureMLP, CNN/LSTM/GRU/spectral autoencoders) built on
            shared bases in common.py; sources/ mirrors it with one file per dataset
            (dalia.py) over the DataSource base in common.py. Everything else is
            model-agnostic and shared across architectures: preprocessing.py (raw download
@@ -132,13 +132,31 @@ subject, and the two loops are directly comparable — `scripts.figures.plot_con
 plots both curves from the `run.yaml` manifests without retraining anything, and refuses to
 overlay runs whose manifests disagree.
 
-Autoencoder variants (LSTM/GRU/CNN/...) share `TrainableAutoencoder` (reconstruction
-train/eval) and `AutoencoderTrainer` (windowing + recon-error metrics). They reconstruct
-**BVP only, from BVP only**: the signal is the single model input, fed **raw**, and the
+Autoencoder variants (LSTM/GRU/CNN/spectral) share `TrainableAutoencoder` (reconstruction
+train/eval) and `AutoencoderTrainer` (windowing + recon-error metrics). They all take
+**BVP only, and nothing else**: the signal is the single model input, fed **raw**, and the
 model z-scores it in its `eval`/`train` signatures with baked-in constants. The on-device
 pipeline feeds raw the same way. ACC never reaches an autoencoder — it exists only as an
-input to `FeatureMLP`'s hand-crafted features. The objective is reconstruction MSE plus a
-first-difference (slope) term that penalizes a constant "flat line" output.
+input to `FeatureMLP`'s hand-crafted features.
+
+What they reconstruct differs, and it is what separates their detectors:
+
+- The **waveform** autoencoders (LSTM/GRU/CNN) rebuild the 512-sample window itself and
+  score it by reconstruction MSE plus a first-difference (slope) term that penalizes a
+  constant "flat line" output.
+- `SpectralAutoencoder` rebuilds the fixed 14-value descriptor of `ml/spectral.py`
+  (pulse-band shape, waveform regularity, log amplitude) computed in-graph from the same
+  window, and scores it by the MSE in that descriptor's z-scored space.
+
+The second exists because a waveform autoencoder's error is a **complexity** measure, not
+a novelty one: it is dominated by the high-frequency detail the bottleneck dropped, so an
+anomaly that *simplifies* the signal reconstructs better than a normal window and scores
+*below* the threshold. Measured per kind on held-out subjects, `CNNAutoencoder` separates
+bradycardia at AUC 0.34 — worse than chance, and inverted rather than merely weak — which
+alone holds its ROC near the diagonal. The descriptor's coordinates have a bounded normal
+range instead, so a rhythm that is too slow leaves it exactly as a rhythm that is too fast
+does, and detection becomes two-sided (bradycardia AUC 0.99, tachycardia 0.74). See
+[`shared/docs/model-types.md`](../shared/docs/model-types.md).
 
 Since each threshold is a quantile of the subject's own clean errors, the absolute error
 scale cancels — only the clean/anomalous overlap matters. See
@@ -181,6 +199,13 @@ the morphology the detector reads. int8 calibration deliberately stays on the un
 must cover the full range — and so do `norm-params.npy` and `feature_stats.npy`, which are
 baked into the model as its z-score constants. The analysis scripts take `--dataset` to
 score the same weights either way.
+
+`SpectralAutoencoder` needs one more set of z-score constants, for the descriptor its
+autoencoder actually reconstructs. Those are *not* device-facing — the descriptor is an
+internal representation, not something the firmware feeds — so unlike the two above they
+are computed over `ppg-dalia-low`, the windows the model trains on. `models/common.py`
+writes them to `datasets/descriptor-params.npy` the first time a model asks for them and
+reuses the file afterwards; delete it to recompute.
 
 ### `FeatureMLP` dataset — synthetic anomaly injection
 
@@ -286,7 +311,8 @@ and the training report/plot in `results/<model>/<loop>/`:
 
 ```bash
 uv run -m scripts.system.train feature-mlp                      # synthetic-anomaly classifier
-uv run -m scripts.system.train cnn-ae                           # conditional Conv1D autoencoder (focus)
+uv run -m scripts.system.train cnn-ae                           # conditional Conv1D autoencoder
+uv run -m scripts.system.train spectral-ae --epochs 100         # spectral-descriptor autoencoder (detector focus)
 uv run -m scripts.system.train feature-mlp --loop federated     # simulated FedAvg
 uv run -m scripts.system.train feature-mlp --batch-size 32       # train at a larger batch (GPU-friendly)
 uv run -m scripts.system.train cnn-ae --eval-subjects 3          # hold out just S3 (LOSO-style)

@@ -7,11 +7,12 @@ import tensorflow as tf
 
 from ..optimizers import Adam
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
-from ..preprocessing import BVP_RATE
+from ..preprocessing import BVP_RATE, BVP_WINDOW, DESCRIPTOR_PARAMS_FILE
 from ..dataset_list import calibration_source, training_source
 from ..loading import batched, to_dataset
 from ..sources.common import DataSource
 from ..sources.dalia import CLEAN
+from ..spectral import descriptor
 
 
 class UnboundError(NotImplementedError):
@@ -257,6 +258,37 @@ def autoencoder_norm_params(data_root: Path):
     the BVP signal. ACC is not a model input — it only feeds feature extraction.
     Computed over every activity: the device normalizes the same way everywhere."""
     return calibration_source(data_root).signal_norm_stats()
+
+
+def descriptor_norm_params(data_root: Path):
+    """z-score params for the spectral descriptor, cached next to the dataset.
+
+    Computed over the same windows the descriptor autoencoder trains on — every
+    subject's clean low-activity windows — because the descriptor is the model's input
+    space, not the device's: the signal params above already cover what the device feeds
+    in. Written on first use and reused afterwards; delete the file to recompute it.
+    """
+    path = data_root / DESCRIPTOR_PARAMS_FILE
+    if path.exists():
+        params = np.load(path)
+        return params[0], params[1]
+
+    source = training_source(data_root)
+    signal_mean, signal_std = source.signal_norm_stats()
+    rows = []
+    for sid in source.subject_ids():
+        windows = source.signal_windows(sid, CLEAN, BVP_WINDOW,
+                                        AutoencoderTrainer.default_shift)
+        if len(windows):
+            rows.append(np.asarray(descriptor(
+                tf.constant((windows - signal_mean) / signal_std, tf.float32), BVP_WINDOW)))
+
+    stacked = np.concatenate(rows)
+    params = np.stack([stacked.mean(axis=0), stacked.std(axis=0) + 1e-6]).astype(np.float32)
+    np.save(path, params)
+    print(f"Saved descriptor norm params to {path}")
+    return params[0], params[1]
+
 
 class AutoencoderTrainer(Trainer):
 

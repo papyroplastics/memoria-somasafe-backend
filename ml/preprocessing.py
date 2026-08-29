@@ -23,6 +23,7 @@ MIXED_FEATURE_SUBDIR = 'mixed-features'     # features windowed from mixed-signa
 CLEAN_FEATURE_SUBDIR = 'clean-features'     # features windowed from clean-signals (all-normal)
 NORM_PARAMS_FILE = 'norm-params.npy'
 FEATURE_STATS_FILE = 'feature_stats.npy'
+DESCRIPTOR_PARAMS_FILE = 'descriptor-params.npy'
 ACTIVITY_FILE = 'activity.npy'
 
 BVP_RATE = 64

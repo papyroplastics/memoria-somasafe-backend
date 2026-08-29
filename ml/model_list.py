@@ -6,6 +6,7 @@ from ml.models import (
     feature_mlp,
     gru_autoencoder,
     lstm_autoencoder,
+    spectral_autoencoder,
 )
 from ml.models.common import ModelBuilder, TrainerBuilder
 
@@ -51,6 +52,14 @@ MODELS: dict[str, ModelSpec] = {
         min_app_version="1.0.0",
         build_trainer=gru_autoencoder.get_trainer,
         build_model=gru_autoencoder.get_model,
+        submission_type=SubmissionType.raw,
+    ),
+    "spectral-ae": ModelSpec(
+        key="spectral-ae",
+        name="Spectral Descriptor Autoencoder",
+        min_app_version="1.0.0",
+        build_trainer=spectral_autoencoder.get_trainer,
+        build_model=spectral_autoencoder.get_model,
         submission_type=SubmissionType.raw,
     ),
     "cnn-ae": ModelSpec(
