@@ -134,18 +134,16 @@ def seed_models(session: Session, reseed: bool = False) -> None:
                           f"[{latest.fingerprint} -> {fingerprint}]")
                 latest.fingerprint = fingerprint
                 latest.weight_count = trainer.model.total_weight_size
-                latest.contract_version = trainer.contract_version
                 latest.submission_type = spec.submission_type
-                latest.norm_params = trainer.norm_param_bytes()
+                latest.contract_version = spec.contract_version
                 latest.min_app_version = spec.min_app_version
             version = latest
         else:
             version = ModelVersion(
                 model_key=key, version=spec.version, fingerprint=fingerprint,
                 weight_count=trainer.model.total_weight_size,
-                contract_version=trainer.contract_version,
                 submission_type=spec.submission_type,
-                norm_params=trainer.norm_param_bytes(),
+                contract_version=spec.contract_version,
                 min_app_version=spec.min_app_version,
             )
             session.add(version)
@@ -177,14 +175,14 @@ def seed_models(session: Session, reseed: bool = False) -> None:
             session.add(WeightsArtifact(
                 weights_id=gw.id, artifact=Artifact.trainable,
                 data=compress(trainable_bytes),
-                signature=sign_model(trainable_bytes, version.contract_version,
-                                     version.norm_params, SERVER_PRIVATE_KEY_FILE)))
+                signature=sign_model(trainable_bytes, spec.contract_version,
+                                     SERVER_PRIVATE_KEY_FILE)))
             if quantized is not None:
                 session.add(WeightsArtifact(
                     weights_id=gw.id, artifact=Artifact.quantized,
                     data=compress(quantized),
-                    signature=sign_model(quantized, version.contract_version,
-                                         version.norm_params, SERVER_PRIVATE_KEY_FILE)))
+                    signature=sign_model(quantized, spec.contract_version,
+                                         SERVER_PRIVATE_KEY_FILE)))
             print(f"  + initial weights for '{key}' v{spec.version} ({weights.size} weights)")
     session.commit()
 

@@ -214,24 +214,3 @@ Lo que se reporta de aquí es cualitativo: el camino desplegado corre extremo a 
 varios usuarios sobre la API real, y las máscaras de la agregación segura cancelan
 exactamente. Las series que escriben (`results/<modelo>/fed_client/`) no son las curvas del
 informe.
-
----
-
-## Falta programar
-
-Ordenado por cuánto le cuesta al capítulo que no exista.
-
-**1. Tiempo de ronda de agregación en el servidor (Sec. 5.5).** No lo mide ningún script.
-`footprint.py` lo lista como fila para pegar a mano. Lo más barato es cronometrar la tarea de
-agregación desde `scripts.integration.queue_aggregation`, que ya bloquea esperando el
-resumen de la ronda, y anotar el número.
-
-**2. Filas de teléfono y ESP32 (Sec. 5.5).** Mediciones puntuales fuera del backend, que se
-pegan en la tabla de huella: tiempo de entrenamiento por época en el teléfono (logcat),
-tamaño de arena de TFLM y latencia de inferencia int8 en el ESP32. No hay script que las
-produzca ni lo habrá; son una corrida instrumentada en cada dispositivo.
-
-**3. Calidad retenida tras cuantizar, medida en el dispositivo (Sec. 5.5).**
-`knowledge_distillation.py` ya puntúa al estudiante en float y en int8 en el host, que
-cubre la afirmación "int8 ≈ float" para el informe. Si se quiere la cifra medida sobre el
-ESP32 en vez de sobre el intérprete del host, es otra medición puntual del firmware.

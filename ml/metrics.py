@@ -18,7 +18,8 @@ def first_difference_loss(reconstruction: tf.Tensor, signal: tf.Tensor) -> tf.Te
 
 
 def reconstruction_error(reconstruction: tf.Tensor, signal: tf.Tensor) -> tf.Tensor:
-    return tf.reduce_mean(tf.square(reconstruction - signal), axis=[1, 2])
+    squared = tf.square(reconstruction - signal)
+    return tf.reduce_mean(tf.reshape(squared, [tf.shape(squared)[0], -1]), axis=1)
 
 
 def best_threshold(errors: np.ndarray, labels: np.ndarray,

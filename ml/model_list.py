@@ -22,11 +22,8 @@ class ModelSpec:
     # Upload path + aggregation strategy for this model's weight updates.
     submission_type: SubmissionType
     firmware_id: int | None = None
-    # Hand-bumped on any change that invalidates existing weights (architecture,
-    # baked norm params, contract). The seed script errors if the fingerprint
-    # moved without a bump, and publishes a new frozen-history ModelVersion row
-    # when it did.
     version: int = 1
+    contract_version: int = 0
 
 
 MODELS: dict[str, ModelSpec] = {
@@ -37,6 +34,7 @@ MODELS: dict[str, ModelSpec] = {
         build_trainer=feature_mlp.get_trainer,
         build_model=feature_mlp.get_model,
         submission_type=SubmissionType.quantize,
+        contract_version=1,
     ),
     "lstm-ae": ModelSpec(
         key="lstm-ae",

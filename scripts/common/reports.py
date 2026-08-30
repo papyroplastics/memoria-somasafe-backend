@@ -5,15 +5,11 @@ import yaml
 
 from common.config import RESULTS_DIR
 
-RUN_MANIFEST = 'run.yaml'   # run config + final metrics, from train.py
+RUN_MANIFEST = 'run.yaml'
 
 
 def get_report_dir(model: str, subdir: str | None = None) -> Path:
-    """Results directory for a model, rooted at RESULTS_DIR (created on demand).
-
-    Holds everything evaluative — histories, detector metrics, convergence curves,
-    figures — kept out of MODELS_DIR, which holds only the served .tflite artifacts.
-    """
+    """Results directory for a model, rooted at RESULTS_DIR (created on demand)."""
     report_dir = RESULTS_DIR / model
     if subdir is not None:
         report_dir = report_dir / subdir
@@ -26,7 +22,7 @@ def loop_dir(loop: str, tag: str | None = None) -> str:
 
 
 def _plain(value):
-    """Coerce numpy scalars and Paths into types yaml.safe_dump accepts."""
+    """Coerces numpy scalars and Paths into types yaml.safe_dump accepts."""
     if isinstance(value, dict):
         return {str(k): _plain(v) for k, v in value.items()}
     if isinstance(value, (list, tuple)):
@@ -39,10 +35,7 @@ def _plain(value):
 
 
 def write_yaml(path: Path, fields: dict) -> None:
-    """Writes a run manifest, or a figure's companion summary — `<name>.yaml` next to
-    each `<name>.png`, so the result can be read and cited without opening the image.
-    Key order is preserved; by convention a summary starts with `shows`, then the axes,
-    the subjects/splits the numbers were measured on, the headline numbers"""
+    """Writes a run manifest, or a figure's companion summary next to its `<name>.png`."""
     path.write_text(yaml.safe_dump(_plain(fields), sort_keys=False, default_flow_style=False))
     print(f"wrote {path}")
 
@@ -53,8 +46,7 @@ def read_yaml(path: Path) -> dict:
 
 def read_subject_split(model: str, loops: tuple[str, ...],
                        tag: str | None = None) -> tuple[list[str], list[str]]:
-    """The (train_ids, eval_ids) a previous train.py run recorded — the exact held-out
-    subjects, not merely a count, since the selection may be arbitrary."""
+    """The (train_ids, eval_ids) a previous train.py run recorded."""
     for loop in loops:
         path = RESULTS_DIR / model / loop_dir(loop, tag) / RUN_MANIFEST
         if path.exists():
@@ -73,9 +65,7 @@ def read_subject_split(model: str, loops: tuple[str, ...],
 
 
 def read_run(model: str, loop: str, tag: str | None = None) -> dict:
-    """The manifest of a previous `train.py <model> --loop <loop>` run. The figure
-    scripts read this instead of re-running the loop, so it must carry everything they
-    need to label and cross-check a curve."""
+    """The manifest of a previous `train.py <model> --loop <loop>` run."""
     path = RESULTS_DIR / model / loop_dir(loop, tag) / RUN_MANIFEST
     if not path.exists():
         tag_flag = f' --tag {tag}' if tag else ''
@@ -108,7 +98,7 @@ def write_history_csv(history, result_dir: Path):
 
 
 def read_history_csv(result_dir: Path) -> list[dict[str, float]]:
-    """The `training.csv` a train.py run wrote, as one dict of floats per step."""
+    """Returns the `training.csv` a train.py run wrote, as one dict of floats per step."""
     path = result_dir / 'training.csv'
     if not path.exists():
         raise SystemExit(f"no training history at {path}")

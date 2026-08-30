@@ -1,25 +1,8 @@
 """Byzantine robustness sweep (report Sec. 5.5): global model quality vs. number of
-malicious clients, under the plain mean vs. the trimmed mean the server aggregates with.
-Backs the security-model claim that trimmed mean holds the round — and no more.
-
-Attack model: each malicious client submits a large random update (a Gaussian delta scaled
-to `--attack-magnitude` times the honest clients' mean L2 norm that round) — a naive
-model-poisoning / disruption attempt. The server's only Byzantine defense is its aggregation
-rule: trimmed mean drops the top/bottom `--trim` fraction per coordinate before averaging,
-so a handful of gross outliers can't drag the global weights. The plain mean is the
-undefended baseline. Weighted averaging is not offered: it is unsound under this threat
-model, since nothing stops an attacker from claiming an enormous dataset size.
-
-The sweep runs its own federated loop (honest clients train against the shared global
-weights, then the malicious deltas are appended before aggregation), so honest training is
-identical across every configuration.
-
-Unlike the convergence figures, this one has to train: no train.py run produces a poisoned
-round. Every configuration trains a fresh model over the same subject datasets, which are
-built once (ml.loading caches them) since they never depend on the weights.
-
-    uv run -m scripts.figures.byzantine cnn-ae --max-malicious 4 --eval-subjects 2
-"""
+malicious clients submitting large random updates, under the plain mean vs. the trimmed
+mean the server aggregates with, backing the security-model claim that trimmed mean holds
+the round — and no more. Runs its own federated loop, training a fresh model per
+configuration over the same subject datasets."""
 
 import argparse
 from collections.abc import Callable
@@ -53,6 +36,7 @@ def byzantine_loop(trainer: Trainer, clients: list[tf.data.Dataset],
                    eval_dataset: tf.data.Dataset, local_epochs: int, rounds: int,
                    aggregate: Aggregator, n_malicious: int, magnitude: float,
                    rng: np.random.Generator) -> History:
+    """Runs one federated loop with malicious deltas injected each round before aggregation."""
     model = trainer.model
     global_weights = model.save()['weights']
 
@@ -87,18 +71,14 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('model', choices=sorted(MODELS), help='Model to attack')
-    parser.add_argument('--trim', type=float, default=0.1,
-                        help='Fraction trimmed from each side per coordinate, for the '
-                             'trimmed mean (default: 0.1)')
-    parser.add_argument('--max-malicious', type=int, default=4,
-                        help='Sweep 0..N malicious clients (default: 4)')
+    parser.add_argument('--trim', type=float, default=0.1, help='Trimmed mean fraction per side')
+    parser.add_argument('--max-malicious', type=int, default=4, help='Sweep 0..N malicious clients')
     parser.add_argument('--attack-magnitude', type=float, default=10.0,
-                        help='Malicious delta L2 as a multiple of the honest mean (default: 10)')
-    parser.add_argument('--rounds', type=int, default=5, help='Global rounds (default: 10)')
-    parser.add_argument('--local-epochs', type=int, default=2,
-                        help='Local epochs per round (default: 2)')
+                        help='Malicious delta L2 as a multiple of the honest mean')
+    parser.add_argument('--rounds', type=int, default=5, help='Global rounds')
+    parser.add_argument('--local-epochs', type=int, default=2, help='Local epochs per round')
     parser.add_argument('--eval-subjects', type=int, default=2,
-                        help='Subjects held out for evaluation (default: 2)')
+                        help='Subjects held out for evaluation')
     args = parser.parse_args()
 
     aggregators: dict[str, Aggregator] = {
@@ -117,11 +97,7 @@ def main() -> None:
     for n in counts:
         values = {}
         for label, aggregate in aggregators.items():
-            # Fresh trainer per run so a loop that mutates the weights never leaks into
-            # the next configuration; the subject datasets are built once, above.
             trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
-            # Fresh RNG per config, seeded off the global SEED + n, so the attack is
-            # reproducible and both aggregators see the same malicious draws.
             history = byzantine_loop(trainer, clients, eval_dataset, args.local_epochs,
                                      args.rounds, aggregate, n, args.attack_magnitude,
                                      np.random.default_rng(SEED + n))

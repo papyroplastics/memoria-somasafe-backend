@@ -15,11 +15,6 @@ def relu(x: tf.Tensor):
 
 
 def upsample2(x: tf.Tensor) -> tf.Tensor:
-    """Nearest-neighbour x2 upsampling along time. Equivalent to
-    ``tf.repeat(x, 2, axis=1)``, but repeat's gradient is a SUM reduction that
-    XNNPACK fails to prepare inside the train signature; stack/reshape
-    differentiate to Unpack/Add instead. The batch dim is inferred (-1) so the
-    graph stays batch-polymorphic for the int8 calibrator."""
     _, seq_len, channels = (int(d) for d in x.shape)
     return tf.reshape(tf.stack([x, x], axis=2), [-1, 2 * seq_len, channels])
 

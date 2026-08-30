@@ -1,19 +1,6 @@
 """Server signature over a distributed model, verified by the ESP32 against its
-factory-provisioned server public key before loading.
-
-The signature is transport-independent: the app packages the model for the
-device however its BLE interface version dictates, and the firmware rebuilds
-the canonical byte string below from the delivered fields and verifies the
-signature over it (see shared/docs/model-signing.md). Layout (little-endian):
-
-    u16   contract_version     fixes how the model is fed: the norm layout + I/O signatures
-    f32[] norm_params          z-score params; count is fixed by contract_version
-    u8[]  tflite               the int8 model
-
-The gateway delivers the three fields alongside the tflite in response headers
-(X-Model-Signature / X-Contract-Version / X-Norm-Params, base64 where binary).
-The device applies the norm params as ``(x - mean) / std`` before the model.
-"""
+factory-provisioned public key before loading (see shared/docs/model-signing.md).
+Signs the contract version + tflite bytes; per-wearer z-score params are not covered."""
 
 import struct
 from pathlib import Path
@@ -29,8 +16,8 @@ def _load_private(key_path: Path) -> ec.EllipticCurvePrivateKey:
     return key
 
 
-def canonical_model_bytes(tflite: bytes, contract_version: int, norm_params: bytes) -> bytes:
-    return struct.pack('<H', contract_version) + norm_params + tflite
+def canonical_model_bytes(tflite: bytes, contract_version: int) -> bytes:
+    return struct.pack('<H', contract_version) + tflite
 
 
 def sign_blob(data: bytes, key_path: Path) -> bytes:
@@ -38,16 +25,13 @@ def sign_blob(data: bytes, key_path: Path) -> bytes:
     return _load_private(key_path).sign(data, ec.ECDSA(hashes.SHA256()))
 
 
-def sign_model(tflite: bytes, contract_version: int, norm_params: bytes,
-               key_path: Path) -> bytes:
+def sign_model(tflite: bytes, contract_version: int, key_path: Path) -> bytes:
     """ECDSA P-256 (SHA-256) DER signature over the canonical model bytes."""
-    return sign_blob(canonical_model_bytes(tflite, contract_version, norm_params),
-                     key_path)
+    return sign_blob(canonical_model_bytes(tflite, contract_version), key_path)
 
 
 def verify_model(signature: bytes, tflite: bytes, contract_version: int,
-                 norm_params: bytes, public_key: ec.EllipticCurvePublicKey) -> None:
-    """Raises InvalidSignature on mismatch — used by tests and the firmware harness."""
-    public_key.verify(signature,
-                      canonical_model_bytes(tflite, contract_version, norm_params),
+                 public_key: ec.EllipticCurvePublicKey) -> None:
+    """Raises InvalidSignature on mismatch."""
+    public_key.verify(signature, canonical_model_bytes(tflite, contract_version),
                       ec.ECDSA(hashes.SHA256()))

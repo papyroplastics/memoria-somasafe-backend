@@ -5,12 +5,9 @@ import tensorflow as tf
 from .models.common import TrainableModel, Trainer
 
 def optimize_saved_model(rep_dataset: tf.data.Dataset, saved_dir: Path) -> bytes:
-    # The int8 model is built from the non-normalizing `infer` signature and fed
-    # already-normalized inputs, so the int8 input calibrates on normalized values
-    # (heterogeneous raw features would otherwise collapse under one per-tensor scale).
     def rep_iter():
         for feed in rep_dataset:
-            yield ('infer', feed)
+            yield ('eval', feed)
 
     converter = tf.lite.TFLiteConverter.from_saved_model(str(saved_dir))  # type: ignore
     converter.optimizations = [tf.lite.Optimize.DEFAULT]  # type: ignore
@@ -24,9 +21,6 @@ def optimize_saved_model(rep_dataset: tf.data.Dataset, saved_dir: Path) -> bytes
 
 
 def get_trainable_model(model: TrainableModel) -> bytes:
-    """Convert the model — current weights baked in — to a LiteRT-trainable
-    .tflite. The intermediate SavedModel goes to a temp dir; only the .tflite
-    is an artifact of the architecture."""
     with tempfile.TemporaryDirectory() as tmp:
         saved_dir = Path(tmp) / 'model'
         tf.saved_model.save(model, str(saved_dir), signatures={
@@ -47,7 +41,7 @@ def get_optimized_model(model: TrainableModel, rep_dataset: tf.data.Dataset) -> 
     with tempfile.TemporaryDirectory() as tmp:
         saved_dir = Path(tmp) / 'model'
         tf.saved_model.save(model, str(saved_dir), signatures={
-            'infer': model.infer.get_concrete_function(),
+            'eval': model.eval.get_concrete_function(),
         })
 
         return optimize_saved_model(rep_dataset, saved_dir)
@@ -82,8 +76,6 @@ def save_artifacts(trainer: Trainer, result_dir: Path, postfix: str = '',
     trainable_file.write_bytes(get_trainable_model(trainer.model))
     print(f"Saved trainable model to {trainable_file}")
 
-    # The calibration feed comes off disk, so a failure there is a broken dataset, not a
-    # conversion that happens not to quantize — only the latter degrades to a warning.
     rep_dataset = trainer.representative_dataset()
     try:
         quantized_file = result_dir / f'quantized{postfix}.tflite'

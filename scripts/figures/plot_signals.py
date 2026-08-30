@@ -46,6 +46,10 @@ if __name__ == "__main__":
     source = DATASETS[args.dataset].build(DATASETS_DIR)
 
     model = MODELS[args.model].build_model(DATASETS_DIR)
+    if not hasattr(model, 'seq_len'):
+        raise SystemExit(f"{args.model} does not reconstruct a waveform, so there is "
+                         f"nothing to overlay on one — this plot is for the LSTM/GRU/CNN "
+                         f"autoencoders")
     weights = weights_path(MODELS_DIR / args.model, args.tag)
     model.restore(load_weights(weights))
 
@@ -71,17 +75,14 @@ if __name__ == "__main__":
 
     fig_in, axs_in = plt.subplots(len(KINDS), 1, sharex=True, figsize=(8, 2 * len(KINDS)))
     fig_rec, axs_rec = plt.subplots(len(KINDS), 1, sharex=True, figsize=(8, 2 * len(KINDS)))
-    fig_in.suptitle(f'{sid} window {window_idx} — normalized BVP')
+    fig_in.suptitle(f'{sid} window {window_idx} — BVP, z-scored on {sid}')
     fig_rec.suptitle(f'{sid} window {window_idx} — {args.model} reconstruction')
 
-    bvp_mean = model.signal_mean.numpy()[0]
-    bvp_std = model.signal_std.numpy()[0]
-
     for i, (ax_in, ax_rec, kind) in enumerate(zip(axs_in, axs_rec, KINDS)):
+        # Both the window and the reconstruction are in the subject's z-scored space:
+        # the source normalizes on the way out and the model neither un- nor re-scales.
         bvp = views[kind][:, 0]
-        # eval() reconstructs in z-scored space; denormalize back to raw BVP units
-        # so it's comparable to the raw `bvp` it's plotted against.
-        recon = recons[i] * bvp_std + bvp_mean
+        recon = recons[i]
 
         ax_in.plot(t, bvp)
         ax_in.set_ylabel(kind)
@@ -105,10 +106,11 @@ if __name__ == "__main__":
     sample = {'dataset': args.dataset, 'subject': sid, 'window': window_idx,
               'of_windows': n_windows, 'seed': args.seed}
     axes = {'x_axis': {'name': 'seconds', 'range': [0, 8], 'sample_rate_hz': BVP_RATE},
-            'y_axis': {'name': 'raw BVP amplitude', 'units': 'sensor units'}}
+            'y_axis': {'name': 'BVP amplitude',
+                       'units': "z-scores of the subject's own clean signal"}}
 
     write_yaml(report_dir / 'signals.yaml', {
-        'shows': f"Raw BVP signal windows for subject {sid}: one 8 s window per row, the "
+        'shows': f"BVP signal windows for subject {sid}: one 8 s window per row, the "
                  f"same window under the clean signal and each synthetic anomaly kind.",
         'rows': {'order': 'top to bottom', 'kinds': list(KINDS)},
         **axes,
@@ -117,7 +119,8 @@ if __name__ == "__main__":
     })
     write_yaml(report_dir / 'signals_reconstructed.yaml', {
         'shows': f"The same {len(KINDS)} windows with the {args.model} autoencoder's "
-                 f"reconstruction (denormalized to raw BVP units) overlaid on the input: "
+                 f"reconstruction overlaid on the input, both in the subject's own "
+                 f"z-scored units: "
                  f"the autoencoder tracks clean rhythm and departs on integrity/rhythm "
                  f"anomalies.",
         'rows': {'order': 'top to bottom', 'kinds': list(KINDS)},

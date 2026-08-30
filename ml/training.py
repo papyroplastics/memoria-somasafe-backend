@@ -24,8 +24,6 @@ def weighted_average(vectors: Sequence[tf.Tensor | np.ndarray],
 
 def trimmed_mean(vectors: Sequence[tf.Tensor | np.ndarray],
                  trim: float) -> np.ndarray:
-    """Coordinate-wise mean after dropping the `trim` fraction of smallest and largest
-    values at each coordinate. `trim` must leave at least one value standing."""
     if not 0.0 <= trim < 0.5:
         raise ValueError(f"trim must be in [0, 0.5), got {trim}")
     stacked = np.sort(np.stack([np.asarray(vector) for vector in vectors]), axis=0)
@@ -35,8 +33,6 @@ def trimmed_mean(vectors: Sequence[tf.Tensor | np.ndarray],
 
 
 def evaluate(trainer: Trainer, dataset: tf.data.Dataset, prefix: str = '') -> dict[str, float]:
-    """Evaluate over ``dataset`` and reduce to metrics via the trainer's ``eval_metrics``.
-    ``prefix`` labels the progress bar (e.g. ``epoch=3/20``)."""
     datapoints = list(dataset)
     outputs = [trainer.model.eval(*dp[:trainer.n_eval_inputs])
                for dp in tqdm(datapoints, desc=f'{prefix} eval'.strip(),
@@ -45,7 +41,6 @@ def evaluate(trainer: Trainer, dataset: tf.data.Dataset, prefix: str = '') -> di
 
 
 def train_epoch(trainer: Trainer, dataset: tf.data.Dataset, prefix: str = '') -> float:
-    """One pass over ``dataset``; returns mean training loss."""
     batches = len(dataset)
     total = 0.0
     for batch in tqdm(dataset, total=batches, desc=f'{prefix} train'.strip(),

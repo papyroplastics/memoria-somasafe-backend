@@ -1,32 +1,10 @@
-"""Headless federated client harness — drives the real HTTP API end to end.
-
-One harness, two aggregation strategies picked by the model's ``submission_type``:
-
-  - **dense** (``raw`` / ``quantize``): each round every training subject (as user
-    ``test_N``) logs in, pulls the current global weight buffer (``/model/weights``),
-    restores it into the compiled model, trains one pass through the on-device LiteRT
-    ``CompiledModel`` runtime, uploads the plaintext weight delta (local − global), and
-    logs out. One ``federated_aggregation`` task then averages whatever landed since the
-    last snapshot.
-  - **secure**: a secure round is a first-class object, so the round runs the four
-    synchronised phases the masking protocol needs — join (publish an ECDH key and
-    take a seat), seal (freeze the cohort + scale), masked submit (each member masks
-    its quantized delta against the frozen roster and uploads only the masked
-    vector), then one round-scoped ``secure_aggregation`` task sums them. The harness
-    also verifies client-side that the masks cancel exactly each round.
-
-The trainable ``.tflite`` is downloaded once up front (the graph never changes
-between rounds); every round afterwards refreshes only the weight buffer. Either
-way it scores the fresh snapshot on the held-out subjects and writes a per-round
-convergence CSV + plot.
-
-    uv run -m scripts.fed_client feature-mlp --rounds 5 --eval-subjects 2
-    uv run -m scripts.fed_client cnn-ae     --rounds 5 --eval-subjects 2   # secure
-
-Prereqs: services up (api, worker, redis, postgres), DB seeded with ``--test-users``,
-and the model trained/seeded. There are no local epochs — one submission per client
-per round.
-"""
+"""Headless federated client harness — drives the real HTTP API end to end, picking
+between two aggregation strategies by the model's ``submission_type``: dense (``raw`` /
+``quantize``) has each training subject pull the global weights, train one pass and
+upload a plaintext delta for the daily aggregation task; secure runs a round as a
+first-class object with join/seal/masked-submit phases and a round-scoped aggregation
+task, verifying client-side that the masks cancel. Scores the fresh snapshot on the
+held-out subjects each round and writes a convergence CSV + plot."""
 
 import argparse
 import base64
@@ -70,6 +48,7 @@ from scripts.common.secure import seal_round
 class DenseStrategy:
     """raw / quantize: plaintext deltas, averaged by the daily FL task."""
 
+
     report_subdir = "fed_client"
 
     def setup(self, n_clients: int) -> None:
@@ -83,9 +62,9 @@ class DenseStrategy:
             token = login(base, user, user)
             raw, weights_id = download_weights(base, token, key)
             client.restore(np.frombuffer(raw, dtype=np.float32))
-            base_weights = client.weights()  # global snapshot the delta is relative to
+            base_weights = client.weights()
             if not scored:
-                score(client, r - 1)  # global weights this round trained from
+                score(client, r - 1)
                 scored = True
             client.train_pass(dataset, f"{prefix} subject={i}/{len(client_datasets)}")
             delta = client.weights() - base_weights
@@ -106,16 +85,13 @@ class SecureStrategy:
         if n_clients < SECURE_MIN_MEMBERS:
             raise SystemExit(f"{n_clients} client subjects < SECURE_MIN_MEMBERS "
                              f"({SECURE_MIN_MEMBERS}); a secure round needs at least that many")
-        # Long-term ECDH keypairs, generated once and reused across rounds (the round
-        # id in the mask seed keeps each round's masks fresh regardless).
         self.keypairs = {f"test_{i}": generate_keypair() for i in range(1, n_clients + 1)}
 
     def run_round(self, base, key, spec, client, client_datasets, r, rounds, score):
         prefix = f"round={r}/{rounds}"
 
-        # Phase A — every client joins and publishes its public key.
         round_id = None
-        seats = []  # (i, user, token, dataset, sk, my_user_id)
+        seats = []
         for i, dataset in enumerate(client_datasets, start=1):
             user = f"test_{i}"
             token = login(base, user, user)
@@ -124,12 +100,9 @@ class SecureStrategy:
             round_id = resp["round_id"]
             seats.append((i, user, token, dataset, sk, resp["user_id"]))
 
-        # Phase B — seal the frozen cohort.
         n = seal_round(round_id, SECURE_MIN_MEMBERS)
         print(f"{prefix} sealed round {round_id} with {n} members")
 
-        # Phase C — train, mask, submit. Collected q/y let us confirm the masks
-        # cancel to the same sum the server will compute.
         scored = False
         masked_vecs, plain_q, scale = [], [], None
         for i, user, token, dataset, sk, my_id in seats:
@@ -154,14 +127,11 @@ class SecureStrategy:
             masked_vecs.append(y)
             plain_q.append(q)
 
-        # Client-side proof the masks are antisymmetric: the masked sum equals the
-        # unmasked sum exactly (the value the server unmasks to).
         residual = float(np.max(np.abs(
             dequantize(ring_sum(masked_vecs), scale, n)
             - dequantize(ring_sum(plain_q), scale, n))))
         print(f"{prefix} mask-cancellation residual: {residual:.3e}")
 
-        # Phase D — aggregate.
         summary = wait_for_round(app.send_task(SECURE_AGG_TASK, args=[round_id]))
         print(f"{prefix} aggregated: {summary}")
 
@@ -177,14 +147,9 @@ def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
     strategy = _strategy_for(spec.submission_type)
     trainer = spec.build_trainer(DATASETS_DIR)
     client_datasets, held_out = holdout(trainer.subject_datasets(), eval_subjects)
-    # Materialize each held-out subject and concatenate at the Python level, so the
-    # already-built subject datasets are never re-combined into a new tf pipeline.
     eval_data = [dp for ds in held_out for dp in list(ds)]
     strategy.setup(len(client_datasets))
 
-    # Build the model graph once from the trainable artifact; every round after
-    # this pulls only the lightweight weight buffer (/model/weights) and restores
-    # it into this same compiled model, never re-downloading the whole artifact.
     token = login(base, "test_1", "test_1")
     artifact, _ = download_trainable(base, token, key)
     logout(base, token)
@@ -209,13 +174,11 @@ def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
                 raise SystemExit(f"model '{key}' has no seeded version")
         strategy.run_round(base, key, spec, client, client_datasets, r, rounds, score)
 
-    # Final global weights, after the last round's aggregation.
     token = login(base, "test_1", "test_1")
     raw, _ = download_weights(base, token, key)
     logout(base, token)
     client.restore(np.frombuffer(raw, dtype=np.float32))
     score(client, rounds)
-
     report_dir = get_report_dir(key, strategy.report_subdir)
     metric = trainer.primary_metric
     values = [h[metric] for h in history]
@@ -245,13 +208,11 @@ def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("model", choices=sorted(MODELS),
-                        help="model to run the loop for (default: cnn-ae)")
-    parser.add_argument("--rounds", type=int, default=5, help="global rounds (default: 5)")
+    parser.add_argument("model", choices=sorted(MODELS), help="model to run the loop for")
+    parser.add_argument("--rounds", type=int, default=5, help="global rounds")
     parser.add_argument("--eval-subjects", type=int, default=2,
-                        help="subjects reserved from the end for evaluation (default: 2)")
-    parser.add_argument("--base-url", default=DEFAULT_BASE_URL,
-                        help=f"gateway base URL (default: {DEFAULT_BASE_URL})")
+                        help="subjects reserved from the end for evaluation")
+    parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="gateway base URL")
     args = parser.parse_args()
 
     run(args.base_url, args.model, args.rounds, args.eval_subjects)

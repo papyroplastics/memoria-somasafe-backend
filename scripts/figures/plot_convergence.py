@@ -1,20 +1,8 @@
 """Federated convergence (report Sec. 5.2) and the centralized-vs-federated overlay
-(Sec. 5.3 — the central thesis claim), both plotted from **previous train.py runs**.
-
-This script trains nothing: it reads the history and manifest each run already wrote to
-results/<model>/<loop>/ and fails if they are missing. Produce them with:
-
-    uv run -m scripts.system.train <model> --loop federated --eval-subjects 2
-    uv run -m scripts.system.train <model> --loop normal    --eval-subjects 2
-    uv run -m scripts.figures.plot_convergence <model>
-
-The federated run alone gives the convergence curve. With a normal run at the same
---eval-subjects, the overlay is drawn too: both loops held out the same subjects and
-trained on the same rest, so the curves are comparable and the gap between them is the
-claim — FL reaches comparable quality without ever centralizing raw data. The x axis
-is the global round / centralized epoch; the compute per step differs (each federated
-round runs `local_epochs` local passes).
-"""
+(Sec. 5.3 — the central thesis claim), both plotted from previous train.py runs: this
+script trains nothing, it reads the history and manifest each run already wrote and
+fails if they are missing. With a normal run at the same --eval-subjects, the overlay is
+drawn too, since both loops held out the same subjects and trained on the same rest."""
 
 import argparse
 
@@ -23,7 +11,6 @@ from ..common.plots import line_plot
 from ..common.reports import (
     get_report_dir, loop_dir, read_history_csv, read_run, write_metrics_csv, write_yaml)
 
-# The manifest fields both runs must agree on for the overlay to compare like with like.
 COMPARABLE = ('metric', 'eval_subjects', 'train_subjects', 'batch_size', 'dataset_dir')
 
 
@@ -32,7 +19,7 @@ def better_direction(metric: str) -> str:
 
 
 def load_curve(model: str, loop: str, tag: str | None = None) -> tuple[dict, list[float]]:
-    """A previous run's manifest and its held-out metric per step."""
+    """Returns a previous run's manifest and its held-out metric per step."""
     run = read_run(model, loop, tag)
     history = read_history_csv(get_report_dir(model, loop_dir(loop, tag)))
     metric = run['metric']
@@ -116,7 +103,7 @@ def plot_overlay(model: str, fed_run: dict, fed_values: list[float],
 
 
 def check_comparable(fed_run: dict, cen_run: dict) -> None:
-    """The overlay is only a claim if both runs measured the same thing on the same data."""
+    """Raises if the federated and normal runs are not comparable."""
     disagree = [f"{f}: federated={fed_run.get(f)!r} normal={cen_run.get(f)!r}"
                 for f in COMPARABLE if fed_run.get(f) != cen_run.get(f)]
     if disagree:
@@ -131,12 +118,8 @@ def main() -> None:
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('model', choices=sorted(MODELS), help='Model to plot')
     parser.add_argument('--skip-overlay', action='store_true',
-                        help='Only plot the federated convergence curve, even if a '
-                             'centralized run exists')
-    parser.add_argument('--tag', default=None,
-                        help='Tag of the train.py runs to plot (default: the canonical '
-                             'untagged normal_/federated_ runs). Reads normal_<tag>/ and '
-                             'federated_<tag>/ under results/<model>/.')
+                        help='Only plot the federated convergence curve')
+    parser.add_argument('--tag', default=None, help='Tag of the train.py runs to plot')
     args = parser.parse_args()
 
     fed_run, fed_values = load_curve(args.model, 'federated', args.tag)

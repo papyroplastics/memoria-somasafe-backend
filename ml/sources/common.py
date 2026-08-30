@@ -4,15 +4,10 @@ import numpy as np
 
 
 class DataSource(ABC):
-    """Everything a consumer needs to read one dataset off disk, already through whatever
+    """Everything a consumer needs to read one dataset, already through whatever
     load-time filter its DatasetSpec applies. Sources hand back numpy arrays, not tf.data:
     a filter is then a boolean mask, the scoring path in scripts.common.scoring consumes
-    arrays directly, and ml.loading wraps them for the training loops.
-
-    Every accessor is indexed by subject id and by a window grid, and every array a source
-    returns for one (subject, grid) is aligned with every other: window i of
-    ``signal_windows(sid, 'mixed', ...)`` is the window ``features(sid)[i]`` was extracted
-    from and ``window_labels(sid)[i]`` labels."""
+    arrays directly, and ml.loading wraps them for the training loops."""
 
     key: str
 
@@ -30,33 +25,60 @@ class DataSource(ABC):
         """Boolean mask over that grid: which windows this source keeps."""
 
     @abstractmethod
-    def signal_windows(self, sid: str, variant: str, window: int,
-                       shift: int) -> np.ndarray:
-        """``(n, window, 1)`` float32 raw BVP windows. ``variant`` names the signal:
-        'clean', 'mixed', or one of ``preprocessing.ANOMALY_KINDS``."""
+    def signal(self, sid: str, variant: str) -> np.ndarray:
+        """The subject's whole **raw** BVP stream for one variant, unwindowed and
+        unfiltered — what a sensor would emit. Only the export scripts want this; a model
+        is fed by ``signal_windows``."""
 
     @abstractmethod
-    def features(self, sid: str) -> tuple[np.ndarray, np.ndarray]:
-        """``(n, N_FEATURES)`` raw feature vectors and their ``(n, 1)`` binary labels,
-        on the non-overlapping window grid."""
+    def acc_signal(self, sid: str) -> np.ndarray:
+        """The subject's whole raw ACC magnitude stream. Anomalies are injected into BVP
+        only, so there is one of these regardless of variant."""
+
+    @abstractmethod
+    def norm_stats(self, sid: str, family: str) -> tuple[np.ndarray, np.ndarray]:
+        """The (mean, std) this source z-scores one subject's values with, for one value
+        family ('signal', 'features', 'descriptor'). Every model-facing accessor already
+        applies these; they are exposed because whoever feeds a model outside this
+        pipeline — the device, through the export scripts — has to apply them itself."""
+
+    @abstractmethod
+    def raw_features(self, sid: str, variant: str) -> np.ndarray:
+        """``(n, N_FEATURES)`` **un-normalized** feature vectors, on the non-overlapping
+        window grid — the vectors as the firmware computes and reports them. Like
+        ``signal``, this exists for the export scripts; a model is fed by ``features``."""
+
+    @abstractmethod
+    def signal_windows(self, sid: str, variant: str, window: int,
+                       shift: int) -> np.ndarray:
+        """``(n, window, 1)`` float32 per-subject-normalized BVP windows. ``variant``
+        names the signal: 'clean', 'mixed', or one of ``preprocessing.ANOMALY_KINDS``."""
+
+    @abstractmethod
+    def features(self, sid: str, variant: str) -> np.ndarray:
+        """``(n, N_FEATURES)`` per-subject-normalized feature vectors, on the
+        non-overlapping window grid."""
+
+    @abstractmethod
+    def descriptors(self, sid: str, variant: str, window: int,
+                    shift: int) -> np.ndarray:
+        """``(n, N_DESCRIPTORS)`` per-subject-normalized spectral descriptors."""
 
     @abstractmethod
     def window_labels(self, sid: str) -> np.ndarray:
-        """``(n,)`` binary anomaly truth on the non-overlapping window grid."""
-
-    @abstractmethod
-    def signal_norm_stats(self) -> tuple[np.ndarray, np.ndarray]:
-        """Global BVP (mean, std) baked into an autoencoder as its z-score constants."""
-
-    @abstractmethod
-    def feature_norm_stats(self) -> tuple[np.ndarray, np.ndarray]:
-        """Global per-feature (mean, std) baked into the feature model."""
+        """``(n,)`` binary anomaly truth for the mixed variant, on the non-overlapping
+        window grid."""
 
     @abstractmethod
     def calibration_windows(self, window: int, shift: int,
                             per_subject: int = 10) -> np.ndarray:
-        """A few random signal windows from each subject, for the int8 converter."""
+        """A few normalized signal windows from each subject, for the int8 converter."""
 
     @abstractmethod
     def calibration_features(self, per_subject: int = 10) -> np.ndarray:
-        """The same sample, as feature vectors."""
+        """The same sample, as normalized feature vectors."""
+
+    @abstractmethod
+    def calibration_descriptors(self, window: int, shift: int,
+                                per_subject: int = 10) -> np.ndarray:
+        """The same sample, as normalized spectral descriptors."""

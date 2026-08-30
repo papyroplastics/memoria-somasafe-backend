@@ -1,8 +1,5 @@
-"""On-device LiteRT training/eval driver shared by the client harnesses.
-
-Runs a trainable ``.tflite`` through LiteRT's ``CompiledModel`` exactly as the
-phone does, so a headless harness exercises the same runtime as the device.
-"""
+"""On-device LiteRT training/eval driver shared by the client harnesses, running a
+trainable ``.tflite`` through LiteRT's ``CompiledModel`` exactly as the phone does."""
 
 import numpy as np
 from ai_edge_litert import schema_py_generated as tflite_schema
@@ -13,9 +10,7 @@ from common.config import DISABLE_TQDM
 
 
 def _tensor_quantization(tflite_bytes: bytes, name: str) -> tuple[float, int]:
-    """Per-tensor (scale, zero_point) for a named tensor, read straight from the
-    flatbuffer schema: CompiledModel's tensor-detail dicts no longer carry a
-    'quantization' key on this LiteRT version (name/index/dtype/shape only)."""
+    """Per-tensor (scale, zero_point) for a named tensor, read from the flatbuffer schema."""
     model = tflite_schema.Model.GetRootAsModel(tflite_bytes, 0)
     for i in range(model.SubgraphsLength()):
         subgraph = model.Subgraphs(i)
@@ -27,10 +22,8 @@ def _tensor_quantization(tflite_bytes: bytes, name: str) -> tuple[float, int]:
     raise ValueError(f"tensor '{name}' not found in any subgraph")
 
 class LiteRTClient:
-    """Trains and evaluates a trainable ``.tflite`` through LiteRT's CompiledModel,
-    driving the model's ``train`` / ``save`` / ``eval`` signatures exactly as the
-    on-device client does. Weight updates accumulate in the compiled model's
-    resource variables across ``train`` calls; ``save`` reads them back out."""
+    """Trains and evaluates a trainable ``.tflite`` through LiteRT's CompiledModel, driving
+    the model's ``train`` / ``save`` / ``eval`` signatures exactly as the on-device client does."""
 
     def __init__(self, tflite_bytes: bytes, tensor_names: list[str]):
         self.model = CompiledModel.from_buffer(tflite_bytes)
@@ -74,10 +67,7 @@ class LiteRTClient:
         return self._run("save", [])["weights"].astype(np.float32)
 
     def restore(self, weights: np.ndarray) -> None:
-        """Load a flat global-weights buffer into the compiled model's resource
-        variables via the ``restore`` signature, so a fresh snapshot pulled from
-        ``/model/weights`` can be applied without rebuilding the model from a new
-        trainable artifact."""
+        """Loads a flat global-weights buffer into the compiled model's resource variables."""
         [name] = self.signatures["restore"]["inputs"]
         buffer = self.model.create_input_buffer_by_name("restore", name)
         buffer.write(np.ascontiguousarray(weights, dtype=np.float32))
@@ -88,18 +78,13 @@ class LiteRTClient:
         self.model.run_by_name("restore", {name: buffer}, output_map)
 
     def eval(self, datapoint) -> dict[str, np.ndarray]:
-        """Run the eval signature on one dataset batch, returning the output tensors
-        keyed by output name. Extra datapoint tensors (targets the eval signature
-        doesn't take, like the MLP's labels) are matched out by ``_run`` by name."""
+        """Runs the eval signature on one dataset batch, returning the output tensors keyed by name."""
         return self._run("eval", [t.numpy() for t in datapoint])
 
 
-def infer_int8(tflite_bytes: bytes, X_norm: np.ndarray, signature: str = "infer") -> np.ndarray:
-    """Runs a quantized int8 model's single-input/single-output signature over
-    per-row logits, quantizing/dequantizing with the tensors' own scale/zero-point
-    exactly as the on-device int8 runtime does. The batch size is baked into the
-    model's input shape, so the rows are fed a batch at a time and the tail is padded
-    by repeating the last row (the padding is dropped from the result)."""
+def infer_int8(tflite_bytes: bytes, X_norm: np.ndarray, signature: str = "eval") -> np.ndarray:
+    """Runs a quantized int8 model's single-input/single-output signature over per-row
+    logits, quantizing/dequantizing exactly as the on-device int8 runtime does."""
     if len(X_norm) == 0:
         return np.empty(0, dtype=np.float32)
 

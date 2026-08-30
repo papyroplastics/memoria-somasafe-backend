@@ -1,15 +1,8 @@
-"""Dataset processing for the PPG-DaLiA anomaly-detection pipeline.
-
-Owns everything between the raw download and the numpy arrays on disk: the
-per-stage build functions (raw extraction, synthetic-anomaly injection, feature
-extraction), the normalization params they save, and the shared constants.
-``scripts/system/get_dataset.py`` is a thin CLI that downloads the archive and
-sequences these stages. Deliberately free of TensorFlow — ``ml.loading`` builds
-the tf.data pipelines on top of these arrays.
-"""
+"""Dataset processing for the PPG-DaLiA anomaly-detection pipeline: raw extraction,
+per-kind fully-anomalous copies, anomaly injection, and the feature extractor.
+Anomaly mix, features and normalization are computed at load time by ``ml.sources``."""
 
 import pickle as pkl
-import random
 from pathlib import Path
 import numpy as np
 
@@ -18,12 +11,6 @@ from common.config import SEED
 RAW_SUBDIR = 'PPG_FieldStudy'
 CLEAN_SUBDIR = 'clean-signals'
 ANOMALOUS_SUBDIR = 'anomalous-signals'      # per-type fully-anomalous BVP: <kind>/S*/
-MIXED_SUBDIR = 'mixed-signals'              # realistic ~50% mix: S*/ (bvp + binary labels)
-MIXED_FEATURE_SUBDIR = 'mixed-features'     # features windowed from mixed-signals
-CLEAN_FEATURE_SUBDIR = 'clean-features'     # features windowed from clean-signals (all-normal)
-NORM_PARAMS_FILE = 'norm-params.npy'
-FEATURE_STATS_FILE = 'feature_stats.npy'
-DESCRIPTOR_PARAMS_FILE = 'descriptor-params.npy'
 ACTIVITY_FILE = 'activity.npy'
 
 BVP_RATE = 64
@@ -65,22 +52,8 @@ def get_sorted_paths(dataset_dir: Path) -> list[Path]:
 # Stage 1 — Extract raw signals
 # ---------------------------------------------------------------------------
 
-def weighted_mean_std(stats: list[tuple[int, float, float]]) -> tuple[float, float]:
-    """Combine per-subject (count, mean, std) into a single mean/std, weighting
-    each subject by its sample count so longer recordings count proportionally."""
-    sizes = np.array([n for n, _, _ in stats], dtype=np.float64)
-    means = np.array([m for _, m, _ in stats], dtype=np.float64)
-    stds  = np.array([s for _, _, s in stats], dtype=np.float64)
-    total = sizes.sum()
-    mean = float((sizes * means).sum() / total)
-    std  = float((sizes * stds).sum() / total)
-    return mean, std
-
-
 def upsample_activity(activity: np.ndarray, length: int) -> np.ndarray:
-    """The 4 Hz activity track resampled onto the BVP sample grid, so it indexes exactly
-    like bvp.npy. Held constant across each 4 Hz step; a short tail is padded with 0
-    (transient), which no activity filter accepts."""
+    """The 4 Hz activity track resampled onto the BVP sample grid, zero-padded on any short tail."""
     upsampled = np.repeat(activity.reshape(-1), BVP_RATE // ACTIVITY_RATE)[:length]
     pad = length - len(upsampled)
     if pad > 0:
@@ -89,21 +62,11 @@ def upsample_activity(activity: np.ndarray, length: int) -> np.ndarray:
 
 
 def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
-    """Extract raw BVP (64 Hz), ACC magnitude (32 Hz) and the activity track per subject.
-
-    BVP and ACC are stored raw (un-normalized, different lengths) so anomaly
-    injection and load-time normalization can work from a single source. The global
-    BVP mean/std (size-weighted across subjects) goes to norm-params.npy. ACC is
-    stored for feature extraction only; it is not fed to any model, so it needs no
-    normalization params. The activity track is upsampled to the BVP grid and stored
-    alongside it, so every windowing grid can derive its own per-window activity from
-    one array (see ml.sources.dalia).
-    """
+    """Extract raw BVP (64 Hz), ACC magnitude (32 Hz) and the upsampled activity track per subject."""
     subjects_dir.mkdir(parents=True, exist_ok=True)
 
     subject_raw_dirs = get_sorted_paths(raw_dir)
 
-    bvp_stats: list[tuple[int, float, float]] = []
     processed = []
 
     for subject_raw_dir in subject_raw_dirs:
@@ -125,21 +88,12 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
         np.save(save_dir / 'acc.npy', acc)
         np.save(save_dir / ACTIVITY_FILE, activity)
 
-        bvp_stats.append((len(bvp), float(bvp.mean()), float(bvp.std())))
         processed.append(subject_dir_name)
 
         low = float(np.isin(activity, LOW_ACTIVITY).mean())
         print(f"  {subject_dir_name}: BVP {len(bvp)} samples @ {BVP_RATE} Hz, "
               f"ACC {len(acc)} samples @ {ACC_RATE} Hz, {low:.1%} low-activity")
 
-    if not processed:
-        return []
-
-    bvp_mean, bvp_std = weighted_mean_std(bvp_stats)
-    np.save(subjects_dir / NORM_PARAMS_FILE,
-            np.array([bvp_mean, bvp_std], dtype=np.float32))
-
-    print(f"  Global BVP mean/std saved to {subjects_dir / NORM_PARAMS_FILE}")
     return processed
 
 
@@ -192,32 +146,32 @@ def apply_anomaly(segment: np.ndarray, kind: str) -> np.ndarray:
     return seg.astype(np.float32)
 
 
-def inject_mixed(bvp: np.ndarray, anomaly_prob: float) -> tuple[np.ndarray, np.ndarray]:
-    """Inject a window-aligned mix of random anomaly kinds into a raw BVP signal.
+def subject_rng(sid: str) -> np.random.Generator:
+    """The RNG a subject's load-time anomaly mix is drawn from, keyed by subject id."""
+    return np.random.default_rng([SEED, int(sid[1:])])
 
-    Anomalies span whole ``BVP_WINDOW``-sample windows (no partial-overlap windows),
-    so the per-window binary label maps 1:1 onto the feature/distillation grid.
-    Returns (anomalous_bvp, win_labels) with win_labels of length
-    ``len(bvp) // BVP_WINDOW``.
-    """
+
+def mix_signal(bvp: np.ndarray, rng: np.random.Generator,
+               anomaly_prob: float = ANOMALY_PROB) -> tuple[np.ndarray, np.ndarray]:
+    """Inject a window-aligned mix of random anomaly kinds, returning (anomalous_bvp, win_labels)."""
     result = bvp.copy()
     n_windows = len(bvp) // BVP_WINDOW
-    win_labels = np.zeros(n_windows, dtype=np.float32)
+    win_labels = np.zeros(max(n_windows, 0), dtype=np.float32)
     if n_windows == 0:
         return result.astype(np.float32), win_labels
 
     target = int(n_windows * anomaly_prob)
 
     while int(win_labels.sum()) < target:
-        length = random.randint(MIN_ANOMALY_WINDOWS, MAX_ANOMALY_WINDOWS)
-        start  = random.randint(0, n_windows - length + 1)
+        length = int(rng.integers(MIN_ANOMALY_WINDOWS, MAX_ANOMALY_WINDOWS + 1))
+        start = int(rng.integers(0, n_windows - length + 1))
 
-        wins   = slice(start, start + length)
+        wins = slice(start, start + length)
         if win_labels[wins].any():
             continue
 
         seg = slice(start * BVP_WINDOW, (start + length) * BVP_WINDOW)
-        kind = random.choice(ANOMALY_KINDS)
+        kind = ANOMALY_KINDS[int(rng.integers(len(ANOMALY_KINDS)))]
         result[seg] = apply_anomaly(result[seg], kind)
 
         win_labels[wins] = 1.0
@@ -243,10 +197,7 @@ def inject_single_kind(bvp: np.ndarray, kind: str, rng: np.random.Generator) -> 
 
 
 def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
-    """Per-type fully-anomalous BVP for isolated testing: for each kind in
-    ANOMALY_KINDS, apply it to every window of each subject's clean BVP. Layout:
-    ``<anomalous_dir>/<kind>/S*/bvp.npy``. ACC is unchanged (load from clean-signals).
-    """
+    """Per-type fully-anomalous BVP for isolated testing, written to ``<anomalous_dir>/<kind>/S*/bvp.npy``."""
     rng = np.random.default_rng(SEED)
 
     for kind in ANOMALY_KINDS:
@@ -262,31 +213,8 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
         print(f"  {kind}: {len(subject_dirs)} subjects")
 
 
-def create_mixed_signals(subjects_dir: Path, mixed_dir: Path):
-    """Realistic ~ANOMALY_PROB mix of anomaly kinds on window-aligned spans.
-
-    Only BVP is modified; ACC is not stored here (load from clean-signals). bvp.npy
-    + per-window binary labels.npy; used for threshold-picking, distillation and
-    feature-mlp training.
-    """
-    mixed_dir.mkdir(parents=True, exist_ok=True)
-
-    for subject_dir in get_sorted_paths(subjects_dir):
-        subject_id = subject_dir.name
-        bvp = np.load(subject_dir / 'bvp.npy')
-
-        mixed_bvp, win_labels = inject_mixed(bvp, ANOMALY_PROB)
-
-        save_dir = mixed_dir / subject_id
-        save_dir.mkdir(parents=True, exist_ok=True)
-        np.save(save_dir / 'bvp.npy',    mixed_bvp)
-        np.save(save_dir / 'labels.npy', win_labels)
-
-        print(f"  {subject_id}: {len(win_labels)} windows, {win_labels.mean():.1%} anomalous")
-
-
 # ---------------------------------------------------------------------------
-# Stage 3 — Feature dataset
+# Load-time feature extraction
 # ---------------------------------------------------------------------------
 
 def extract_features(bvp_window: np.ndarray, acc_window: np.ndarray) -> np.ndarray:
@@ -320,72 +248,3 @@ def extract_features(bvp_window: np.ndarray, acc_window: np.ndarray) -> np.ndarr
     feats.append(float(power[band].sum() / (power.sum() + 1e-8)))
 
     return np.asarray(feats, dtype=np.float32)
-
-
-def build_feature_dataset(signal_dir: Path, subjects_dir: Path, feature_dir: Path):
-    """Window BVP and raw ACC into non-overlapping 8-second windows and extract features.
-
-    BVP comes from ``signal_dir`` (raw, un-normalized): mixed-signals for the training
-    set, or clean-signals for the anomaly-free export set. ACC comes from
-    ``subjects_dir`` (clean-signals; raw magnitude, 32 Hz) — the anomalies are injected
-    into BVP only. Per-window labels are read from ``signal_dir/S*/labels.npy``
-    when present (mixed anomalies are window-aligned, so each window is fully clean or
-    fully anomalous); the clean signals carry no labels file, so every window is normal
-    (label 0). Features are stored per subject under S*/ raw (un-normalized), mirroring
-    what the device echoes; the global z-score stats are saved at the top level
-    (feature_stats.npy) and baked into the model as its z-score constants.
-    """
-    feature_dir.mkdir(parents=True, exist_ok=True)
-
-    per_subject: dict[str, tuple[np.ndarray, np.ndarray]] = {}
-
-    print("Building feature dataset from:", end="")
-    for subject_dir in get_sorted_paths(signal_dir):
-        subject_id = subject_dir.name
-        bvp = np.load(subject_dir / 'bvp.npy')          # mixed-anomaly or clean BVP
-        acc = np.load(subjects_dir / subject_id / 'acc.npy')
-
-        n_windows = min(
-            len(bvp) // BVP_WINDOW,
-            (len(acc) - ACC_WINDOW) // ACC_WINDOW + 1,
-        )
-
-        label_path = subject_dir / 'labels.npy'
-        win_lbl = (np.load(label_path) if label_path.exists()
-                   else np.zeros(max(0, n_windows), dtype=np.float32))
-
-        features: list[np.ndarray] = []
-        labels:   list[float]      = []
-        for i in range(max(0, n_windows)):
-            bvp_start = i * BVP_WINDOW
-            acc_start = i * ACC_WINDOW
-
-            bvp_win = bvp[bvp_start : bvp_start + BVP_WINDOW]
-            acc_win = acc[acc_start : acc_start + ACC_WINDOW]
-
-            features.append(extract_features(bvp_win, acc_win))
-            labels.append(float(win_lbl[i]))
-
-        per_subject[subject_id] = (
-            np.stack(features),
-            np.asarray(labels, dtype=np.float32).reshape(-1, 1),
-        )
-        print(f" {subject_id}", end="", flush=True)
-    print()
-
-    all_x = np.concatenate([x for x, _ in per_subject.values()])
-    mean = all_x.mean(axis=0)
-    std  = all_x.std(axis=0) + 1e-8
-
-    total = anomalous = 0
-    for subject_id, (x, y) in per_subject.items():
-        save_dir = feature_dir / subject_id
-        save_dir.mkdir(parents=True, exist_ok=True)
-        np.save(save_dir / 'features.npy', x.astype(np.float32))
-        np.save(save_dir / 'labels.npy',   y)
-        total += len(y)
-        anomalous += int(y.sum())
-
-    np.save(feature_dir / FEATURE_STATS_FILE, np.stack([mean, std]).astype(np.float32))
-    print(f"Saved {total} windows ({anomalous} anomalous) to {feature_dir}")
-

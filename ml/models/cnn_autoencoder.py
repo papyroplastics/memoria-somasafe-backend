@@ -4,29 +4,21 @@ import tensorflow as tf
 
 from ..layers import Conv1D, Dense, relu, upsample2
 from ..preprocessing import BVP_WINDOW
-from .common import TrainableAutoencoder, AutoencoderTrainer, autoencoder_norm_params
+from .common import SignalAutoencoder, AutoencoderTrainer
 
-class CNNAutoencoder(TrainableAutoencoder):
+class CNNAutoencoder(SignalAutoencoder):
     """Conv1D autoencoder over an 8-second BVP window, scored by reconstruction error.
-
-    Strided convolutions downsample the window, a dense projection collapses the
-    remaining time axis into one ``latent_dim`` code, and the decoder projects back and
-    reconstructs with nearest-neighbour upsampling + convolutions. Collapsing time is
-    the point: strided convs alone only shrink the time axis, leaving
-    ``(seq_len / 8) * channels`` values — as many numbers as the input, enough to copy
-    it verbatim rather than learn anything. No recurrence, so it quantizes cleanly and
-    avoids the LSTM's 1024-step unroll. ``seq_len`` must be divisible by ``2 ** 3``."""
+    Strided convolutions downsample the window into one ``latent_dim`` code; the decoder
+    projects back with nearest-neighbour upsampling. ``seq_len`` must be divisible by ``2 ** 3``."""
 
     def __init__(self, name: str, batch_size: int, seq_len: int,
-                 signal_mean, signal_std, n_signals: int = 1,
-                 hidden_dim: int = 32, latent_dim: int = 48,
+                 n_signals: int = 1, hidden_dim: int = 32, latent_dim: int = 48,
                  kernel_size: int = 5, n_outputs: int = 1,
                  diff_weight: float = 1.0, learning_rate: float = 5e-4,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
         super().__init__(name=name, batch_size=batch_size, seq_len=seq_len,
                          n_signals=n_signals, n_outputs=n_outputs,
-                         diff_weight=diff_weight,
-                         signal_mean=signal_mean, signal_std=signal_std)
+                         diff_weight=diff_weight)
 
         self.conv_blocks = 5
         self.subsample_factor = 2 ** self.conv_blocks
@@ -76,11 +68,10 @@ class CNNAutoencoder(TrainableAutoencoder):
 
 
 def get_model(data_root: Path, batch_size: int | None = None) -> CNNAutoencoder:
-    sig_mean, sig_std = autoencoder_norm_params(data_root)
     return CNNAutoencoder(
-        name='dalia_cnn_ae', batch_size=batch_size or TrainableAutoencoder.default_batch_size,
+        name='dalia_cnn_ae',
+        batch_size=batch_size or SignalAutoencoder.default_batch_size,
         seq_len=BVP_WINDOW,
-        signal_mean=sig_mean, signal_std=sig_std,
     )
 
 

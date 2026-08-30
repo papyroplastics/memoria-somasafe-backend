@@ -54,7 +54,6 @@ WEIGHTS_ID_HEADER = "X-Weights-ID"
 WEIGHTS_TIMESTAMP_HEADER = "X-Weights-Timestamp"
 SIGNATURE_HEADER = "X-Model-Signature"
 CONTRACT_VERSION_HEADER = "X-Contract-Version"
-NORM_PARAMS_HEADER = "X-Norm-Params"
 
 
 class ModelInfo(BaseModel):
@@ -258,7 +257,6 @@ def _settled_result(session: Session, job_id: uuid.UUID, user: User) -> Response
     version = session.get(ModelVersion, base.version_id)
     headers = {
         CONTRACT_VERSION_HEADER: str(version.contract_version),
-        NORM_PARAMS_HEADER: base64.b64encode(version.norm_params).decode(),
         "Content-Disposition": f'attachment; filename="{job.model_key}.tflite"',
     }
     if job.signature is not None:
@@ -357,7 +355,6 @@ def download_model(artifact: Artifact, key: str, version: int | None = None,
         }
         if artifact is Artifact.quantized:
             headers[CONTRACT_VERSION_HEADER] = str(ver.contract_version)
-            headers[NORM_PARAMS_HEADER] = base64.b64encode(ver.norm_params).decode()
             headers[SIGNATURE_HEADER] = base64.b64encode(baked.signature).decode()
 
         # zstd-compressed as stored; the client decompresses.

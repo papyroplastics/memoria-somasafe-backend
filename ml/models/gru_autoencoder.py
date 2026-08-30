@@ -4,26 +4,18 @@ import tensorflow as tf
 
 from ..layers import Dense, GRUCell
 from ..preprocessing import BVP_WINDOW
-from .common import TrainableAutoencoder, AutoencoderTrainer, autoencoder_norm_params
+from .common import SignalAutoencoder, AutoencoderTrainer
 
 
-class GRUAutoencoder(TrainableAutoencoder):
-    """GRU autoencoder for reconstruction-based anomaly detection.
-
-    Two stacked GRUCells encode the full-length BVP signal to a latent vector, which is
-    then fed at every decoder step to drive two stacked GRUCells back to the original
-    length. Lighter than LSTMAutoencoder (single state, fewer gates)."""
-
+class GRUAutoencoder(SignalAutoencoder):
     def __init__(self, name: str, batch_size: int, seq_len: int,
-                 signal_mean, signal_std, n_signals: int = 1,
-                 hidden_dim: int = 64, latent_dim: int = 32,
+                 n_signals: int = 1, hidden_dim: int = 64, latent_dim: int = 32,
                  learning_rate: float = 1e-3, n_outputs: int = 1,
                  diff_weight: float = 1.0, beta1: float = 0.9, beta2: float = 0.999,
                  epsilon: float = 1e-7):
         super().__init__(name=name, batch_size=batch_size, seq_len=seq_len,
                          n_signals=n_signals, n_outputs=n_outputs,
-                         diff_weight=diff_weight,
-                         signal_mean=signal_mean, signal_std=signal_std)
+                         diff_weight=diff_weight)
 
         self.enc_gru1 = GRUCell(n_signals, hidden_dim)
         self.enc_gru2 = GRUCell(hidden_dim, latent_dim)
@@ -56,11 +48,10 @@ class GRUAutoencoder(TrainableAutoencoder):
 
 
 def get_model(data_root: Path, batch_size: int | None = None) -> GRUAutoencoder:
-    sig_mean, sig_std = autoencoder_norm_params(data_root)
     return GRUAutoencoder(
-        name='dalia_gru_ae', batch_size=batch_size or TrainableAutoencoder.default_batch_size,
+        name='dalia_gru_ae',
+        batch_size=batch_size or SignalAutoencoder.default_batch_size,
         seq_len=BVP_WINDOW,
-        signal_mean=sig_mean, signal_std=sig_std,
     )
 
 

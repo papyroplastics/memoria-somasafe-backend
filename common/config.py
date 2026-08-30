@@ -22,6 +22,9 @@ WEEK = 7 * DAY
 # Storage of the trained artifacts served as-is (the train.py outputs).
 MODELS_DIR = Path(os.environ.get("MODELS_DIR", "shared/gen/models"))
 DATASETS_DIR = Path(os.environ.get("DATASETS_DIR", "shared/gen/datasets"))
+# Subject exports (the .ssds capture protobuf) the app imports and the firmware harness
+# streams; both read them straight out of shared/gen.
+EXPORTS_DIR = Path(os.environ.get("EXPORTS_DIR", "shared/gen/exports"))
 
 # Evaluation/experiment outputs (histories, reports, figures, distilled labels).
 # Separate from MODELS_DIR: those are serving artifacts the system consumes, this
@@ -29,7 +32,7 @@ DATASETS_DIR = Path(os.environ.get("DATASETS_DIR", "shared/gen/datasets"))
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
 
 # ECDSA P-256 private key the worker signs quantized-model payloads with; its public
-# half must be the srv_pub provisioned in the device's factory NVS (see shared/make_keys.sh
+# half must be the srv_pub provisioned in the device's factory NVS (see shared/Makefile
 # and firmware/scripts/gen_factory_nvs.py).
 SERVER_PRIVATE_KEY_FILE = Path(os.environ.get("SERVER_PRIVATE_KEY", "shared/gen/server-private-key.pem"))
 

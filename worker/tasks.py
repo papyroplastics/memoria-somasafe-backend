@@ -51,16 +51,6 @@ from ml.payload import sign_model
 from ml.saving import get_optimized_model, get_trainable_model
 from ml.training import trimmed_mean
 
-# Per-process cache of (model, representative_dataset, fingerprint, contract_version,
-# norm_bytes), built once per forked worker child so TensorFlow and the calibration
-# data load once per worker, not once per job. Models whose dataset is absent (not
-# trained yet) are skipped — the worker only ever touches models that scripts.seed_db
-# put in the DB.
-#
-# Population is deferred to worker_process_init (post-fork): TensorFlow is not
-# fork-safe once its runtime and thread pools exist, so initializing it in the
-# parent MainProcess would leave every prefork child deadlocked on inherited-locked
-# native mutexes the first time it runs a TF op.
 _models: dict[str, tuple] = {}
 
 @worker_process_init.connect
@@ -70,8 +60,7 @@ def _load_models(**_) -> None:
             trainer = MODELS[key].build_trainer(DATASETS_DIR)
             fingerprint = trainer.arch_fingerprint()
             rep = trainer.representative_dataset()
-            _models[key] = (trainer.model, rep, fingerprint,
-                            trainer.contract_version, trainer.norm_param_bytes())
+            _models[key] = (trainer.model, rep, fingerprint)
         except Exception as exc:  # missing dataset / build error — skip, don't crash boot
             print(f"[worker] model '{key}' unavailable, skipping: {exc}")
 
@@ -107,7 +96,7 @@ def quantize_submission(job_id: str) -> None:
                 raise ValueError(f"submission {job.submission_id} not found")
             if job.model_key not in _models:
                 raise ValueError(f"model '{job.model_key}' not initialized")
-            model, rep_dataset, fingerprint, contract_version, norm_bytes = _models[job.model_key]
+            model, rep_dataset, fingerprint = _models[job.model_key]
 
             base = session.get(GlobalWeights, submission.base_weights_id)
             if base is None:
@@ -132,7 +121,7 @@ def quantize_submission(job_id: str) -> None:
             local = (np.frombuffer(decompress(base.weights), dtype=np.float32) + delta).astype(np.float32)
             model.restore(tf.constant(local, dtype=tf.float32))
             optimized = bytes(get_optimized_model(model, rep_dataset))
-            job.signature = sign_model(optimized, contract_version, norm_bytes,
+            job.signature = sign_model(optimized, latest.contract_version,
                                        SERVER_PRIVATE_KEY_FILE)
             session.add(QuantizationResult(job_id=job.id, data=compress(optimized)))
             job.status = JobStatus.done
@@ -167,16 +156,15 @@ def validate_weight_submission(submission_id: int) -> None:
 
 
 def _bake_and_store(session: Session, key: str, latest, new_weights: np.ndarray,
-                    model, rep_dataset,
-                    contract_version: int, norm_bytes: bytes) -> Exception | None:
+                    model, rep_dataset) -> Exception | None:
     model.restore(tf.constant(new_weights, dtype=tf.float32))
     trainable = quantized = trainable_sig = quantized_sig = export_error = None
     try:
         trainable = bytes(get_trainable_model(model))
         quantized = bytes(get_optimized_model(model, rep_dataset))
-        trainable_sig = sign_model(trainable, contract_version, norm_bytes,
+        trainable_sig = sign_model(trainable, latest.contract_version,
                                    SERVER_PRIVATE_KEY_FILE)
-        quantized_sig = sign_model(quantized, contract_version, norm_bytes,
+        quantized_sig = sign_model(quantized, latest.contract_version,
                                    SERVER_PRIVATE_KEY_FILE)
     except Exception as exc:
         export_error = exc
@@ -188,9 +176,7 @@ def _bake_and_store(session: Session, key: str, latest, new_weights: np.ndarray,
     )
     session.add(snapshot)
     if export_error is None:
-        # Artifacts commit with the snapshot they were baked from, so a visible
-        # row always has them (signature covers the raw bytes — compress after).
-        session.flush()  # for the row id the artifacts are keyed by
+        session.flush()
         session.add(WeightsArtifact(weights_id=snapshot.id,
                                     artifact=Artifact.trainable,
                                     data=compress(trainable), signature=trainable_sig))
@@ -206,7 +192,7 @@ def _bake_and_store(session: Session, key: str, latest, new_weights: np.ndarray,
 def _aggregate_model(session: Session, key: str) -> str:
     if key not in _models:
         return "skipped: model not initialized"
-    model, rep_dataset, fingerprint, contract_version, norm_bytes = _models[key]
+    model, rep_dataset, fingerprint = _models[key]
 
     latest = get_latest_version(session, key)
     if latest is None or latest.fingerprint != fingerprint:
@@ -250,19 +236,11 @@ def _aggregate_model(session: Session, key: str) -> str:
     deltas = np.stack([np.frombuffer(sub.deltas, dtype=np.float32)
                        for sub in valid])
 
-    # aggregation over deltas: new global = reference global + trimmed mean of the
-    # accepted updates. With a shared base this is identical to aggregating absolute
-    # weights; trimmed mean is what bounds the influence of outlier/malicious deltas.
     reference_weights = np.frombuffer(decompress(reference.weights), dtype=np.float32)
     new_weights = (reference_weights + trimmed_mean(deltas, FED_TRIM_RATIO)).astype(np.float32)
 
-    # Bake the new weights into fresh serving artifacts. On success the new valid
-    # snapshot becomes the reference, so these deltas (keyed to the old base) fall
-    # out of the next window. A failed export leaves the reference unchanged, so
-    # they stay eligible and the round is retried next beat.
     export_error = _bake_and_store(
-        session, key, latest, new_weights,
-        model, rep_dataset, contract_version, norm_bytes)
+        session, key, latest, new_weights, model, rep_dataset)
     if export_error is not None:
         return (f"aggregated {len(valid)} submissions but artifact export failed "
                 f"(round invalidated): {export_error}")
@@ -302,7 +280,7 @@ def secure_aggregation(round_id: int) -> str:
         key = round.model_key
         if key not in _models:
             return "skipped: model not initialized"
-        model, rep_dataset, fingerprint, contract_version, norm_bytes = _models[key]
+        model, rep_dataset, fingerprint = _models[key]
 
         latest = get_latest_version(session, key)
         if latest is None or latest.id != round.version_id \
@@ -336,15 +314,13 @@ def secure_aggregation(round_id: int) -> str:
         reference = np.frombuffer(decompress(base.weights), dtype=np.float32)
         new_weights = (reference + mean_delta).astype(np.float32)
 
-        # No individual update is visible, so the only guard is aggregate-level:
-        # the mean of clipped deltas must be finite and stay within the clip bound.
         if not np.all(np.isfinite(new_weights)) \
                 or float(np.max(np.abs(mean_delta))) > round.clip_bound * 1.001:
             return _fail_round(session, round,
                                "aggregate failed sanity check (implausible mean delta)")
 
         export_error = _bake_and_store(session, key, latest, new_weights,
-                                       model, rep_dataset, contract_version, norm_bytes)
+                                       model, rep_dataset)
         round.status = (SecureRoundStatus.failed if export_error is not None
                         else SecureRoundStatus.aggregated)
         round.finished_at = utcnow()
@@ -358,10 +334,6 @@ def secure_aggregation(round_id: int) -> str:
 
 @app.task(name=CLEANUP_TASK)
 def cleanup_results() -> int:
-    """Drop results for jobs that were served (after a grace window) or never
-    claimed (after the TTL): the result row is deleted and the signature nulled.
-    Weight submissions are left untouched. The join keeps the sweep off the
-    blobs themselves — it only ever reads job columns."""
     now = utcnow()
     grace_cutoff = now - timedelta(seconds=SERVE_GRACE_SECONDS)
     ttl_cutoff = now - timedelta(seconds=RESULT_TTL_SECONDS)

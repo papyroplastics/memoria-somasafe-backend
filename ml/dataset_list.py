@@ -30,15 +30,8 @@ DATASETS: dict[str, DatasetSpec] = {
     ),
 }
 
-# What every Trainer trains and evaluates on. Consumers of Trainer are the system itself
-# (train.py, fed_client.py, worker.tasks), which has no reason to pick a dataset; the
-# scripts that do care build a source from DATASETS themselves.
 TRAINING_DATASET = 'ppg-dalia-low'
-
-# int8 calibration always sees every activity: the device runs everywhere, so the tensor
-# scales must cover the full range, not only the range the model was trained on.
 CALIBRATION_DATASET = 'ppg-dalia'
-
 
 def training_source(data_root: Path) -> DataSource:
     return DATASETS[TRAINING_DATASET].build(data_root)

@@ -1,14 +1,14 @@
 """Per-window anomaly scoring: the autoencoder's reconstruction MSE, thresholded at the
-``1 - expected_fpr`` quantile of clean-window scores — per subject, or over all subjects
-pooled. See ../../../shared/docs/anomalies-and-distillation.md for why the expected FPR is
-calibrated on Youden's J.
-"""
+``1 - expected_fpr`` quantile of clean-window scores, per subject or pooled. See
+../../../shared/docs/anomalies-and-distillation.md for why the expected FPR is calibrated
+on Youden's J."""
 
 import numpy as np
 
 import tensorflow as tf
 from ml.metrics import classification_report
-from ml.models.common import TrainableAutoencoder
+from ml.models.common import DescriptorAutoencoder, TrainableAutoencoder
+from ml.preprocessing import BVP_WINDOW
 from ml.sources.common import DataSource
 
 
@@ -89,12 +89,18 @@ def scored_subjects(source: DataSource, subjects: set[str] | None = None) -> lis
             if subjects is None or sid in subjects]
 
 
+def datapoints(model: TrainableAutoencoder, source: DataSource, sid: str,
+               variant: str) -> np.ndarray:
+    """One subject's datapoints for a variant, in whatever the model eats."""
+    if isinstance(model, DescriptorAutoencoder):
+        return source.descriptors(sid, variant, BVP_WINDOW, BVP_WINDOW)
+    return source.signal_windows(sid, variant, model.seq_len, model.seq_len)
+
+
 def score_subjects(model: TrainableAutoencoder, source: DataSource, variant: str,
                    subjects: set[str] | None = None) -> dict[str, np.ndarray]:
-    """Per-window reconstruction error for one signal variant, on the non-overlapping
-    window grid the labels live on — so the scores index-align with ``mixed_truth``."""
-    window = model.seq_len
-    return {sid: window_errors(model, source.signal_windows(sid, variant, window, window))
+    """Returns per-window reconstruction error for one signal variant."""
+    return {sid: window_errors(model, datapoints(model, source, sid, variant))
             for sid in scored_subjects(source, subjects)}
 
 

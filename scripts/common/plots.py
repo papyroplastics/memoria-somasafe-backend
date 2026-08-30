@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import matplotlib.pyplot as plt
+import numpy as np
 
 from ml.training import History
 
@@ -9,10 +10,7 @@ def line_plot(path: Path, x: list, series: dict[str, list], xlabel: str, ylabel:
               title: str | None = None, marker: str = 'o-',
               vline: tuple[float, str] | None = None, logx: bool = False,
               diagonal: bool = False) -> None:
-    """One or more series against a shared x axis. A single series is drawn unlabeled
-    (no legend); several get a legend keyed by name. ``vline`` marks an x position with
-    a labelled dashed rule (e.g. the operating point a sweep selected). ``diagonal`` draws
-    a dashed y=x reference line (the random-classifier baseline on a ROC plot)."""
+    """Plots one or more series against a shared x axis."""
     fig, ax = plt.subplots()
     markers = [marker, 's-', '^-', 'd-']
     for i, (name, values) in enumerate(series.items()):
@@ -38,9 +36,7 @@ def line_plot(path: Path, x: list, series: dict[str, list], xlabel: str, ylabel:
 def roc_grid(path: Path, order: list[str], curves: dict[str, tuple[list, list]],
              highlight: set[str], xlabel: str, ylabel: str, title: str,
              ncols: int = 5) -> None:
-    """One small ROC panel per subject on a shared grid, so per-subject detectability is
-    comparable at a glance. ``curves[sid]`` is ``(fpr, recall)``; subjects in ``highlight``
-    are drawn in a contrasting colour (e.g. the run's held-out pair)."""
+    """Draws one small ROC panel per subject on a shared grid."""
     nrows = -(-len(order) // ncols)
     fig, axes = plt.subplots(nrows, ncols, figsize=(3 * ncols, 2.4 * nrows),
                              sharex=True, sharey=True)
@@ -63,12 +59,25 @@ def roc_grid(path: Path, order: list[str], curves: dict[str, tuple[list, list]],
     print(f"saved plot to {path}")
 
 
-def bar_plot(path: Path, x: list, values: list[float], xlabel: str, ylabel: str,
-             title: str, mean_line: float | None = None) -> None:
+def bar_plot(path: Path, x: list, values: list[float] | dict[str, list[float]],
+             xlabel: str, ylabel: str, title: str, mean_line: float | None = None,
+             hlines: list[tuple[float, str]] | None = None) -> None:
+    """Draws one bar per x, or several grouped bars per x when ``values`` is a dict of named series."""
     fig, ax = plt.subplots()
-    ax.bar(x, values)
+    if isinstance(values, dict):
+        width = 0.8 / len(values)
+        offsets = np.arange(len(x)) - 0.4 + width / 2
+        for i, (name, series) in enumerate(values.items()):
+            ax.bar(offsets + i * width, series, width, label=name)
+        ax.set_xticks(np.arange(len(x)))
+        ax.set_xticklabels(x)
+    else:
+        ax.bar(x, values)
     if mean_line is not None:
         ax.axhline(mean_line, color='k', linestyle='--', label=f'mean {mean_line:.4f}')
+    for i, (y, label) in enumerate(hlines or []):
+        ax.axhline(y, color='k', linestyle=(':' if i else '--'), linewidth=1, label=label)
+    if mean_line is not None or hlines or isinstance(values, dict):
         ax.legend()
     ax.set_xlabel(xlabel)
     ax.set_ylabel(ylabel)
@@ -79,8 +88,7 @@ def bar_plot(path: Path, x: list, values: list[float], xlabel: str, ylabel: str,
 
 
 def plot_history(history: History, primary_metric: str, result_dir: Path) -> None:
-    """Training loss and the held-out metric against the step, on twin y axes — they
-    have unrelated scales."""
+    """Plots training loss and the held-out metric against the step, on twin y axes."""
     steps = [h[0] for h in history]
 
     fig, ax = plt.subplots()

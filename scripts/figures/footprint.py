@@ -1,19 +1,8 @@
 """Systems / footprint table (report Sec. 5.6): one table collating the edge-cost figures
-that can be derived from the models and their exported artifacts:
-
-  - parameter count per model (flat trainable-weight vector length);
-  - float32 trainable vs. int8 quantized .tflite size + compression ratio;
-  - bytes uploaded per round (a dense float32 weight delta) and downloaded (the trainable
-    artifact) by a client.
-
-The rows that come from the phone (on-device training time per epoch) and the ESP32 (TFLM
-arena size, inference latency, detection quality retained after int8 as measured on-device),
-plus aggregation round wall-time, are *pasted in* to the report table from the app/firmware
-measurements (see report/planificacion/obtencion-de-resultados.md) — they are listed here as
-explicit TODO rows, not measured by this script. Emits CSV + companion text.
-
-    uv run -m scripts.figures.footprint
-"""
+derivable from the models and their exported artifacts — parameter count, float32
+trainable vs. int8 quantized .tflite size and compression ratio, and bytes uploaded/
+downloaded per round by a client. Rows measured on the phone/ESP32/server are pasted in
+by hand and listed here only as TODO placeholders."""
 
 import argparse
 
@@ -21,7 +10,6 @@ from common.config import DATASETS_DIR, MODELS_DIR, RESULTS_DIR
 from ml.model_list import MODELS
 from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 
-# Edge-cost rows the phone/firmware supply; pasted into the report table by hand.
 PASTE_IN_ROWS = [
     "on-device training time per epoch (phone, logcat)",
     "aggregation round wall-time (server)",
@@ -56,7 +44,7 @@ def main() -> None:
             'trainable_bytes': trainable if trainable is not None else 'N/A',
             'quantized_bytes': quantized if quantized is not None else 'N/A',
             'compression_ratio': f'{ratio:.2f}' if ratio is not None else 'N/A',
-            'upload_delta_bytes': params * 4,  # dense float32 weight delta
+            'upload_delta_bytes': params * 4,
             'download_bytes': trainable if trainable is not None else 'N/A',
         })
         print(f"{key}: params={params} trainable={trainable} quantized={quantized} "

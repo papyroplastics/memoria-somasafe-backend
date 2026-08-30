@@ -62,7 +62,7 @@ def eval_logits_float(model, X: np.ndarray) -> np.ndarray:
 
 
 def load_features(source: DataSource, sid: str) -> np.ndarray:
-    return source.features(sid)[0]
+    return source.features(sid, MIXED)
 
 
 
@@ -116,8 +116,6 @@ if __name__ == "__main__":
     # is needed for here: it owns the feed dict the int8 converter expects.
     base = MODELS[args.student].build_trainer(data_dir, args.batch_size)
     rep_dataset = base.representative_dataset()
-    feat_mean = base.model.feat_mean.numpy()
-    feat_std = base.model.feat_std.numpy()
 
     subjects = source.subject_ids()
     print(f"\nLeave-one-subject-out personalization over {len(subjects)} subjects "
@@ -155,7 +153,6 @@ if __name__ == "__main__":
         y_distill = distilled[sid]
         n_train = int(len(X) * args.train_split)
         X_ev, y_ev = X[n_train:], y_true[n_train:]
-        X_ev_norm = (X_ev - feat_mean) / feat_std
 
         global_model = MODELS[args.student].build_model(data_dir, args.batch_size)
         global_model.restore(tf.constant(global_weights, dtype=tf.float32))
@@ -171,9 +168,9 @@ if __name__ == "__main__":
 
         logits = {
             'global_float': eval_logits_float(global_model, X_ev),
-            'global_int8': infer_int8(global_int8, X_ev_norm),
+            'global_int8': infer_int8(global_int8, X_ev),
             'personal_float': eval_logits_float(personal_model, X_ev),
-            'personal_int8': infer_int8(personal_int8, X_ev_norm),
+            'personal_int8': infer_int8(personal_int8, X_ev),
             'direct_float': eval_logits_float(direct_model, X_ev),
         }
         row = {'subject': sid, 'n_eval': len(X_ev)}

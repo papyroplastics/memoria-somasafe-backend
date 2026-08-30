@@ -1,21 +1,8 @@
 """Non-IID / clients / LOSO sensitivity sweeps (report Sec. 5.7): simulation sweeps over
-`federated_loop` arguments, to show the conclusions do not depend on a lucky
-configuration. Three sweeps, each emitting a figure + CSV + companion summary:
-
-  - participants:  final metric vs. number of participating client subjects per round.
-  - local-epochs:  final metric vs. local epochs per round.
-  - loso:          leave-one-subject-out rotation of the held-out subject; the final metric
-                   per fold, reported as mean +/- std (PPG-DaLiA has 15 subjects, so an
-                   unseen subject is always held out — the curve is generalization, not
-                   memorization).
-
-Like byzantine.py these have to train (they sweep configurations no train.py run
-produces), but every run trains a fresh model over the same subject datasets, which are
-built once up front since they never depend on the weights.
-
-    uv run -m scripts.figures.sensitivity cnn-ae --rounds 5
-    uv run -m scripts.figures.sensitivity cnn-ae --sweep loso --loso-folds 5
-"""
+`federated_loop` arguments — participants per round, local epochs per round, and
+leave-one-subject-out rotation — to show the conclusions do not depend on a lucky
+configuration. Each sweep trains a fresh model per run over the same subject datasets and
+emits a figure, CSV and companion summary."""
 
 import argparse
 
@@ -35,9 +22,7 @@ def better_direction(metric: str) -> str:
 
 def final_metric(key: str, clients: list, eval_dataset, local_epochs: int,
                  rounds: int) -> float:
-    """The held-out primary metric after the last round of one federated run. The model
-    is rebuilt per run so a loop that mutates the weights never leaks into the next
-    configuration; the subject datasets are built once by the caller and reused."""
+    """The held-out primary metric after the last round of one federated run."""
     trainer = MODELS[key].build_trainer(DATASETS_DIR)
     history = federated_loop(trainer, clients, eval_dataset, local_epochs, rounds)
     return history[-1][2][trainer.primary_metric]
@@ -141,19 +126,17 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('model', choices=sorted(MODELS), help='Model to sweep')
-    parser.add_argument('--sweep', choices=[*SWEEPS, 'all'], default='all',
-                        help='Which sweep to run (default: all)')
-    parser.add_argument('--rounds', type=int, default=5, help='Global rounds (default: 10)')
+    parser.add_argument('--sweep', choices=[*SWEEPS, 'all'], default='all', help='Which sweep to run')
+    parser.add_argument('--rounds', type=int, default=5, help='Global rounds')
     parser.add_argument('--local-epochs', type=int, default=2,
-                        help='Local epochs per round for the non-local-epoch sweeps (default: 2)')
+                        help='Local epochs per round for the non-local-epoch sweeps')
     parser.add_argument('--eval-subjects', type=int, default=2,
-                        help='Subjects held out for the participants/local-epochs sweeps (default: 2)')
+                        help='Subjects held out for the participants/local-epochs sweeps')
     parser.add_argument('--min-participants', type=int, default=2,
-                        help='Smallest client count in the participants sweep (default: 2)')
+                        help='Smallest client count in the participants sweep')
     parser.add_argument('--max-local-epochs', type=int, default=5,
-                        help='Largest local-epoch count in that sweep (default: 5)')
-    parser.add_argument('--loso-folds', type=int, default=0,
-                        help='LOSO folds (0 = every subject; default: 0)')
+                        help='Largest local-epoch count in that sweep')
+    parser.add_argument('--loso-folds', type=int, default=0, help='LOSO folds (0 = every subject)')
     args = parser.parse_args()
 
     trainer = MODELS[args.model].build_trainer(DATASETS_DIR)

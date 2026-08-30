@@ -6,10 +6,11 @@ from numpy.lib.stride_tricks import sliding_window_view
 from common.config import SEED
 
 from .common import DataSource
+from ..spectral import descriptors as window_descriptors
 from ..preprocessing import (
     ACC_WINDOW, ACTIVITY_FILE, ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_WINDOW,
-    CLEAN_SUBDIR, FEATURE_STATS_FILE, MIXED_FEATURE_SUBDIR, MIXED_SUBDIR,
-    NORM_PARAMS_FILE, DatasetUnavailibleError, get_sorted_paths,
+    CLEAN_SUBDIR, N_FEATURES, DatasetUnavailibleError, extract_features,
+    get_sorted_paths, mix_signal, subject_rng,
 )
 
 CLEAN = 'clean'
@@ -19,14 +20,7 @@ VARIANTS = (CLEAN, MIXED, *ANOMALY_KINDS)
 
 class DaliaSource(DataSource):
     """PPG-DaLiA as ml.preprocessing wrote it to disk, optionally restricted to the
-    windows a subject spent in one of ``activities``.
-
-    The filter is strict: a window survives only if every one of its samples carries an
-    allowed activity id, so windows straddling an activity change — and the transient
-    periods between activities (id 0) — are dropped. It is derived from the single
-    per-sample activity track stored next to bvp.npy, so the same window index means the
-    same eight seconds on every grid and for every variant.
-    """
+    windows a subject spent in one of ``activities``. """
 
     def __init__(self, data_root: Path, key: str = 'ppg-dalia',
                  activities: tuple[int, ...] | None = None):
@@ -34,13 +28,12 @@ class DaliaSource(DataSource):
         self.data_root = data_root
         self.activities = activities
         self.clean_dir = data_root / CLEAN_SUBDIR
-        self.feature_dir = data_root / MIXED_FEATURE_SUBDIR
+        self._mixed: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        self._stats: dict[tuple[str, str], tuple[np.ndarray, np.ndarray]] = {}
 
     def signal_dir(self, variant: str) -> Path:
         if variant == CLEAN:
             return self.clean_dir
-        if variant == MIXED:
-            return self.data_root / MIXED_SUBDIR
         if variant in ANOMALY_KINDS:
             return self.data_root / ANOMALOUS_SUBDIR / variant
         raise ValueError(f"unknown signal variant {variant!r}, expected one of {VARIANTS}")
@@ -59,7 +52,7 @@ class DaliaSource(DataSource):
         count = (n_bvp - window) // shift + 1 if n_bvp >= window else 0
         if window == BVP_WINDOW and shift == BVP_WINDOW:
             # The feature grid is also bounded by ACC, which runs at half the rate and
-            # can end a window short (see preprocessing.build_feature_dataset).
+            # can end a window short (see extract_features' pairing of the two).
             n_acc = self._length(self.clean_dir / sid / 'acc.npy')
             count = min(count, (n_acc - ACC_WINDOW) // ACC_WINDOW + 1)
         return max(count, 0)
@@ -80,53 +73,93 @@ class DaliaSource(DataSource):
         starts = np.arange(count) * shift
         return (excluded[starts + window] - excluded[starts]) == 0
 
-    def signal_windows(self, sid: str, variant: str, window: int,
-                       shift: int) -> np.ndarray:
+    # -- raw streams ---------------------------------------------------------
+
+    def _mix(self, sid: str) -> tuple[np.ndarray, np.ndarray]:
+        """The subject's mixed signal and its per-window labels, built once per source."""
+        if sid not in self._mixed:
+            self._mixed[sid] = mix_signal(self.signal(sid, CLEAN), subject_rng(sid))
+        return self._mixed[sid]
+
+    def signal(self, sid: str, variant: str) -> np.ndarray:
+        if variant == MIXED:
+            return self._mix(sid)[0]
         path = self.signal_dir(variant) / sid / 'bvp.npy'
         if not path.exists():
             raise DatasetUnavailibleError(self.signal_dir(variant))
-        signal = np.load(path)
+        return np.load(path)
+
+    def acc_signal(self, sid: str) -> np.ndarray:
+        return np.load(self.clean_dir / sid / 'acc.npy')
+
+    def _raw_windows(self, sid: str, variant: str, window: int,
+                     shift: int) -> np.ndarray:
+        """``(n, window)`` un-normalized BVP windows on the kept grid."""
+        signal = self.signal(sid, variant)
         count = self.n_windows(sid, window, shift)
         if count == 0:
-            return np.empty((0, window, 1), dtype=np.float32)
+            return np.empty((0, window), dtype=np.float32)
         windows = sliding_window_view(signal, window)[::shift][:count]
-        kept = windows[self.window_mask(sid, window, shift)]
-        return kept.reshape(-1, window, 1).astype(np.float32)
+        return windows[self.window_mask(sid, window, shift)].astype(np.float32)
 
-    def _feature_arrays(self, sid: str) -> tuple[np.ndarray, np.ndarray]:
-        subject_dir = self.feature_dir / sid
-        if not subject_dir.is_dir():
-            raise DatasetUnavailibleError(self.feature_dir)
-        x = np.load(subject_dir / 'features.npy').astype(np.float32)
-        y = np.load(subject_dir / 'labels.npy').astype(np.float32).reshape(-1, 1)
-        count = min(len(x), len(y), self.n_windows(sid, BVP_WINDOW, BVP_WINDOW))
-        mask = self.window_mask(sid, BVP_WINDOW, BVP_WINDOW)[:count]
-        return x[:count][mask], y[:count][mask]
+    def raw_features(self, sid: str, variant: str) -> np.ndarray:
+        bvp = self._raw_windows(sid, variant, BVP_WINDOW, BVP_WINDOW)
+        if not len(bvp):
+            return np.empty((0, N_FEATURES), dtype=np.float32)
 
-    def features(self, sid: str) -> tuple[np.ndarray, np.ndarray]:
-        return self._feature_arrays(sid)
+        acc = self.acc_signal(sid)
+        count = self.n_windows(sid, BVP_WINDOW, BVP_WINDOW)
+        acc_windows = np.stack([acc[i * ACC_WINDOW:(i + 1) * ACC_WINDOW]
+                                for i in range(count)])
+        acc_windows = acc_windows[self.window_mask(sid, BVP_WINDOW, BVP_WINDOW)]
+
+        return np.stack([extract_features(b, a) for b, a in zip(bvp, acc_windows)])
+
+    def _clean_reference(self, sid: str, family: str) -> np.ndarray:
+        if family == 'signal':
+            return self.signal(sid, CLEAN).reshape(-1, 1)
+        if family == 'features':
+            return self.raw_features(sid, CLEAN)
+        if family == 'descriptor':
+            return window_descriptors(
+                self._raw_windows(sid, CLEAN, BVP_WINDOW, BVP_WINDOW))
+        raise ValueError(f"unknown normalization family {family!r}")
+
+    def norm_stats(self, sid: str, family: str) -> tuple[np.ndarray, np.ndarray]:
+        key = (sid, family)
+        if key not in self._stats:
+            reference = self._clean_reference(sid, family)
+            self._stats[key] = (reference.mean(axis=0).astype(np.float32),
+                                reference.std(axis=0).astype(np.float32) + 1e-6)
+        return self._stats[key]
+
+    def _normalize(self, sid: str, family: str, values: np.ndarray) -> np.ndarray:
+        mean, std = self.norm_stats(sid, family)
+        return ((values - mean) / std).astype(np.float32)
+
+    # -- model-facing accessors ----------------------------------------------
+
+    def signal_windows(self, sid: str, variant: str, window: int,
+                       shift: int) -> np.ndarray:
+        raw = self._raw_windows(sid, variant, window, shift).reshape(-1, window, 1)
+        return self._normalize(sid, 'signal', raw)
+
+    def features(self, sid: str, variant: str = MIXED) -> np.ndarray:
+        return self._normalize(sid, 'features', self.raw_features(sid, variant))
+
+    def descriptors(self, sid: str, variant: str = MIXED, window: int = BVP_WINDOW,
+                    shift: int = BVP_WINDOW) -> np.ndarray:
+        raw = window_descriptors(self._raw_windows(sid, variant, window, shift))
+        return self._normalize(sid, 'descriptor', raw)
 
     def window_labels(self, sid: str) -> np.ndarray:
-        return self._feature_arrays(sid)[1].reshape(-1)
+        labels = self._mix(sid)[1]
+        count = min(len(labels), self.n_windows(sid, BVP_WINDOW, BVP_WINDOW))
+        return labels[:count][self.window_mask(sid, BVP_WINDOW, BVP_WINDOW)[:count]]
 
-    def signal_norm_stats(self) -> tuple[np.ndarray, np.ndarray]:
-        path = self.clean_dir / NORM_PARAMS_FILE
-        if not path.exists():
-            raise DatasetUnavailibleError(self.clean_dir)
-        params = np.load(path)
-        return (np.array([params[0]], dtype=np.float32),
-                np.array([params[1] + 1e-8], dtype=np.float32))
-
-    def feature_norm_stats(self) -> tuple[np.ndarray, np.ndarray]:
-        path = self.feature_dir / FEATURE_STATS_FILE
-        if not path.exists():
-            raise DatasetUnavailibleError(self.feature_dir)
-        stats = np.load(path)
-        return stats[0].astype(np.float32), stats[1].astype(np.float32)
+    # -- int8 calibration ----------------------------------------------------
 
     def _sample(self, arrays: list[np.ndarray], per_subject: int) -> np.ndarray:
-        """A few random rows from each subject rather than the head of each: every subject
-        starts at rest, so a prefix would calibrate on an at-rest range and clip the rest."""
         rng = np.random.default_rng(SEED)
         parts = [a[rng.choice(len(a), min(per_subject, len(a)), replace=False)]
                  for a in arrays if len(a)]
@@ -140,5 +173,10 @@ class DaliaSource(DataSource):
                              for sid in self.subject_ids()], per_subject)
 
     def calibration_features(self, per_subject: int = 10) -> np.ndarray:
-        return self._sample([self.features(sid)[0] for sid in self.subject_ids()],
+        return self._sample([self.features(sid, CLEAN) for sid in self.subject_ids()],
                             per_subject)
+
+    def calibration_descriptors(self, window: int = BVP_WINDOW, shift: int = BVP_WINDOW,
+                                per_subject: int = 10) -> np.ndarray:
+        return self._sample([self.descriptors(sid, CLEAN, window, shift)
+                             for sid in self.subject_ids()], per_subject)

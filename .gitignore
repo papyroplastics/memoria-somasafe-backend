@@ -1,11 +1,6 @@
 shared
 datasets/
 results/
-S*.ssds
-
-# protobuf stub generated from shared/dataset.proto by `make proto`
-scripts/common/dataset_pb2.py
-
 __pycache__/
 .pytest_cache/
 *.py[oc]

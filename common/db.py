@@ -118,7 +118,7 @@ class ModelDefinition(SQLModel, table=True):
 class ModelVersion(IntPKModel, table=True):
     """One published version of a model. ``version`` is the hand-bumped registry
     integer, ``fingerprint`` its arch tripwire; only the newest version per model
-    accepts submissions. ``contract_version`` fixes how the device feeds it."""
+    accepts submissions."""
 
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version: int
@@ -126,7 +126,6 @@ class ModelVersion(IntPKModel, table=True):
     weight_count: int
     contract_version: int
     submission_type: SubmissionType
-    norm_params: bytes         # the version's z-score params (LE float32)
     min_app_version: str
     created_at: datetime = Field(default_factory=utcnow)
 

@@ -5,8 +5,8 @@ import tensorflow as tf
 
 from ..layers import Dense, relu
 from .common import TrainableModel, Trainer
-from ..dataset_list import calibration_source
 from ..preprocessing import N_FEATURES
+from ..sources.dalia import MIXED
 from ..optimizers import Adam
 
 
@@ -15,7 +15,7 @@ class FeatureMLP(TrainableModel):
 
     default_batch_size = 1
 
-    def __init__(self, name: str, batch_size: int, feat_mean, feat_std,
+    def __init__(self, name: str, batch_size: int,
                  n_features: int = N_FEATURES,
                  hidden_dim: int = 32, hidden_layers: int = 3, learning_rate: float = 1e-3,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
@@ -25,11 +25,6 @@ class FeatureMLP(TrainableModel):
         self.in_shape = (batch_size, n_features)
         self.label_shape = (batch_size, 1)
 
-        # Raw features come in; the model z-scores them, so nothing ships or applies
-        # normalization params off-model (firmware/app feed raw).
-        self.feat_mean = tf.constant(feat_mean, dtype=tf.float32)
-        self.feat_std = tf.constant(feat_std, dtype=tf.float32)
-
         self.in_layer = Dense(n_features, hidden_dim, activation=relu)
         self.out_layer = Dense(hidden_dim, 1)
         self.hidden_layers = [
@@ -38,12 +33,10 @@ class FeatureMLP(TrainableModel):
 
         self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
 
+        # Features arrive z-scored per subject (see ml.sources), so there is one forward
+        # signature and it is the one the int8 build is converted from.
         signature = [tf.TensorSpec(shape=self.in_shape, dtype=tf.float32)]
-        # eval/train z-score raw inputs; infer takes already-normalized inputs and is the
-        # only signature exported to the int8 model, so its int8 input calibrates on
-        # normalized values (see saving.optimize_saved_model).
         self.eval = tf.function(self.eval_eager, input_signature=signature)
-        self.infer = tf.function(self.infer_eager, input_signature=signature)
         self.train = tf.function(self.train_eager, input_signature=[
             tf.TensorSpec(shape=self.in_shape, dtype=tf.float32),
             tf.TensorSpec(shape=self.label_shape, dtype=tf.float32),
@@ -57,15 +50,12 @@ class FeatureMLP(TrainableModel):
             activation = layer(activation)
         return self.out_layer(activation)
 
-    def infer_eager(self, features: tf.Tensor):
-        return {'logits': self._logits(features)}
-
     def eval_eager(self, features: tf.Tensor):
-        return {'logits': self._logits((features - self.feat_mean) / self.feat_std)}
+        return {'logits': self._logits(features)}
 
     def train_eager(self, features: tf.Tensor, labels: tf.Tensor):
         with tf.GradientTape() as tape:
-            logits = self._logits((features - self.feat_mean) / self.feat_std)
+            logits = self._logits(features)
             loss = tf.reduce_mean(
                 tf.nn.sigmoid_cross_entropy_with_logits(labels=labels, logits=logits))
         grads = tape.gradient(loss, self.trainable_variables)
@@ -74,32 +64,23 @@ class FeatureMLP(TrainableModel):
 
 
 class FeatureMLPTrainer(Trainer):
-    """Trains the FeatureMLP on the per-subject feature dataset. Both features and
-    labels are read from ``<data_root>/mixed-features/S*/``; to train against
-    alternative labels (e.g. a teacher's distilled ones) instead of the synthetic
-    ground truth, point the data root at a directory with the same structure."""
+    """Trains the FeatureMLP on the feature vectors the source extracts from each
+    subject's mixed signal, against that mix's per-window labels."""
 
     primary_metric = 'accuracy'
     dataset_tensors = ['features', 'labels']
     n_eval_inputs = 1
-    contract_version = 1   # norm layout: mean[17] then std[17], LE float32
 
     def __init__(self, model: FeatureMLP, data_root: Path):
         super().__init__(model, data_root)
         self.model: FeatureMLP = model # type: ignore
 
-    def norm_param_bytes(self):
-        return np.concatenate([self.model.feat_mean.numpy(),
-                               self.model.feat_std.numpy()]).astype('<f4').tobytes()
-
     def subject_arrays(self, sid):
-        return self.data.features(sid)   # raw features; the model normalizes them
+        return (self.data.features(sid, MIXED),
+                self.data.window_labels(sid).reshape(-1, 1))
 
     def calibration_arrays(self):
         return self.calibration.calibration_features()
-
-    def normalize_feed(self, features, labels):
-        return {'features': (features - self.model.feat_mean) / self.model.feat_std}
 
     def report(self, result_dir, eval_dataset):
         import matplotlib.pyplot as plt
@@ -140,12 +121,11 @@ class FeatureMLPTrainer(Trainer):
             total += float(y.size)
         return {'accuracy': correct / total if total else 0.0}
 
+
 def get_model(data_root: Path, batch_size: int | None = None) -> FeatureMLP:
-    mean, std = calibration_source(data_root).feature_norm_stats()
     return FeatureMLP(
         name='feature_anomaly',
         batch_size=batch_size or FeatureMLP.default_batch_size,
-        feat_mean=mean, feat_std=std,
     )
 
 

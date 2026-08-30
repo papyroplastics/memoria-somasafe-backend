@@ -1,23 +1,9 @@
-"""
-Download + sequence the (idempotent) preprocessing stages in ml/preprocessing.py:
-
-Stage 1 → datasets/clean-signals/S*/    raw BVP (64 Hz) + ACC mag (32 Hz) + the activity
-track upsampled to the BVP grid (activity.npy); global BVP mean/std (norm-params.npy). ACC
-is stored for feature extraction only — no model takes it as an input, so it needs no
-normalization params. activity.npy is what ml.sources.dalia filters windows by, so the
-low-activity dataset needs no separate stage.
-Stage 2 → datasets/anomalous-signals/<kind>/S*/  per-type fully-anomalous BVP (one kind
-applied to every window) — for isolated per-kind recall in anomaly_detection.py
-Stage 3 → datasets/mixed-signals/S*/      raw BVP with a window-aligned ~50% mix of anomaly
-kinds + per-window binary label bitmap (labels.npy) — the realistic training/distill set
-Stage 4 → datasets/mixed-features/S*/     per-subject non-overlapping 8 s windowed feature
-vectors + labels (from mixed-signals), global standardization stats at the top level
-Stage 5 → datasets/clean-features/S*/     the same feature/label windows built from the
-clean signals (every window normal, label 0); lets scripts/export_subject_data.py ship
-precomputed features for --clean exports (on-device feature extraction is too slow).
-Signals are stored raw; z-score normalization happens at load time (no
-normalized copy on disk), so signal windows align 1:1 with the feature windows.
-"""
+"""Downloads and sequences the idempotent preprocessing stages in ml/preprocessing.py:
+raw BVP/ACC signals plus the upsampled activity track into datasets/clean-signals/S*/,
+then per-type fully-anomalous BVP into datasets/anomalous-signals/<kind>/S*/. Everything
+else — the realistic anomaly mix, labels, feature vectors, spectral descriptors and
+normalization parameters — is derived from these two by ml.sources at load time rather
+than cached on disk."""
 
 import argparse
 import tempfile
@@ -27,9 +13,8 @@ from pathlib import Path
 from common.config import DATASETS_DIR
 
 from ml.preprocessing import (
-    RAW_SUBDIR, CLEAN_SUBDIR, ANOMALOUS_SUBDIR, MIXED_SUBDIR, MIXED_FEATURE_SUBDIR,
-    CLEAN_FEATURE_SUBDIR, extract_subject_signals, create_anomalous_signals,
-    create_mixed_signals, build_feature_dataset
+    RAW_SUBDIR, CLEAN_SUBDIR, ANOMALOUS_SUBDIR,
+    extract_subject_signals, create_anomalous_signals,
 )
 
 DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'
@@ -58,16 +43,13 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         'datasets_dir', nargs='?', type=Path, default=DATASETS_DIR,
-        help=f"Datasets directory (default: {DATASETS_DIR})")
+        help="Datasets directory")
     args = parser.parse_args()
 
     datasets_dir: Path = args.datasets_dir
     raw_dir       = datasets_dir / RAW_SUBDIR
     subjects_dir  = datasets_dir / CLEAN_SUBDIR
     anomalous_dir = datasets_dir / ANOMALOUS_SUBDIR
-    mixed_dir     = datasets_dir / MIXED_SUBDIR
-    feature_dir   = datasets_dir / MIXED_FEATURE_SUBDIR
-    clean_feature_dir = datasets_dir / CLEAN_FEATURE_SUBDIR
 
     if raw_dir.is_dir():
         print(f"Raw dataset already present at {raw_dir}")
@@ -86,21 +68,3 @@ if __name__ == '__main__':
     else:
         print(f"\nStage 2: Creating per-type anomalous signals in {anomalous_dir}/ ...")
         create_anomalous_signals(subjects_dir, anomalous_dir)
-
-    if mixed_dir.is_dir() and any(mixed_dir.glob('S*')):
-        print(f"{MIXED_SUBDIR} already present at {mixed_dir}")
-    else:
-        print(f"\nStage 3: Creating mixed-anomaly signals in {mixed_dir}/ ...")
-        create_mixed_signals(subjects_dir, mixed_dir)
-
-    if feature_dir.is_dir():
-        print(f"{MIXED_FEATURE_SUBDIR} already present at {feature_dir}")
-    else:
-        print(f"\nStage 4: Building feature dataset in {feature_dir}/ ...")
-        build_feature_dataset(mixed_dir, subjects_dir, feature_dir)
-
-    if clean_feature_dir.is_dir():
-        print(f"{CLEAN_FEATURE_SUBDIR} already present at {clean_feature_dir}")
-    else:
-        print(f"\nStage 5: Building clean feature dataset in {clean_feature_dir}/ ...")
-        build_feature_dataset(subjects_dir, subjects_dir, clean_feature_dir)

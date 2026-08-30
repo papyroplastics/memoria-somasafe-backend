@@ -1,17 +1,8 @@
-"""tf.data plumbing over the arrays a ``ml.sources`` DataSource hands back.
-
-Reading the dataset off disk — layout, windowing, activity filtering — belongs to the
-source; this module only turns the resulting numpy arrays into the batched, pooled and
-split pipelines the training loops consume.
-"""
-
 import numpy as np
 import tensorflow as tf
 
 
 def to_dataset(*arrays: np.ndarray) -> tf.data.Dataset:
-    """One subject's datapoints, unbatched: each array contributes one tensor per
-    datapoint, in the order ``Trainer.dataset_tensors`` names them."""
     return tf.data.Dataset.from_tensor_slices(tuple(arrays))
 
 

@@ -4,26 +4,18 @@ import tensorflow as tf
 
 from ..layers import Dense, LSTMCell
 from ..preprocessing import BVP_WINDOW
-from .common import TrainableAutoencoder, AutoencoderTrainer, autoencoder_norm_params
+from .common import SignalAutoencoder, AutoencoderTrainer
 
 
-class LSTMAutoencoder(TrainableAutoencoder):
-    """LSTM autoencoder for reconstruction-based anomaly detection.
-
-    Two stacked LSTMCells encode the full-length BVP signal to a latent vector, which is
-    then fed at every decoder step to drive two stacked LSTMCells back to the original
-    length."""
-
+class LSTMAutoencoder(SignalAutoencoder):
     def __init__(self, name: str, batch_size: int, seq_len: int,
-                 signal_mean, signal_std, n_signals: int = 1,
-                 hidden_dim: int = 64, latent_dim: int = 32,
+                 n_signals: int = 1, hidden_dim: int = 64, latent_dim: int = 32,
                  learning_rate: float = 1e-3, n_outputs: int = 1,
                  diff_weight: float = 1.0, beta1: float = 0.9, beta2: float = 0.999,
                  epsilon: float = 1e-7):
         super().__init__(name=name, batch_size=batch_size, seq_len=seq_len,
                          n_signals=n_signals, n_outputs=n_outputs,
-                         diff_weight=diff_weight,
-                         signal_mean=signal_mean, signal_std=signal_std)
+                         diff_weight=diff_weight)
 
         self.enc_lstm1 = LSTMCell(n_signals, hidden_dim)
         self.enc_lstm2 = LSTMCell(hidden_dim, latent_dim)
@@ -56,11 +48,10 @@ class LSTMAutoencoder(TrainableAutoencoder):
 
 
 def get_model(data_root: Path, batch_size: int | None = None) -> LSTMAutoencoder:
-    sig_mean, sig_std = autoencoder_norm_params(data_root)
     return LSTMAutoencoder(
-        name='dalia_lstm_ae', batch_size=batch_size or TrainableAutoencoder.default_batch_size,
+        name='dalia_lstm_ae',
+        batch_size=batch_size or SignalAutoencoder.default_batch_size,
         seq_len=BVP_WINDOW,
-        signal_mean=sig_mean, signal_std=sig_std,
     )
 
 
