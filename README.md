@@ -79,7 +79,8 @@ scripts/   CLI entry points, grouped into subpackages by how each relates to the
                            convergence curves), transfer_learn, export_subject_data, seed_db.
              integration/  multi-user backend verification over the real HTTP API: fed_client,
                            secure_aggregation, queue_aggregation.
-             figures/      report result/figure generators (see RESULTS.md): plot_signals,
+             figures/      report result/figure generators (see the report's
+                           planificacion/plan-validacion.md): plot_signals,
                            plot_convergence (reads a previous train.py run — Secs. 5.2+5.3 —
                            and never trains), byzantine + sensitivity (sweeps that do
                            train), footprint, and the autoencoder case studies (a demonstrated
@@ -90,8 +91,8 @@ scripts/   CLI entry points, grouped into subpackages by how each relates to the
 
 Evaluation/experiment output (histories, reports, figures, distilled labels) goes to
 `results/<model>/`; the served `.tflite` artifacts stay in `shared/gen/models/<model>/`.
-[`RESULTS.md`](RESULTS.md) lists every result Chapter 5 needs, the order to produce them in, and
-the report section it feeds.
+The report's `planificacion/plan-validacion.md` lists every result Chapter 5 needs, the
+order to produce them in, and the report section it feeds.
 
 Training is split into three layers so any model can be run under any loop:
 
@@ -356,8 +357,8 @@ uv run -m scripts.system.train cnn-ae --eval-subjects 11-15      # hold out S11.
 uv run -m scripts.system.train cnn-ae --eval-subjects 1,7,14     # hold out exactly S1, S7, S14
 ```
 
-see [`RESULTS.md`](RESULTS.md) for every report result — the file each command emits and the
-report section it feeds — and run the pieces you need by hand.
+see the report's `planificacion/plan-validacion.md` for every report result — the file each
+command emits and the report section it feeds — and run the pieces you need by hand.
 
 `--loop` selects the training loop (`normal` by default, or `federated`); `--epochs` tunes
 the normal loop while `--rounds` and `--local-epochs` tune the federated one's global rounds
@@ -658,13 +659,15 @@ each owning a placeholder device).
 
 ```bash
 uv run -m scripts.system.seed_db --test-users                       # one test_N per subject
-uv run -m scripts.integration.fed_client --model feature-mlp --rounds 5 --eval-subjects 2   # dense
-uv run -m scripts.integration.fed_client --model cnn-ae     --rounds 5 --eval-subjects 2   # secure
+uv run -m scripts.integration.fed_client feature-ae        --rounds 5 --eval-subjects 2   # dense
+uv run -m scripts.integration.fed_client feature-ae-secure --rounds 5 --eval-subjects 2   # secure
 ```
 
 ### Secure aggregation
 
-A model whose `submission_type` is `secure` (currently `cnn-ae`) aggregates weight
+A model whose `submission_type` is `secure` (currently `feature-ae-secure`, a second
+registry key over `feature-ae`'s architecture and artifacts, so the dense and secure runs
+differ only in the upload path) aggregates weight
 updates the server can never read individually: it sees only their sum. The scheme is a
 minimal masking protocol for an **honest-but-curious server with no client dropouts and no
 Byzantine clients** — the full construction and its invariants are in
@@ -715,10 +718,11 @@ convergence series is written to `results/<model>/secure_fed_client/`.
 
 ```bash
 uv run -m scripts.system.seed_db --test-users                            # one test_N per subject
-uv run -m scripts.integration.fed_client --model cnn-ae --rounds 5 --eval-subjects 2
+uv run -m scripts.integration.fed_client feature-ae-secure --rounds 5 --eval-subjects 2
 ```
 
-**No-training aggregation check.** `scripts/integration/secure_aggregation.py` exercises the same
+**No-training aggregation check.** `scripts/integration/secure_aggregation.py` (which defaults to the same secure-typed
+model) exercises the same
 secure endpoints without any training: each client submits a *random* weight tensor and the
 script asserts the global weights the server bakes equal the plaintext mean (up to
 quantization + float32 error) — a fast correctness probe of the masking/summation pipeline.

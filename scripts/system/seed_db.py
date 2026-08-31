@@ -91,8 +91,9 @@ def reset_weights(session: Session, key: str) -> None:
 
 def seed_models(session: Session, reseed: bool = False) -> None:
     for key, spec in MODELS.items():
-        tflite = trainable_path(MODELS_DIR / key)
-        weights_file = weights_path(MODELS_DIR / key)
+        artifacts = MODELS_DIR / spec.artifact_key
+        tflite = trainable_path(artifacts)
+        weights_file = weights_path(artifacts)
         missing = [path for path in (tflite, weights_file) if not path.exists()]
         if missing:
             print(f"  - model '{key}' skipped (no {', '.join(str(p) for p in missing)})")
@@ -163,7 +164,7 @@ def seed_models(session: Session, reseed: bool = False) -> None:
                     f"artifacts for '{key}'")
             weights = load_weights(weights_file)
             trainable_bytes = tflite.read_bytes()
-            quantized_file = MODELS_DIR / key / "quantized.tflite"
+            quantized_file = MODELS_DIR / spec.artifact_key / "quantized.tflite"
             quantized = quantized_file.read_bytes() if quantized_file.exists() else None
 
             gw = GlobalWeights(

@@ -20,7 +20,7 @@ class CNNAutoencoder(SignalAutoencoder):
                          n_signals=n_signals, n_outputs=n_outputs,
                          diff_weight=diff_weight)
 
-        self.conv_blocks = 5
+        self.conv_blocks = 4
         self.subsample_factor = 2 ** self.conv_blocks
 
         self.enc_in = Conv1D(n_signals, hidden_dim, kernel_size, activation=relu)

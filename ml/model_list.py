@@ -24,6 +24,14 @@ class ModelSpec:
     firmware_id: int | None = None
     version: int = 1
     contract_version: int = 0
+    # Set when this entry is a second registry key over an architecture another entry
+    # already owns, so it is served and seeded from that key's exported artifacts instead
+    # of its own. The two keys differ only in the upload path their weight updates take.
+    artifacts_key: str | None = None
+
+    @property
+    def artifact_key(self) -> str:
+        return self.artifacts_key or self.key
 
 
 MODELS: dict[str, ModelSpec] = {
@@ -59,6 +67,17 @@ MODELS: dict[str, ModelSpec] = {
         build_trainer=feature_autoencoder.get_trainer,
         build_model=feature_autoencoder.get_model,
         submission_type=SubmissionType.raw,
+    ),
+    # Same architecture and same seeded weights as 'feature-ae', reached through the
+    # secure upload path, so the two integration runs differ only in that path.
+    "feature-ae-secure": ModelSpec(
+        key="feature-ae-secure",
+        name="Feature Autoencoder (secure)",
+        min_app_version="1.0.0",
+        build_trainer=feature_autoencoder.get_trainer,
+        build_model=feature_autoencoder.get_model,
+        submission_type=SubmissionType.secure,
+        artifacts_key="feature-ae",
     ),
     "cnn-ae": ModelSpec(
         key="cnn-ae",

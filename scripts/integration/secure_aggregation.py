@@ -116,7 +116,8 @@ def run(base: str, key: str, clients: int, rounds: int) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument('model', default="cnn-ae", choices=sorted(MODELS),
+    parser.add_argument('model', nargs='?', default="feature-ae-secure",
+                        choices=sorted(MODELS),
                         help="secure-typed model to aggregate for")
     parser.add_argument("--clients", type=int, default=SECURE_MIN_MEMBERS,
                         help="cohort size, one test_N user each")

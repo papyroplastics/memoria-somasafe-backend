@@ -30,6 +30,8 @@ def main() -> None:
 
     rows = []
     for key in sorted(MODELS):
+        if MODELS[key].artifacts_key is not None:
+            continue
         try:
             params = MODELS[key].build_model(DATASETS_DIR).total_weight_size
         except Exception as e:
