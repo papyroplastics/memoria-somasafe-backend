@@ -6,7 +6,6 @@ from numpy.lib.stride_tricks import sliding_window_view
 from common.config import SEED
 
 from .common import DataSource
-from ..spectral import descriptors as window_descriptors
 from ..preprocessing import (
     ACC_WINDOW, ACTIVITY_FILE, ANOMALOUS_SUBDIR, ANOMALY_KINDS, BVP_WINDOW,
     CLEAN_SUBDIR, N_FEATURES, DatasetUnavailibleError, extract_features,
@@ -120,9 +119,6 @@ class DaliaSource(DataSource):
             return self.signal(sid, CLEAN).reshape(-1, 1)
         if family == 'features':
             return self.raw_features(sid, CLEAN)
-        if family == 'descriptor':
-            return window_descriptors(
-                self._raw_windows(sid, CLEAN, BVP_WINDOW, BVP_WINDOW))
         raise ValueError(f"unknown normalization family {family!r}")
 
     def norm_stats(self, sid: str, family: str) -> tuple[np.ndarray, np.ndarray]:
@@ -146,11 +142,6 @@ class DaliaSource(DataSource):
 
     def features(self, sid: str, variant: str = MIXED) -> np.ndarray:
         return self._normalize(sid, 'features', self.raw_features(sid, variant))
-
-    def descriptors(self, sid: str, variant: str = MIXED, window: int = BVP_WINDOW,
-                    shift: int = BVP_WINDOW) -> np.ndarray:
-        raw = window_descriptors(self._raw_windows(sid, variant, window, shift))
-        return self._normalize(sid, 'descriptor', raw)
 
     def window_labels(self, sid: str) -> np.ndarray:
         labels = self._mix(sid)[1]
@@ -176,7 +167,4 @@ class DaliaSource(DataSource):
         return self._sample([self.features(sid, CLEAN) for sid in self.subject_ids()],
                             per_subject)
 
-    def calibration_descriptors(self, window: int = BVP_WINDOW, shift: int = BVP_WINDOW,
-                                per_subject: int = 10) -> np.ndarray:
-        return self._sample([self.descriptors(sid, CLEAN, window, shift)
-                             for sid in self.subject_ids()], per_subject)
+

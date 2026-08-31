@@ -153,20 +153,6 @@ class SignalAutoencoder(TrainableAutoencoder):
         return self._train_core(signal)
 
 
-class DescriptorAutoencoder(TrainableAutoencoder):
-    """Autoencoders over a fixed per-window descriptor vector rather than the waveform."""
-
-    def __init__(self, name: str, batch_size: int, n_descriptors: int):
-        super().__init__(name=name, batch_size=batch_size, input_shape=(n_descriptors,))
-        self.n_descriptors = n_descriptors
-
-    def eval_eager(self, descriptor: tf.Tensor):
-        return self._eval_core(descriptor)
-
-    def train_eager(self, descriptor: tf.Tensor):
-        return self._train_core(descriptor)
-
-
 class Trainer(ABC):
     """The model-specific half of a training run: how to shape this model's datapoints,
     how to score them, and how to feed the int8 converter. Generic loop/split/dataset

@@ -3,10 +3,10 @@ from dataclasses import dataclass
 from common.db import SubmissionType
 from ml.models import (
     cnn_autoencoder,
+    feature_autoencoder,
     feature_mlp,
     gru_autoencoder,
     lstm_autoencoder,
-    spectral_autoencoder,
 )
 from ml.models.common import ModelBuilder, TrainerBuilder
 
@@ -52,12 +52,12 @@ MODELS: dict[str, ModelSpec] = {
         build_model=gru_autoencoder.get_model,
         submission_type=SubmissionType.raw,
     ),
-    "spectral-ae": ModelSpec(
-        key="spectral-ae",
-        name="Spectral Descriptor Autoencoder",
+    "feature-ae": ModelSpec(
+        key="feature-ae",
+        name="Feature Autoencoder",
         min_app_version="1.0.0",
-        build_trainer=spectral_autoencoder.get_trainer,
-        build_model=spectral_autoencoder.get_model,
+        build_trainer=feature_autoencoder.get_trainer,
+        build_model=feature_autoencoder.get_model,
         submission_type=SubmissionType.raw,
     ),
     "cnn-ae": ModelSpec(

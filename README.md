@@ -54,11 +54,10 @@ ml/        TensorFlow models + training, imported by worker + scripts, never by 
            Two parallel registries are the single source of truth: model_list.py (key ->
            metadata + model/trainer builders) and dataset_list.py (key -> a DataSource
            builder, plus which dataset training and int8 calibration use). models/ holds
-           one file per architecture (FeatureMLP, CNN/LSTM/GRU/spectral autoencoders) built on
+           one file per architecture (FeatureMLP, CNN/LSTM/GRU/feature autoencoders) built on
            shared bases in common.py; sources/ mirrors it with one file per dataset
            (dalia.py) over the DataSource base in common.py. Everything else is
-           model-agnostic and shared across architectures: spectral.py (the fixed
-           descriptor the spectral autoencoder reconstructs), preprocessing.py (raw download
+           model-agnostic and shared across architectures: preprocessing.py (raw download
            -> arrays on disk; no TensorFlow), sources/ (reading those arrays back, with
            the activity filter applied) and loading.py (the tf.data plumbing over them)
            split the dataset work, and training.py holds the loops plus the aggregation
@@ -135,10 +134,13 @@ subject, and the two loops are directly comparable — `scripts.figures.plot_con
 plots both curves from the `run.yaml` manifests without retraining anything, and refuses to
 overlay runs whose manifests disagree.
 
-Autoencoder variants (LSTM/GRU/CNN/spectral) share `TrainableAutoencoder` (reconstruction
-train/eval) and `AutoencoderTrainer` (windowing + recon-error metrics). They all derive
-from **BVP only, and nothing else**. ACC never reaches an autoencoder — it exists only as
-an input to `FeatureMLP`'s hand-crafted features.
+Autoencoder variants (LSTM/GRU/CNN/feature) share `TrainableAutoencoder` (reconstruction
+train/eval) and `AutoencoderTrainer` (windowing + recon-error metrics). The three waveform
+variants derive from **BVP only, and nothing else**; ACC reaches them nowhere.
+`FeatureAutoencoder` is the exception, since it eats the whole feature vector and seven of
+its twenty values are ACC statistics. Anomalies are injected into BVP alone, so those seven
+carry no anomaly signal and only add reconstruction error that tracks the wearer's motion —
+part of why the detector is scored on the low-activity dataset.
 
 No model normalizes its own input. Every array a `DataSource` hands out is already
 z-scored, **per subject**, from statistics taken over that subject's own clean recording —
@@ -152,17 +154,18 @@ What they reconstruct differs, and it is what separates their detectors:
 - The **waveform** autoencoders (LSTM/GRU/CNN) rebuild the 512-sample window itself and
   score it by reconstruction MSE plus a first-difference (slope) term that penalizes a
   constant "flat line" output.
-- `SpectralAutoencoder` rebuilds the fixed 14-value descriptor of `ml/spectral.py`
-  (pulse-band shape, waveform regularity, log amplitude), which the loader extracts from
-  the same window. Its input *is* that descriptor, so like `FeatureMLP` it is a dense
-  model over a vector the device computes for itself.
+- `FeatureAutoencoder` rebuilds the same 20-value feature vector `FeatureMLP` classifies,
+  which the loader extracts from the same window. Its input *is* that vector, so like
+  `FeatureMLP` it is a dense model over something the device already computes for itself —
+  it is the merge of the project's two other models, `FeatureMLP`'s input with the
+  autoencoders' unsupervised objective.
 
 The second exists because a waveform autoencoder's error is a **complexity** measure, not
 a novelty one: it is dominated by the high-frequency detail the bottleneck dropped, so an
 anomaly that *simplifies* the signal reconstructs better than a normal window and scores
 *below* the threshold. Measured per kind on held-out subjects, `CNNAutoencoder` separates
 bradycardia at AUC 0.34 — worse than chance, and inverted rather than merely weak — which
-alone holds its ROC near the diagonal. The descriptor's coordinates have a bounded normal
+alone holds its ROC near the diagonal. The feature vector's values have a bounded normal
 range instead, so a rhythm that is too slow leaves it exactly as a rhythm that is too fast
 does, and detection becomes two-sided. `scripts/figures/anomaly_kinds.py` measures the gap
 per kind for whichever model you point it at. See
@@ -224,7 +227,7 @@ Only two stages are written out, both by `scripts/system/get_dataset.py`:
 | `anomalous-signals/<kind>/S*/` | one fully-anomalous copy per anomaly kind, that kind applied to every window |
 
 Everything else a consumer asks for — the realistic anomaly mix and its labels, the
-17-value feature vectors, the 14-value spectral descriptors, every normalization
+20-value feature vectors, every normalization
 parameter — is derived from those two by `ml/sources/` on the call. It is milliseconds of
 numpy per subject, and caching it on disk only meant rebuilding the whole dataset whenever
 one of the definitions moved. `scripts/system/export_subject_data.py` materializes a snapshot
@@ -345,7 +348,7 @@ and the training report/plot in `results/<model>/<loop>/`:
 ```bash
 uv run -m scripts.system.train feature-mlp                      # synthetic-anomaly classifier
 uv run -m scripts.system.train cnn-ae                           # conditional Conv1D autoencoder
-uv run -m scripts.system.train spectral-ae --epochs 400         # spectral-descriptor autoencoder (detector focus)
+uv run -m scripts.system.train feature-ae --epochs 50            # feature-vector autoencoder (detector focus)
 uv run -m scripts.system.train feature-mlp --loop federated     # simulated FedAvg
 uv run -m scripts.system.train feature-mlp --batch-size 32       # train at a larger batch (GPU-friendly)
 uv run -m scripts.system.train cnn-ae --eval-subjects 3          # hold out just S3 (LOSO-style)

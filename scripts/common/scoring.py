@@ -7,8 +7,8 @@ import numpy as np
 
 import tensorflow as tf
 from ml.metrics import classification_report
-from ml.models.common import DescriptorAutoencoder, TrainableAutoencoder
-from ml.preprocessing import BVP_WINDOW
+from ml.models.common import TrainableAutoencoder
+from ml.models.feature_autoencoder import FeatureAutoencoder
 from ml.sources.common import DataSource
 
 
@@ -92,8 +92,8 @@ def scored_subjects(source: DataSource, subjects: set[str] | None = None) -> lis
 def datapoints(model: TrainableAutoencoder, source: DataSource, sid: str,
                variant: str) -> np.ndarray:
     """One subject's datapoints for a variant, in whatever the model eats."""
-    if isinstance(model, DescriptorAutoencoder):
-        return source.descriptors(sid, variant, BVP_WINDOW, BVP_WINDOW)
+    if isinstance(model, FeatureAutoencoder):
+        return source.features(sid, variant)
     return source.signal_windows(sid, variant, model.seq_len, model.seq_len)
 
 

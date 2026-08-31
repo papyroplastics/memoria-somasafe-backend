@@ -38,7 +38,7 @@ class DataSource(ABC):
     @abstractmethod
     def norm_stats(self, sid: str, family: str) -> tuple[np.ndarray, np.ndarray]:
         """The (mean, std) this source z-scores one subject's values with, for one value
-        family ('signal', 'features', 'descriptor'). Every model-facing accessor already
+        family ('signal' or 'features'). Every model-facing accessor already
         applies these; they are exposed because whoever feeds a model outside this
         pipeline — the device, through the export scripts — has to apply them itself."""
 
@@ -60,11 +60,6 @@ class DataSource(ABC):
         non-overlapping window grid."""
 
     @abstractmethod
-    def descriptors(self, sid: str, variant: str, window: int,
-                    shift: int) -> np.ndarray:
-        """``(n, N_DESCRIPTORS)`` per-subject-normalized spectral descriptors."""
-
-    @abstractmethod
     def window_labels(self, sid: str) -> np.ndarray:
         """``(n,)`` binary anomaly truth for the mixed variant, on the non-overlapping
         window grid."""
@@ -78,7 +73,3 @@ class DataSource(ABC):
     def calibration_features(self, per_subject: int = 10) -> np.ndarray:
         """The same sample, as normalized feature vectors."""
 
-    @abstractmethod
-    def calibration_descriptors(self, window: int, shift: int,
-                                per_subject: int = 10) -> np.ndarray:
-        """The same sample, as normalized spectral descriptors."""

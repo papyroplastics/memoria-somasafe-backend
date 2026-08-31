@@ -24,7 +24,13 @@ MIN_ANOMALY_WINDOWS = 8
 MAX_ANOMALY_WINDOWS = 30
 
 ANOMALY_KINDS = ('blowup', 'noise', 'tachy', 'brady', 'afib')
-N_FEATURES = 17
+N_FEATURES = 20
+
+# Pulse band for the three shape features, 0.5-4.0 Hz = 30-240 bpm. Deliberately wider
+# than the HR-band ratio's 0.7-3.5 Hz so a slowed rhythm still falls inside it.
+PULSE_BAND_LOW = 0.5
+PULSE_BAND_HIGH = 4.0
+FEATURE_EPS = 1e-9
 
 # PPG-DaLiA's protocol activities, as stored in SX.pkl['activity'] at 4 Hz. ID 0 marks the
 # transient periods between activities (mostly walking to the next location).
@@ -218,7 +224,7 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
 # ---------------------------------------------------------------------------
 
 def extract_features(bvp_window: np.ndarray, acc_window: np.ndarray) -> np.ndarray:
-    """17-feature vector from an 8-second BVP window (512 samples) and ACC window (256 samples)"""
+    """20-feature vector from an 8-second BVP window (512 samples) and ACC window (256 samples)"""
     feats: list[float] = []
 
     for ch in (bvp_window, acc_window):
@@ -246,5 +252,21 @@ def extract_features(bvp_window: np.ndarray, acc_window: np.ndarray) -> np.ndarr
     feats.append(float(freqs[np.argmax(power)]))
     band = (freqs >= 0.7) & (freqs <= 3.5)
     feats.append(float(power[band].sum() / (power.sum() + 1e-8)))
+
+    # Pulse-band shape: where the in-band energy sits (centroid), how wide it is spread
+    # around that (spread), and how much energy escapes above the band (high ratio). The
+    # dominant frequency and band ratio above say how strong the pulse is but nothing
+    # about its position within the band, which is what separates a slowed or accelerated
+    # rhythm from a normal one.
+    total = power.sum() + FEATURE_EPS
+    pulse = (freqs >= PULSE_BAND_LOW) & (freqs <= PULSE_BAND_HIGH)
+    pulse_power, pulse_freqs = power[pulse], freqs[pulse]
+    pulse_total = pulse_power.sum() + FEATURE_EPS
+
+    centroid = float((pulse_power * pulse_freqs).sum() / pulse_total)
+    variance = float((pulse_power * (pulse_freqs - centroid) ** 2).sum() / pulse_total)
+    feats.append(centroid)
+    feats.append(float(np.sqrt(max(variance, 0.0))))
+    feats.append(float(np.log(power[freqs > PULSE_BAND_HIGH].sum() / total + FEATURE_EPS)))
 
     return np.asarray(feats, dtype=np.float32)

@@ -1,9 +1,8 @@
 """Downloads and sequences the idempotent preprocessing stages in ml/preprocessing.py:
 raw BVP/ACC signals plus the upsampled activity track into datasets/clean-signals/S*/,
 then per-type fully-anomalous BVP into datasets/anomalous-signals/<kind>/S*/. Everything
-else — the realistic anomaly mix, labels, feature vectors, spectral descriptors and
-normalization parameters — is derived from these two by ml.sources at load time rather
-than cached on disk."""
+else — the realistic anomaly mix, labels, feature vectors and normalization parameters —
+is derived from these two by ml.sources at load time rather than cached on disk."""
 
 import argparse
 import tempfile
