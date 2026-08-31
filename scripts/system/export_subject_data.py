@@ -74,11 +74,7 @@ def export_subject(subject: int, datasets_dir: Path, out_path: Path,
         data_present = present_mask(count, 1.0 - missing_samples, rng)
         feat_present = present_mask(count, 1.0 - missing_features, rng)
 
-    norm_mean, norm_std = source.norm_stats(sid, 'features')
-
-    dataset = pb.CaptureDataset(format_version=FORMAT_VERSION, subject=subject,
-                                norm_mean=norm_mean.astype('<f4').tobytes(),
-                                norm_std=norm_std.astype('<f4').tobytes())
+    dataset = pb.CaptureDataset(format_version=FORMAT_VERSION, subject=subject)
     for i in range(count):
         if not (data_present[i] or feat_present[i]):
             continue

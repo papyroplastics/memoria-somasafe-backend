@@ -66,7 +66,7 @@ MODELS: dict[str, ModelSpec] = {
         min_app_version="1.0.0",
         build_trainer=cnn_autoencoder.get_trainer,
         build_model=cnn_autoencoder.get_model,
-        submission_type=SubmissionType.secure,
+        submission_type=SubmissionType.raw,
     ),
 }
 

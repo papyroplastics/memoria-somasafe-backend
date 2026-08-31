@@ -448,9 +448,10 @@ the synthetic ground truth?) is the `direct_float` variant of `knowledge_distill
 `shared/gen/exports/S<id>.ssds`. Each window mirrors an ESP sample: raw PPG/ACC, the raw
 feature vector, the label in the score field, plus a fake sequence number and contiguous
 8 s device-time grid, so imported windows preprocess and train exactly like streamed ones.
-The file also carries the subject's z-score parameters (`norm_mean`/`norm_std`, taken from
-their clean recording), because no model normalizes its own input any more: whoever feeds
-one supplies them.
+It carries windows and nothing else: since no model normalizes its own input any more, and
+normalization is per wearer, both consumers derive the z-score parameters from the feature
+vectors in the file itself — the phone through its preprocessing pass, the harness in
+`scripts/lib/capture.py` — exactly as they would from a real wearer's captures.
 
 Two consumers read it. The Android app imports it to skip the UART -> ESP -> BLE path
 (`--missing-*` model real packet loss). The firmware harness replays it: `serial_write.py`
