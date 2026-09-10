@@ -11,8 +11,7 @@ import numpy as np
 
 from common.config import DATASETS_DIR, EXPORTS_DIR
 from ml.dataset_list import DATASETS
-from ml.preprocessing import BVP_WINDOW, ACC_WINDOW, WINDOW_SECONDS
-from ml.sources.dalia import CLEAN, MIXED
+from ml.sources.dalia import ACC_WINDOW, BVP_WINDOW, CLEAN, MIXED, WINDOW_SECONDS
 from shared.gen.code import dataset_pb2 as pb
 
 FORMAT_VERSION = 1
@@ -37,12 +36,13 @@ def export_subject(subject: int, datasets_dir: Path, out_path: Path,
                    missing_features: float | None = None):
     sid = f'S{subject}'
     variant = CLEAN if clean else MIXED
-    source = DATASETS['ppg-dalia'].build(datasets_dir)
+    signal = DATASETS[f'ppg-dalia-signal-{variant}'].build(datasets_dir)
+    feats  = DATASETS[f'ppg-dalia-features-{variant}'].build(datasets_dir)
 
-    bvp      = source.signal(sid, variant).astype(np.float32)
-    acc      = source.acc_signal(sid).astype(np.float32)
-    features = source.raw_features(sid, variant).astype(np.float32)
-    labels   = (source.window_labels(sid) if variant == MIXED
+    bvp      = signal.raw_signal(sid).astype(np.float32)
+    acc      = signal.raw_acc(sid).astype(np.float32)
+    features = feats.raw_features(sid).astype(np.float32)
+    labels   = (feats.labels(sid) if variant == MIXED
                 else np.zeros(len(features), dtype=np.float32))
 
     count = min(len(bvp) // BVP_WINDOW, len(acc) // ACC_WINDOW, len(features), len(labels))

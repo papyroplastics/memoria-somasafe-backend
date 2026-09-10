@@ -22,7 +22,7 @@ from common.secure_agg import (
     quantize,
     ring_sum,
 )
-from ml.loading import holdout
+from ml.sources.common import holdout
 from ml.model_list import MODELS
 from worker.celery_app import app
 

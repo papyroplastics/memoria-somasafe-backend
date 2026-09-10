@@ -1,13 +1,16 @@
 from abc import ABC, abstractmethod
 
 import numpy as np
+import tensorflow as tf
 
 
 class DataSource(ABC):
-    """Everything a consumer needs to read one dataset, already through whatever
-    load-time filter its DatasetSpec applies. Sources hand back numpy arrays, not tf.data:
-    a filter is then a boolean mask, the scoring path in scripts.common.scoring consumes
-    arrays directly, and ml.loading wraps them for the training loops."""
+    """Everything a trainer needs to read one dataset, already through whatever load-time
+    filter its DatasetSpec applies and already z-scored — no model normalizes its own
+    input. One source is always a single modality and a single variant (clean, mixed, one
+    anomaly kind, ...); which modality/variant it serves is fixed by ml.dataset_list's
+    registry, not by an argument here, so a new kind of dataset (image, text, ...) only
+    has to implement this shape."""
 
     key: str
 
@@ -16,60 +19,45 @@ class DataSource(ABC):
         """Subjects this source can serve, in a stable order."""
 
     @abstractmethod
-    def n_windows(self, sid: str, window: int, shift: int) -> int:
-        """Windows of ``window`` samples every ``shift`` this subject yields before
-        filtering — the grid every accessor below is truncated to."""
+    def datapoints(self, sid: str) -> np.ndarray:
+        """``(n, *shape)`` already-normalized, model-ready array for one subject."""
+
+    def labels(self, sid: str) -> np.ndarray | None:
+        """Optional per-datapoint ground truth aligned to ``datapoints()``. None when
+        this source carries no ground truth (e.g. a clean-only or single-anomaly-kind
+        variant, whose label is implicit in which source it is)."""
+        return None
 
     @abstractmethod
-    def window_mask(self, sid: str, window: int, shift: int) -> np.ndarray:
-        """Boolean mask over that grid: which windows this source keeps."""
+    def calibration_data(self, per_subject: int = 10) -> np.ndarray:
+        """A small sample of datapoints across every subject, for int8 calibration."""
 
-    @abstractmethod
-    def signal(self, sid: str, variant: str) -> np.ndarray:
-        """The subject's whole **raw** BVP stream for one variant, unwindowed and
-        unfiltered — what a sensor would emit. Only the export scripts want this; a model
-        is fed by ``signal_windows``."""
 
-    @abstractmethod
-    def acc_signal(self, sid: str) -> np.ndarray:
-        """The subject's whole raw ACC magnitude stream. Anomalies are injected into BVP
-        only, so there is one of these regardless of variant."""
+def to_dataset(*arrays: np.ndarray) -> tf.data.Dataset:
+    return tf.data.Dataset.from_tensor_slices(tuple(arrays))
 
-    @abstractmethod
-    def norm_stats(self, sid: str, family: str) -> tuple[np.ndarray, np.ndarray]:
-        """The (mean, std) this source z-scores one subject's values with, for one value
-        family ('signal' or 'features'). Every model-facing accessor already
-        applies these; they are exposed because whoever feeds a model outside this
-        pipeline — the device, through the export scripts — has to apply them itself."""
 
-    @abstractmethod
-    def raw_features(self, sid: str, variant: str) -> np.ndarray:
-        """``(n, N_FEATURES)`` **un-normalized** feature vectors, on the non-overlapping
-        window grid — the vectors as the firmware computes and reports them. Like
-        ``signal``, this exists for the export scripts; a model is fed by ``features``."""
+def batched(ds: tf.data.Dataset, batch_size: int) -> tf.data.Dataset:
+    return (ds.shuffle(1000, reshuffle_each_iteration=False)
+              .batch(batch_size, drop_remainder=True)
+              .cache())
 
-    @abstractmethod
-    def signal_windows(self, sid: str, variant: str, window: int,
-                       shift: int) -> np.ndarray:
-        """``(n, window, 1)`` float32 per-subject-normalized BVP windows. ``variant``
-        names the signal: 'clean', 'mixed', or one of ``preprocessing.ANOMALY_KINDS``."""
 
-    @abstractmethod
-    def features(self, sid: str, variant: str) -> np.ndarray:
-        """``(n, N_FEATURES)`` per-subject-normalized feature vectors, on the
-        non-overlapping window grid."""
+def pool(datasets: list[tf.data.Dataset]) -> tf.data.Dataset:
+    count = sum(len(ds) for ds in datasets)
+    return (tf.data.Dataset
+            .sample_from_datasets(datasets, rerandomize_each_iteration=False)
+            .apply(tf.data.experimental.assert_cardinality(count))
+            .cache())
 
-    @abstractmethod
-    def window_labels(self, sid: str) -> np.ndarray:
-        """``(n,)`` binary anomaly truth for the mixed variant, on the non-overlapping
-        window grid."""
 
-    @abstractmethod
-    def calibration_windows(self, window: int, shift: int,
-                            per_subject: int = 10) -> np.ndarray:
-        """A few normalized signal windows from each subject, for the int8 converter."""
-
-    @abstractmethod
-    def calibration_features(self, per_subject: int = 10) -> np.ndarray:
-        """The same sample, as normalized feature vectors."""
-
+def holdout(datasets: list[tf.data.Dataset], n_eval: int
+            ) -> tuple[list[tf.data.Dataset], list[tf.data.Dataset]]:
+    if n_eval < 0:
+        raise ValueError(f"n_eval must be >= 0, got {n_eval}")
+    if n_eval >= len(datasets):
+        raise ValueError(f"n_eval {n_eval} leaves no training subjects "
+                         f"({len(datasets)} available)")
+    if n_eval == 0:
+        return datasets, []
+    return datasets[:-n_eval], datasets[-n_eval:]

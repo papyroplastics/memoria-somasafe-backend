@@ -6,10 +6,12 @@ on Youden's J."""
 import numpy as np
 
 import tensorflow as tf
+from ml.dataset_list import DATASETS
 from ml.metrics import classification_report
 from ml.models.common import TrainableAutoencoder
 from ml.models.feature_autoencoder import FeatureAutoencoder
 from ml.sources.common import DataSource
+from ml.sources.dalia import ANOMALY_KINDS, CLEAN, FEATURES, MIXED, SIGNAL
 
 
 def eval_padded(model, *arrays: np.ndarray) -> dict[str, np.ndarray]:
@@ -84,27 +86,24 @@ def calibrate_expected_fpr(clean: dict[str, np.ndarray], mixed: dict[str, np.nda
     return float(rows[best]['expected_fpr'])
 
 
+def variant_sources(model, dataset_base: str, data_root,
+                    variants: tuple[str, ...] = (CLEAN, MIXED, *ANOMALY_KINDS)
+                    ) -> dict[str, DataSource]:
+    modality = FEATURES if isinstance(model, FeatureAutoencoder) else SIGNAL
+    return {v: DATASETS[f'{dataset_base}-{modality}-{v}'].build(data_root) for v in variants}
+
+
 def scored_subjects(source: DataSource, subjects: set[str] | None = None) -> list[str]:
     return [sid for sid in source.subject_ids()
             if subjects is None or sid in subjects]
 
 
-def datapoints(model: TrainableAutoencoder, source: DataSource, sid: str,
-               variant: str) -> np.ndarray:
-    """One subject's datapoints for a variant, in whatever the model eats."""
-    if isinstance(model, FeatureAutoencoder):
-        return source.features(sid, variant)
-    return source.signal_windows(sid, variant, model.seq_len, model.seq_len)
-
-
-def score_subjects(model: TrainableAutoencoder, source: DataSource, variant: str,
+def score_subjects(model: TrainableAutoencoder, source: DataSource,
                    subjects: set[str] | None = None) -> dict[str, np.ndarray]:
-    """Returns per-window reconstruction error for one signal variant."""
-    return {sid: window_errors(model, datapoints(model, source, sid, variant))
+    return {sid: window_errors(model, source.datapoints(sid))
             for sid in scored_subjects(source, subjects)}
 
 
 def mixed_truth(source: DataSource,
                 subjects: set[str] | None = None) -> dict[str, np.ndarray]:
-    return {sid: source.window_labels(sid)
-            for sid in scored_subjects(source, subjects)}
+    return {sid: source.labels(sid) for sid in scored_subjects(source, subjects)}

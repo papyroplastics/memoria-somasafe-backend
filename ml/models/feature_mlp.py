@@ -5,8 +5,7 @@ import tensorflow as tf
 
 from ..layers import Dense, relu
 from .common import TrainableModel, Trainer
-from ..preprocessing import N_FEATURES
-from ..sources.dalia import MIXED
+from ..sources.dalia import N_FEATURES
 from ..optimizers import Adam
 
 
@@ -70,17 +69,16 @@ class FeatureMLPTrainer(Trainer):
     primary_metric = 'accuracy'
     dataset_tensors = ['features', 'labels']
     n_eval_inputs = 1
+    variant_suffix = 'features-mixed'
 
     def __init__(self, model: FeatureMLP, data_root: Path):
         super().__init__(model, data_root)
         self.model: FeatureMLP = model # type: ignore
 
     def subject_arrays(self, sid):
-        return (self.data.features(sid, MIXED),
-                self.data.window_labels(sid).reshape(-1, 1))
-
-    def calibration_arrays(self):
-        return self.calibration.calibration_features()
+        labels = self.data.labels(sid)
+        assert labels is not None
+        return (self.data.datapoints(sid), labels.reshape(-1, 1))
 
     def report(self, result_dir, eval_dataset):
         import matplotlib.pyplot as plt

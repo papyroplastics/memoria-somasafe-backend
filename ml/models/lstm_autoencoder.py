@@ -3,7 +3,7 @@ from pathlib import Path
 import tensorflow as tf
 
 from ..layers import Dense, LSTMCell
-from ..preprocessing import BVP_WINDOW
+from ..sources.dalia import BVP_WINDOW
 from .common import SignalAutoencoder, AutoencoderTrainer
 
 

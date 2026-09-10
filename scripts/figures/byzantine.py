@@ -11,7 +11,7 @@ import numpy as np
 import tensorflow as tf
 
 from common.config import DATASETS_DIR, SEED
-from ml.loading import holdout, pool
+from ml.sources.common import holdout, pool
 from ml.model_list import MODELS
 from ml.models.common import Trainer
 from ml.training import History, average, evaluate, train_epoch, trimmed_mean

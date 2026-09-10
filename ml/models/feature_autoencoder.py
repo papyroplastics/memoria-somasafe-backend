@@ -4,9 +4,8 @@ import numpy as np
 import tensorflow as tf
 
 from ..layers import Dense, relu
-from ..preprocessing import BVP_WINDOW, N_FEATURES
-from ..sources.dalia import CLEAN
-from .common import AutoencoderTrainer, TrainableAutoencoder
+from ..sources.dalia import N_FEATURES
+from .common import ReconstructionTrainer, TrainableAutoencoder
 
 
 class FeatureAutoencoder(TrainableAutoencoder):
@@ -41,21 +40,16 @@ class FeatureAutoencoder(TrainableAutoencoder):
         return self._train_core(features)
 
 
-class FeatureAutoencoderTrainer(AutoencoderTrainer):
+class FeatureAutoencoderTrainer(ReconstructionTrainer):
     """Feeds feature vectors where AutoencoderTrainer feeds windows, on the
     non-overlapping grid the labels and the feature vectors live on."""
 
     dataset_tensors = ['features']
+    variant_suffix = 'features-clean'
 
     def __init__(self, model: FeatureAutoencoder, data_root: Path):
-        super().__init__(model, data_root, shift=BVP_WINDOW)
+        super().__init__(model, data_root)
         self.model: FeatureAutoencoder = model  # type: ignore
-
-    def subject_arrays(self, sid):
-        return (self.data.features(sid, CLEAN),)
-
-    def calibration_arrays(self):
-        return self.calibration.calibration_features()
 
     def report(self, result_dir, eval_dataset):
         import matplotlib.pyplot as plt
@@ -84,5 +78,5 @@ def get_model(data_root: Path, batch_size: int | None = None) -> FeatureAutoenco
     )
 
 
-def get_trainer(data_root: Path, batch_size: int | None = None) -> AutoencoderTrainer:
+def get_trainer(data_root: Path, batch_size: int | None = None) -> FeatureAutoencoderTrainer:
     return FeatureAutoencoderTrainer(get_model(data_root, batch_size), data_root)

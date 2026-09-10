@@ -9,21 +9,20 @@ import argparse
 import numpy as np
 
 from common.config import DATASETS_DIR, MODELS_DIR
-from ml.dataset_list import DATASETS
-from ml.preprocessing import ANOMALY_KINDS
+from ml.dataset_list import BASES
 from ml.model_list import MODELS
 from ml.sources.common import DataSource
-from ml.sources.dalia import CLEAN, MIXED
+from ml.sources.dalia import ANOMALY_KINDS, CLEAN, MIXED
 from ml.metrics import classification_report
 from ml.saving import load_weights, weights_path
 from ..common.reports import get_report_dir, read_subject_split, write_yaml
 from ..common.scoring import (
     calibrate_expected_fpr, subject_thresholds, pooled_flags,
-    score_subjects, mixed_truth,
+    score_subjects, mixed_truth, variant_sources,
 )
 
 
-def evaluate(model, source: DataSource, clean: dict[str, np.ndarray],
+def evaluate(model, sources: dict[str, DataSource], clean: dict[str, np.ndarray],
              mixed: dict[str, np.ndarray], truth: dict[str, np.ndarray],
              thresholds: dict[str, float],
              subjects: set[str] | None = None) -> dict:
@@ -38,7 +37,7 @@ def evaluate(model, source: DataSource, clean: dict[str, np.ndarray],
 
     per_kind = {}
     for name in ANOMALY_KINDS:
-        sc = score_subjects(model, source, name, subjects=subjects)
+        sc = score_subjects(model, sources[name], subjects=subjects)
         c = sum(len(v) for v in sc.values())
         per_kind[name] = {
             'count': c,
@@ -74,32 +73,31 @@ if __name__ == "__main__":
     parser.add_argument('--tag', default=None,
                         help='Tag of the train.py run to evaluate, selecting both its '
                              'weights and the run.yaml it was trained with')
-    parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia',
+    parser.add_argument('--dataset', choices=sorted(BASES), default='ppg-dalia',
                         help='Dataset to score on; ppg-dalia-low keeps only the '
                              'low-activity windows the model was trained on')
     args = parser.parse_args()
 
     data_dir = DATASETS_DIR
-    source = DATASETS[args.dataset].build(data_dir)
-
     model = MODELS[args.model].build_model(data_dir)
+    sources = variant_sources(model, args.dataset, data_dir)
     weights = weights_path(MODELS_DIR / args.model, args.tag)
     model.restore(load_weights(weights))
 
     train_ids, held_out = read_subject_split(args.model, ('normal', 'federated'), args.tag)
     train, held = set(train_ids), set(held_out)
 
-    print(f"Scoring {DATASETS[args.dataset].name}")
+    print(f"Scoring {BASES[args.dataset].name}")
     print(f"Calibrating expected FPR on the {len(train_ids)} training subjects...")
-    truth_tr = mixed_truth(source, subjects=train)
-    clean_tr = score_subjects(model, source, CLEAN, subjects=train)
-    mixed_tr = score_subjects(model, source, MIXED, subjects=train)
+    truth_tr = mixed_truth(sources[MIXED], subjects=train)
+    clean_tr = score_subjects(model, sources[CLEAN], subjects=train)
+    mixed_tr = score_subjects(model, sources[MIXED], subjects=train)
     expected_fpr = calibrate_expected_fpr(clean_tr, mixed_tr, truth_tr)
 
     print(f"Evaluating on the {len(held_out)} held-out subjects: {', '.join(held_out)}")
-    truth = mixed_truth(source, subjects=held)
-    clean = score_subjects(model, source, CLEAN, subjects=held)
-    mixed = score_subjects(model, source, MIXED, subjects=held)
+    truth = mixed_truth(sources[MIXED], subjects=held)
+    clean = score_subjects(model, sources[CLEAN], subjects=held)
+    mixed = score_subjects(model, sources[MIXED], subjects=held)
     missing = set(mixed) - set(clean)
     if missing:
         raise SystemExit(f"subjects {sorted(missing)} lack clean windows; "
@@ -108,12 +106,12 @@ if __name__ == "__main__":
     thresholds = subject_thresholds(clean, expected_fpr)
 
     print("Scoring per-type anomalous windows + evaluating...")
-    results = evaluate(model, source, clean, mixed, truth, thresholds, subjects=held)
+    results = evaluate(model, sources, clean, mixed, truth, thresholds, subjects=held)
     print_metrics(results, expected_fpr)
 
     report_dir = get_report_dir(args.model)
     write_yaml(report_dir / f'anomaly_detection.{args.dataset}.yaml', {
-        'dataset': {'key': args.dataset, 'name': DATASETS[args.dataset].name},
+        'dataset': {'key': args.dataset, 'name': BASES[args.dataset].name},
         'shows': f"Detector evaluation for {args.model} (report Sec. 5.4): precision/"
                  f"recall/F1/accuracy and clean false-positive rate against the true "
                  f"mixed-window labels, plus per-anomaly-kind recall, on held-out subjects.",

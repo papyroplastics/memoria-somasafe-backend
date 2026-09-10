@@ -7,7 +7,7 @@ training report to results/<model>.
 import argparse
 
 from common.config import DATASETS_DIR, MODELS_DIR
-from ml.loading import holdout, pool
+from ml.sources.common import holdout, pool
 from ml.training import normal_loop
 from ml.saving import load_weights, save_artifacts, weights_path
 from ml.model_list import MODELS

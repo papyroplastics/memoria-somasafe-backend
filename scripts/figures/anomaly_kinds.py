@@ -8,16 +8,15 @@ import argparse
 import numpy as np
 
 from common.config import DATASETS_DIR, MODELS_DIR
-from ml.dataset_list import DATASETS
+from ml.dataset_list import BASES
 from ml.model_list import MODELS
-from ml.preprocessing import ANOMALY_KINDS
 from ml.saving import load_weights, weights_path
-from ml.sources.dalia import CLEAN, MIXED
+from ml.sources.dalia import ANOMALY_KINDS, CLEAN, MIXED
 
 from ..common.plots import bar_plot
 from ..common.reports import get_report_dir, read_subject_split, write_metrics_csv, write_yaml
 from ..common.scoring import (
-    calibrate_expected_fpr, mixed_truth, score_subjects, subject_thresholds,
+    calibrate_expected_fpr, mixed_truth, score_subjects, subject_thresholds, variant_sources,
 )
 
 
@@ -48,36 +47,36 @@ if __name__ == "__main__":
     parser.add_argument('--tag', default=None, help='Tag of the train.py run to score')
     parser.add_argument('--expected-fpr', type=float, default=None,
                         help='Operating point to score at')
-    parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia-low',
+    parser.add_argument('--dataset', choices=sorted(BASES), default='ppg-dalia-low',
                         help='Dataset to score on')
     args = parser.parse_args()
 
-    source = DATASETS[args.dataset].build(DATASETS_DIR)
     model = MODELS[args.model].build_model(DATASETS_DIR)
+    sources = variant_sources(model, args.dataset, DATASETS_DIR)
     weights = weights_path(MODELS_DIR / args.model, args.tag)
     model.restore(load_weights(weights))
 
     train_ids, held_out = read_subject_split(args.model, ('normal', 'federated'), args.tag)
     train, held = set(train_ids), set(held_out)
 
-    print(f"Scoring {DATASETS[args.dataset].name}")
+    print(f"Scoring {BASES[args.dataset].name}")
     expected_fpr = args.expected_fpr
     if expected_fpr is None:
         print(f"Calibrating the expected FPR on the {len(train_ids)} training subjects...")
         expected_fpr = calibrate_expected_fpr(
-            score_subjects(model, source, CLEAN, subjects=train),
-            score_subjects(model, source, MIXED, subjects=train),
-            mixed_truth(source, subjects=train))
+            score_subjects(model, sources[CLEAN], subjects=train),
+            score_subjects(model, sources[MIXED], subjects=train),
+            mixed_truth(sources[MIXED], subjects=train))
     print(f"expected_fpr = {expected_fpr:.4f}")
 
     print(f"Scoring every kind on the {len(held_out)} held-out subjects: "
           f"{', '.join(held_out)}")
-    clean = score_subjects(model, source, CLEAN, subjects=held)
+    clean = score_subjects(model, sources[CLEAN], subjects=held)
     thresholds = subject_thresholds(clean, expected_fpr)
 
     rows = []
     for kind in ANOMALY_KINDS:
-        scores = score_subjects(model, source, kind, subjects=held)
+        scores = score_subjects(model, sources[kind], subjects=held)
         flags = np.concatenate([scores[sid] > thresholds[sid] for sid in scores])
         rows.append({
             'kind': kind,
@@ -111,7 +110,7 @@ if __name__ == "__main__":
 
     write_metrics_csv(rows, report_dir, 'anomaly_kinds.csv')
     write_yaml(report_dir / 'anomaly_kinds.yaml', {
-        'dataset': {'key': args.dataset, 'name': DATASETS[args.dataset].name},
+        'dataset': {'key': args.dataset, 'name': BASES[args.dataset].name},
         'shows': "Per-anomaly-kind detectability at one fixed operating point: recall on "
                  "each kind's fully-anomalous set, and the threshold-free AUC of its "
                  "scores against the same subjects' clean windows. Separates the kinds a "

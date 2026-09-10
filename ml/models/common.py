@@ -7,11 +7,9 @@ import tensorflow as tf
 
 from ..optimizers import Adam
 from ..metrics import mse_loss, first_difference_loss, reconstruction_error
-from ..preprocessing import BVP_RATE
 from ..dataset_list import calibration_source, training_source
-from ..loading import batched, to_dataset
-from ..sources.common import DataSource
-from ..sources.dalia import CLEAN
+from ..sources.common import DataSource, batched, to_dataset
+from ..sources.dalia import TRAIN_SHIFT, DaliaSignalSource
 
 
 class UnboundError(NotImplementedError):
@@ -156,29 +154,27 @@ class SignalAutoencoder(TrainableAutoencoder):
 class Trainer(ABC):
     """The model-specific half of a training run: how to shape this model's datapoints,
     how to score them, and how to feed the int8 converter. Generic loop/split/dataset
-    plumbing lives in ml.training and ml.loading. Pinned to the training dataset."""
+    plumbing lives in ml.training and ml.sources.common. Pinned to the training dataset."""
 
     model: TrainableModel
     primary_metric: str
-    # Names of the tensors each dataset batch yields, in order — used to match
-    # dataset arrays to the model's signature inputs by name (see scripts/fed_client.py).
     dataset_tensors: list[str]
-    # How many leading dataset tensors the eval signature consumes; the remaining
-    # ones are targets ``eval_metrics`` reads off the datapoints (e.g. the MLP's labels).
     n_eval_inputs: int
+    variant_suffix: str
 
     def __init__(self, model: TrainableModel, data_root: Path):
         self.model = model
-        self.data: DataSource = training_source(data_root)
-        self.calibration: DataSource = calibration_source(data_root)
+        self.data: DataSource = training_source(data_root, self.variant_suffix)
+        self.calibration: DataSource = calibration_source(data_root, self.variant_suffix)
 
     @abstractmethod
     def subject_arrays(self, sid: str) -> tuple[np.ndarray, ...]:
         """One subject's datapoints as raw arrays, one per entry of ``dataset_tensors``."""
 
-    @abstractmethod
     def calibration_arrays(self) -> np.ndarray:
-        """Datapoints the int8 converter calibrates its tensor scales on, drawn from the unfiltered dataset."""
+        """Datapoints the int8 converter calibrates its tensor scales on, drawn from the
+        unfiltered dataset."""
+        return self.calibration.calibration_data()
 
     @abstractmethod
     def eval_metrics(self, datapoints: list, outputs: list[dict]) -> dict[str, float]:
@@ -221,28 +217,29 @@ class ModelBuilder(Protocol):
                  batch_size: int | None = None) -> TrainableModel: ...
 
 
-class AutoencoderTrainer(Trainer):
+class ReconstructionTrainer(Trainer):
 
     primary_metric = 'recon_error'
-    dataset_tensors = ['signal']
     n_eval_inputs = 1
-    default_shift = BVP_RATE * 3 # shift 3 seconds
-
-    def __init__(self, model: SignalAutoencoder, data_root: Path,
-                 shift: int = default_shift):
-        super().__init__(model, data_root)
-        self.model: SignalAutoencoder = model # type: ignore
-        self.shift = shift
 
     def subject_arrays(self, sid):
-        return (self.data.signal_windows(sid, CLEAN, self.model.seq_len, self.shift),)
-
-    def calibration_arrays(self):
-        return self.calibration.calibration_windows(self.model.seq_len, self.shift)
+        return (self.data.datapoints(sid),)
 
     def eval_metrics(self, datapoints, outputs):
         errors = np.concatenate([np.asarray(o['error']).reshape(-1) for o in outputs])
         return {'recon_error': float(np.mean(errors))}
+
+
+class AutoencoderTrainer(ReconstructionTrainer):
+
+    dataset_tensors = ['signal']
+    variant_suffix = 'signal-clean'
+
+    def __init__(self, model: SignalAutoencoder, data_root: Path):
+        super().__init__(model, data_root)
+        self.model: SignalAutoencoder = model # type: ignore
+        assert isinstance(self.data, DaliaSignalSource)
+        self.data = self.data.with_grid(window=self.model.seq_len, shift=TRAIN_SHIFT)
 
     def report(self, result_dir, eval_dataset):
         import matplotlib.pyplot as plt

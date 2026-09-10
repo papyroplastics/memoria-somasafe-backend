@@ -8,14 +8,14 @@ import numpy as np
 import matplotlib.pyplot as plt
 
 from common.config import DATASETS_DIR, MODELS_DIR
-from ml.dataset_list import DATASETS
+from ml.dataset_list import BASES
 from ml.model_list import MODELS
 from ml.saving import load_weights, weights_path
 from ml.sources.dalia import CLEAN, MIXED
 
 from ..common.plots import roc_grid
 from ..common.reports import get_report_dir, write_yaml
-from ..common.scoring import score_subjects, mixed_truth
+from ..common.scoring import score_subjects, mixed_truth, variant_sources
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
@@ -30,20 +30,20 @@ if __name__ == "__main__":
                              "per-subject one (each subject's clean FPR then drifts off f)")
     parser.add_argument('--step', type=float, default=0.02,
                         help='Spacing of the FPR sweep')
-    parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia',
+    parser.add_argument('--dataset', choices=sorted(BASES), default='ppg-dalia',
                         help='Dataset to score on; ppg-dalia-low keeps only the '
                              'low-activity windows the model was trained on')
     args = parser.parse_args()
 
-    source = DATASETS[args.dataset].build(DATASETS_DIR)
     weights = weights_path(MODELS_DIR / args.model, args.tag)
     model = MODELS[args.model].build_model(DATASETS_DIR)
+    sources = variant_sources(model, args.dataset, DATASETS_DIR, variants=(CLEAN, MIXED))
     model.restore(load_weights(weights))
 
-    print(f"Scoring {DATASETS[args.dataset].name}")
-    truth = mixed_truth(source)
-    clean = score_subjects(model, source, CLEAN)
-    mixed = score_subjects(model, source, MIXED)
+    print(f"Scoring {BASES[args.dataset].name}")
+    truth = mixed_truth(sources[MIXED])
+    clean = score_subjects(model, sources[CLEAN])
+    mixed = score_subjects(model, sources[MIXED])
 
     order = [sid for sid in clean if sid in mixed and sid in truth]
     highlight = {f'S{int(i)}' for i in args.highlight.split(',') if i.strip()}
@@ -88,7 +88,7 @@ if __name__ == "__main__":
 
     aucs = [s['auc'] for s in per_subject.values()]
     write_yaml(report_dir / 'subject_roc.yaml', {
-        'dataset': {'key': args.dataset, 'name': DATASETS[args.dataset].name},
+        'dataset': {'key': args.dataset, 'name': BASES[args.dataset].name},
         'shows': "Per-subject detectability of the reconstruction-error detector on one set "
                  "of weights: each subject's ROC (recall vs. its own empirical clean FPR) and "
                  "the mean +/- std recall across subjects. Answers whether the detector just "

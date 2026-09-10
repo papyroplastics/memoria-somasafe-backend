@@ -9,23 +9,21 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from common.config import DATASETS_DIR, MODELS_DIR
-from ..common.scoring import eval_padded
-from ml.dataset_list import DATASETS
+from ..common.scoring import eval_padded, variant_sources
+from ml.dataset_list import BASES
 from ml.model_list import MODELS
-from ml.preprocessing import ANOMALY_KINDS, BVP_RATE
-from ml.saving import load_weights, weights_path
 from ml.sources.common import DataSource
-from ml.sources.dalia import CLEAN
+from ml.sources.dalia import ANOMALY_KINDS, BVP_RATE, CLEAN
+from ml.saving import load_weights, weights_path
 from ..common.reports import get_report_dir, write_yaml
 
 KINDS = (CLEAN, *ANOMALY_KINDS)
 
 
-def window_views(source: DataSource, sid: str, window: int, index: int):
+def window_views(sources: dict[str, DataSource], sid: str, index: int):
     """The raw BVP window for the clean signal and each anomaly kind, all taken at the
-    same window ``index`` of the windows the source keeps."""
-    return {kind: source.signal_windows(sid, kind, window, window)[index]
-            for kind in KINDS}
+    same window ``index`` of the windows each source keeps."""
+    return {kind: sources[kind].datapoints(sid)[index] for kind in KINDS}
 
 
 if __name__ == "__main__":
@@ -37,13 +35,12 @@ if __name__ == "__main__":
     parser.add_argument('--seed', type=int, default=None, help='RNG seed for the subject/window pick')
     parser.add_argument('--tag', default=None,
                         help='Tag of the train.py run to use')
-    parser.add_argument('--dataset', choices=sorted(DATASETS), default='ppg-dalia',
+    parser.add_argument('--dataset', choices=sorted(BASES), default='ppg-dalia',
                         help='Dataset the window is drawn from; ppg-dalia-low draws only '
                              'from low-activity windows')
     args = parser.parse_args()
 
     rng = np.random.default_rng(args.seed)
-    source = DATASETS[args.dataset].build(DATASETS_DIR)
 
     model = MODELS[args.model].build_model(DATASETS_DIR)
     if not hasattr(model, 'seq_len'):
@@ -54,20 +51,22 @@ if __name__ == "__main__":
     model.restore(load_weights(weights))
 
     window_len = model.seq_len
+    sources = {k: s.with_grid(window=window_len, shift=window_len) for k, s in
+              variant_sources(model, args.dataset, DATASETS_DIR, variants=KINDS).items()}
 
-    subject_ids = source.subject_ids()
+    subject_ids = sources[CLEAN].subject_ids()
     sid = f"S{args.subject}" if args.subject else str(rng.choice(subject_ids))
     if sid not in subject_ids:
         raise SystemExit(f"subject {sid} not found among {subject_ids}")
 
-    n_windows = len(source.signal_windows(sid, CLEAN, window_len, window_len))
+    n_windows = len(sources[CLEAN].datapoints(sid))
     if not n_windows:
-        raise SystemExit(f"{sid} has no windows in {DATASETS[args.dataset].name}")
+        raise SystemExit(f"{sid} has no windows in {BASES[args.dataset].name}")
 
     window_idx = args.window if args.window is not None else int(rng.integers(n_windows))
     print(f"dataset={args.dataset} subject={sid} window={window_idx}/{n_windows}")
 
-    views = window_views(source, sid, window_len, window_idx)
+    views = window_views(sources, sid, window_idx)
     t = np.arange(window_len) / BVP_RATE
 
     signals = np.stack([views[k] for k in KINDS]).astype(np.float32)
@@ -79,8 +78,6 @@ if __name__ == "__main__":
     fig_rec.suptitle(f'{sid} window {window_idx} — {args.model} reconstruction')
 
     for i, (ax_in, ax_rec, kind) in enumerate(zip(axs_in, axs_rec, KINDS)):
-        # Both the window and the reconstruction are in the subject's z-scored space:
-        # the source normalizes on the way out and the model neither un- nor re-scales.
         bvp = views[kind][:, 0]
         recon = recons[i]
 

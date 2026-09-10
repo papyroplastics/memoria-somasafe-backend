@@ -10,7 +10,7 @@ from pathlib import Path
 import tensorflow as tf
 
 from ml.dataset_list import TRAINING_DATASET
-from ml.loading import pool
+from ml.sources.common import pool
 from ml.models.common import Trainer
 from ml.saving import load_weights, save_artifacts, weights_path
 from ml.training import normal_loop, federated_loop, History

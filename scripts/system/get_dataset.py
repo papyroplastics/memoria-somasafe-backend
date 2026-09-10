@@ -1,4 +1,4 @@
-"""Downloads and sequences the idempotent preprocessing stages in ml/preprocessing.py:
+"""Downloads and sequences the idempotent preprocessing stages in ml/sources/dalia.py:
 raw BVP/ACC signals plus the upsampled activity track into datasets/clean-signals/S*/,
 then per-type fully-anomalous BVP into datasets/anomalous-signals/<kind>/S*/. Everything
 else — the realistic anomaly mix, labels, feature vectors and normalization parameters —
@@ -11,7 +11,7 @@ import zipfile
 from pathlib import Path
 from common.config import DATASETS_DIR
 
-from ml.preprocessing import (
+from ml.sources.dalia import (
     RAW_SUBDIR, CLEAN_SUBDIR, ANOMALOUS_SUBDIR,
     extract_subject_signals, create_anomalous_signals,
 )

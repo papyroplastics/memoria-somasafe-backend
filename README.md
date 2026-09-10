@@ -53,16 +53,19 @@ api/       FastAPI gateway (no TensorFlow): routers for auth/device/model (route
 ml/        TensorFlow models + training, imported by worker + scripts, never by api.
            Two parallel registries are the single source of truth: model_list.py (key ->
            metadata + model/trainer builders) and dataset_list.py (key -> a DataSource
-           builder, plus which dataset training and int8 calibration use). models/ holds
-           one file per architecture (FeatureMLP, CNN/LSTM/GRU/feature autoencoders) built on
-           shared bases in common.py; sources/ mirrors it with one file per dataset
-           (dalia.py) over the DataSource base in common.py. Everything else is
-           model-agnostic and shared across architectures: preprocessing.py (raw download
-           -> arrays on disk; no TensorFlow), sources/ (reading those arrays back, with
-           the activity filter applied) and loading.py (the tf.data plumbing over them)
-           split the dataset work, and training.py holds the loops plus the aggregation
-           rules (average, weighted_average, trimmed_mean), alongside optimizers,
-           saving/export, layers, metrics.
+           builder, generated as every activity-filter x modality x variant combination a
+           dataset module offers, plus which keys training and int8 calibration use).
+           models/ holds one file per architecture (FeatureMLP, CNN/LSTM/GRU/feature
+           autoencoders) built on shared bases in common.py; sources/ mirrors it with one
+           module per dataset (dalia.py, holding PPG-DaLiA's raw download, injection and
+           feature extraction alongside its DataSource variants) over the generic
+           DataSource ABC and the dataset-agnostic tf.data helpers (to_dataset, batched,
+           pool, holdout) in common.py. Each concrete source is a single modality/variant
+           (e.g. "clean signal windows" or "mixed feature vectors") with no selector
+           arguments, so a new dataset module (a different signal type, images, text) only
+           has to implement the same three-method shape. training.py holds the loops plus
+           the aggregation rules (average, weighted_average, trimmed_mean), alongside
+           optimizers, saving/export, layers, metrics.
            layers.py in particular reimplements a few ops with custom gradients because
            the stock TF gradients only exist as Flex ops the phone's LiteRT runtime
            can't execute.
@@ -100,24 +103,31 @@ Training is split into three layers so any model can be run under any loop:
   `transfer_from` (copy compatible trainable weights from another instance of the same
   architecture, transferring the overlapping region where a shape differs — used for
   cross-batch-size transfer learning).
-- **DataSource** (`ml/sources/`): everything about reading one dataset off disk —
-  subjects, window grids, the activity filter, normalization stats and the int8
-  calibration sample. Sources hand back numpy arrays, so a filter is a boolean mask and
-  the scoring path in `scripts/common/scoring.py` consumes them directly. Which datasets
-  exist is declared in `ml/dataset_list.py`.
+- **DataSource** (`ml/sources/`): a generic 3-method ABC — `subject_ids`, `datapoints`
+  (the already-normalized, model-ready array for one subject) and `calibration_data` (an
+  int8 calibration sample), plus an optional `labels` for the sources that carry ground
+  truth. A source is always a single modality and variant (e.g. "PPG-DaLiA's clean signal
+  windows" or "its mixed feature vectors, low-activity only") — there is no selector
+  argument, so a new kind of dataset (a different signal type, images, text) only has to
+  implement this shape. Which combinations exist is generated in `ml/dataset_list.py`
+  from each dataset module's activity filters x modalities x variants; `DaliaSignalSource`
+  and `DaliaFeatureSource` (`ml/sources/dalia.py`) are PPG-DaLiA's two. Sources hand back
+  numpy arrays, so the scoring path in `scripts/common/scoring.py` consumes them directly.
 - **Trainer** (`Trainer`): only what is model-specific — `subject_arrays` (shape one
-  subject's datapoints), `calibration_arrays`, `normalize_feed` (the int8 calibration
-  feed), `norm_param_bytes` and `eval_metrics` (accuracy for the MLP, reconstruction
-  error for the autoencoders). It is built with a data root and pins itself to the
-  training dataset; `subject_datasets()` is its single data entry point, returning every
-  subject's batched dataset in subject order, which `ml.loading.holdout` splits and
-  `ml.loading.pool` merges. It offers no way to select a dataset — its consumers are the
-  system itself (`train.py`, `fed_client.py`, `worker.tasks`), which trains on one dataset
-  by definition; the figure scripts that already know their architecture build a bare
-  model with `ModelSpec.build_model` and pick a source themselves. Each model class
-  declares a `default_batch_size` and each model module exposes `get_model(data_root,
-  batch_size=None)` and `get_trainer(data_root, batch_size=None)` (both falling back to
-  that default when `batch_size` is `None`).
+  subject's datapoints, reading `self.data.datapoints`/`.labels`) and `eval_metrics`
+  (accuracy for the MLP, reconstruction error for the autoencoders); `calibration_arrays`
+  has a generic default (`self.calibration.calibration_data()`). A `variant_suffix` class
+  attribute (e.g. `"signal-clean"`, `"features-mixed"`) names the one `ml.dataset_list`
+  entry this model family always trains on; it is built with a data root and pins itself
+  to the training dataset accordingly. `subject_datasets()` is its single data entry
+  point, returning every subject's batched dataset in subject order, which
+  `ml.sources.common.holdout` splits and `.pool` merges. It offers no way to select a
+  dataset — its consumers are the system itself (`train.py`, `fed_client.py`,
+  `worker.tasks`), which trains on one dataset by definition; the figure scripts that
+  already know their architecture build a bare model with `ModelSpec.build_model` and
+  pick a source themselves. Each model class declares a `default_batch_size` and each
+  model module exposes `get_model(data_root, batch_size=None)` and `get_trainer(data_root,
+  batch_size=None)` (both falling back to that default when `batch_size` is `None`).
 - **Loop** (`training.py`): orchestration only — `normal_loop` and `federated_loop`
   (simulated FedAvg, aggregating each round's client deltas with `weighted_average`),
   over the generic
@@ -192,12 +202,22 @@ per BVP sample, so it indexes exactly like `bvp.npy` and every windowing grid (t
 non-overlapping 8 s one the labels and features live on, the sliding one the autoencoders
 train on) derives its own per-window activity from that single array.
 
-`ml/dataset_list.py` registers what that buys, mirroring `ml/model_list.py`:
+`ml/dataset_list.py` registers what that buys, mirroring `ml/model_list.py`. The activity
+filter is one of three axes a full registry key names — `<activity-filter>-<modality>-<variant>`,
+e.g. `ppg-dalia-low-features-mixed` — generated as every combination rather than
+hand-enumerated, so each entry is a single, argument-free `DataSource`:
 
-| key | what it serves |
+| activity filter | what it serves |
 | --- | --- |
 | `ppg-dalia` | every window |
 | `ppg-dalia-low` | only the low-activity windows — sitting, driving, lunch, working |
+
+`modality` is `signal` (BVP windows) or `features` (the 20-value vector); `variant` is
+`clean`, `mixed` (the synthetic anomaly mix) or one of the five anomaly kinds below. A
+`Trainer` pins itself to one full key via its `variant_suffix`
+(`ml/models/common.py`); a script comparing variants (`scripts/figures/anomaly_kinds.py`
+and friends) builds a `{variant: source}` dict over one activity filter + modality with
+`scripts.common.scoring.variant_sources`.
 
 The filter is **strict**: a window survives only if *every* sample in it carries an
 allowed id, so windows straddling an activity change and the transient periods between
@@ -240,7 +260,7 @@ harness both read that one file.
 The label for every detector metric comes from **synthetic anomaly injection**: a
 window-aligned ~50% mix of anomaly kinds injected into the **raw** clean BVP on spans of
 8–30 windows (64–240 s), so every window is fully clean or fully anomalous. The mix is
-built at load time and seeded from the subject id (`preprocessing.subject_rng`), so every
+built at load time and seeded from the subject id (`sources.dalia.subject_rng`), so every
 script that asks for `S7`'s mixed signal gets byte-identical samples and labels without
 any of it being written down.
 
