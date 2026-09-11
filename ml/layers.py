@@ -4,9 +4,13 @@ from typing import Callable
 import numpy as np
 import tensorflow as tf
 
+def relu_nocustom(x: tf.Tensor) -> tf.Tensor:
+    return tf.nn.relu(x)
+
+
 @tf.custom_gradient
 def relu(x: tf.Tensor):
-    y = tf.nn.relu(x)
+    y = relu_nocustom(x)
 
     def grad(dy: tf.Tensor):
         return dy * tf.cast(y > 0.0, dy.dtype)
@@ -19,36 +23,51 @@ def upsample2(x: tf.Tensor) -> tf.Tensor:
     return tf.reshape(tf.stack([x, x], axis=2), [-1, 2 * seq_len, channels])
 
 
-def conv1d_same(x: tf.Tensor, kernel: tf.Tensor, stride: int) -> tf.Tensor:
+def conv1d_same_nocustom(x: tf.Tensor, kernel: tf.Tensor, stride: int) -> tf.Tensor:
+    return tf.nn.conv1d(x, kernel, stride=stride, padding='SAME')
+
+
+def _same_padding(seq_len: int, kernel_size: int, stride: int) -> tuple[int, int]:
+    out_len = seq_len // stride
+    total = max((out_len - 1) * stride + kernel_size - seq_len, 0)
+    return total // 2, total - total // 2
+
+
+def _conv1d_same_grad(dy: tf.Tensor, x: tf.Tensor, kernel: tf.Tensor,
+                      stride: int) -> tuple[tf.Tensor, tf.Tensor]:
     batch, seq_len, in_ch = (int(d) for d in x.shape)
     kernel_size, _, out_ch = (int(d) for d in kernel.shape)
     out_len = seq_len // stride
-    pad_total = max((out_len - 1) * stride + kernel_size - seq_len, 0)
-    pad_left = pad_total // 2
+    pad_left, pad_right = _same_padding(seq_len, kernel_size, stride)
 
-    #return tf.nn.conv1d(x, kernel, stride=stride, padding='SAME')
+    dx = tf.nn.conv1d_transpose(dy, kernel, output_shape=[batch, seq_len, in_ch],
+                                strides=stride, padding='SAME')
 
-    @tf.custom_gradient
-    def call(x: tf.Tensor, kernel: tf.Tensor):
-        y = tf.nn.conv1d(x, kernel, stride=stride, padding='SAME')
+    x_pad = tf.pad(x, [[0, 0], [pad_left, pad_right], [0, 0]])
+    dy_flat = tf.reshape(dy, [batch * out_len, out_ch])
+    last_window = (out_len - 1) * stride    # start of the rightmost output window
 
-        def grad(dy: tf.Tensor):
-            dx = tf.nn.conv1d_transpose(dy, kernel, output_shape=[batch, seq_len, in_ch],
-                                        strides=stride, padding='SAME')
-            x_pad = tf.pad(x, [[0, 0], [pad_left, pad_total - pad_left], [0, 0]])
-            dy_flat = tf.reshape(dy, [batch * out_len, out_ch])
-            span = (out_len - 1) * stride + 1
-            dk = tf.stack([
-                tf.matmul(tf.reshape(x_pad[:, tap : tap + span : stride, :],
-                                     [batch * out_len, in_ch]),
-                          dy_flat, transpose_a=True)
-                for tap in range(kernel_size)
-            ])
-            return dx, dk
+    # dk[tap, ci, co] = sum over (b, o) of x_pad[b, o * stride + tap, ci] * dy[b, o, co]
+    dk_taps = []
+    for tap in range(kernel_size):
+        # the one input sample per output position that tap multiplies: [batch, out_len, in_ch]
+        x_tap = x_pad[:, tap : tap + last_window + 1 : stride, :]
+        dk_taps.append(tf.matmul(tf.reshape(x_tap, [batch * out_len, in_ch]),
+                                 dy_flat, transpose_a=True))
 
-        return y, grad
+    return dx, tf.stack(dk_taps)
 
-    return call(x, kernel)
+
+@tf.custom_gradient
+def conv1d_same(x: tf.Tensor, kernel: tf.Tensor, stride: int):
+    stride = int(tf.get_static_value(stride))  # type: ignore[arg-type]
+    y = conv1d_same_nocustom(x, kernel, stride)
+
+    def grad(dy: tf.Tensor):
+        dx, dk = _conv1d_same_grad(dy, x, kernel, stride)
+        return dx, dk, None
+
+    return y, grad
 
 
 class Dense(tf.Module):

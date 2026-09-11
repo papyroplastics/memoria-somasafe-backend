@@ -32,8 +32,6 @@ class FeatureMLP(TrainableModel):
 
         self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
 
-        # Features arrive z-scored per subject (see ml.sources), so there is one forward
-        # signature and it is the one the int8 build is converted from.
         signature = [tf.TensorSpec(shape=self.in_shape, dtype=tf.float32)]
         self.eval = tf.function(self.eval_eager, input_signature=signature)
         self.train = tf.function(self.train_eager, input_signature=[

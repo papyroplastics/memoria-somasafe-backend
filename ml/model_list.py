@@ -68,8 +68,6 @@ MODELS: dict[str, ModelSpec] = {
         build_model=feature_autoencoder.get_model,
         submission_type=SubmissionType.raw,
     ),
-    # Same architecture and same seeded weights as 'feature-ae', reached through the
-    # secure upload path, so the two integration runs differ only in that path.
     "feature-ae-secure": ModelSpec(
         key="feature-ae-secure",
         name="Feature Autoencoder (secure)",

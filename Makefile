@@ -1,6 +1,6 @@
 shared_repo := https://github.com/papyroplastics/memoria-somasafe-shared.git
 
-.PHONY: shared get-data db-seed db-reseed db-run db-clean api-run api-test worker-run worker-monitor
+.PHONY: shared ml-data ml-test db-seed db-reseed db-run db-clean api-run api-test worker-run worker-monitor
 shared:
 	@if [ -e shared ] || [ -L shared ]; then \
 		echo "shared already present"; \
@@ -11,8 +11,11 @@ shared:
 	fi
 	$(MAKE) -C shared setup
 
-get-data: shared
+ml-data: shared
 	uv run -m scripts.system.get_dataset
+
+ml-test:
+	uv run pytest ml/test/
 
 db-seed: shared
 	uv run -m scripts.system.seed_db --assign-device --test-users
