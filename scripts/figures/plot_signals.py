@@ -100,27 +100,9 @@ if __name__ == "__main__":
     print(f"saved input windows to {in_path}")
     print(f"saved reconstructions to {rec_path}")
 
-    sample = {'dataset': args.dataset, 'subject': sid, 'window': window_idx,
-              'of_windows': n_windows, 'seed': args.seed}
-    axes = {'x_axis': {'name': 'seconds', 'range': [0, 8], 'sample_rate_hz': BVP_RATE},
-            'y_axis': {'name': 'BVP amplitude',
-                       'units': "z-scores of the subject's own clean signal"}}
+    sample = {'dataset': args.dataset, 'model': args.model, 'subject': sid,
+              'window': window_idx, 'of_windows': n_windows, 'seed': args.seed,
+              'kinds': list(KINDS)}
 
-    write_yaml(report_dir / 'signals.yaml', {
-        'shows': f"BVP signal windows for subject {sid}: one 8 s window per row, the "
-                 f"same window under the clean signal and each synthetic anomaly kind.",
-        'rows': {'order': 'top to bottom', 'kinds': list(KINDS)},
-        **axes,
-        'sample': sample,
-        'note': "anomalies are injected into BVP only",
-    })
-    write_yaml(report_dir / 'signals_reconstructed.yaml', {
-        'shows': f"The same {len(KINDS)} windows with the {args.model} autoencoder's "
-                 f"reconstruction overlaid on the input, both in the subject's own "
-                 f"z-scored units: "
-                 f"the autoencoder tracks clean rhythm and departs on integrity/rhythm "
-                 f"anomalies.",
-        'rows': {'order': 'top to bottom', 'kinds': list(KINDS)},
-        **axes,
-        'sample': sample,
-    })
+    write_yaml(report_dir / 'signals.yaml', sample)
+    write_yaml(report_dir / 'signals_reconstructed.yaml', sample)

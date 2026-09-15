@@ -184,22 +184,12 @@ def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
     line_plot(report_dir / "convergence.png", [h["round"] for h in history],
               {metric: values}, "round", metric)
     write_yaml(report_dir / "convergence.yaml", {
-        'shows': f"Integration-path convergence of {key} ({spec.submission_type.value}), "
-                 f"driven over the real HTTP API by the headless "
-                 f"{strategy.report_subdir} client.",
-        'x_axis': {'name': 'global round', 'range': [0, rounds],
-                   'note': '0 = initial global weights, '
-                           f'{rounds} = after the last aggregation'},
-        'y_axis': {'name': metric, 'better': 'lower' if 'error' in metric else 'higher'},
-        'split': {'clients': f'{len(client_datasets)} training subjects (test_N), one '
-                             f'submission each per round',
-                  'eval_subjects': eval_subjects,
-                  'holdout': f'leave-{eval_subjects}-subject-out'},
-        'headline': {'start': values[0], 'end': values[-1],
-                     'delta': values[-1] - values[0]},
-        'purpose': 'integration verification (Sec. 5.1), not a reported convergence curve '
-                   '— those come from the simulated federated loop (scripts.system.train '
-                   '--loop federated, plotted by scripts.figures.plot_convergence)',
+        'model': key,
+        'submission_type': spec.submission_type.value,
+        'metric': metric,
+        'clients': len(client_datasets),
+        'eval_subjects': eval_subjects,
+        'rounds': rounds,
     })
 
 

@@ -110,28 +110,9 @@ if __name__ == "__main__":
 
     write_metrics_csv(rows, report_dir, 'anomaly_kinds.csv')
     write_yaml(report_dir / 'anomaly_kinds.yaml', {
-        'dataset': {'key': args.dataset, 'name': BASES[args.dataset].name},
-        'shows': "Per-anomaly-kind detectability at one fixed operating point: recall on "
-                 "each kind's fully-anomalous set, and the threshold-free AUC of its "
-                 "scores against the same subjects' clean windows. Separates the kinds a "
-                 "detector catches from the ones it is structurally blind to, which the "
-                 "aggregate mixed-set metrics average together.",
-        'threshold': "per-subject threshold: the 1-f quantile of each subject's own clean "
-                     "scores, the same thresholds calibrate_fpr.py sweeps",
-        'x_axis': {'name': 'anomaly kind'},
-        'y_axis': {'name': 'rate', 'range': [0, 1]},
-        'measured_on': {
-            'calibration_subjects': train_ids,
-            'eval_subjects': held_out,
-            'note': "each kind is scored on its own fully-anomalous copy of the held-out "
-                    "subjects, never on the mix, so no kind's score is diluted by the "
-                    "others."},
-        'selection': {'expected_fpr': expected_fpr, 'clean_fpr': clean_fpr},
-        'reading': "AUC below 0.5 means the score is inverted for that kind: the detector "
-                   "ranks those windows as more normal than clean signal, so no threshold "
-                   "on this score can catch them and the aggregate metrics hide that "
-                   "behind the kinds it does catch. A recall below the clean FPR on the "
-                   "same row is the same finding read at the chosen operating point.",
-        'per_kind': rows,
-        'source': {'reproducible': True},
+        'dataset': args.dataset,
+        'calibration_subjects': train_ids,
+        'eval_subjects': held_out,
+        'expected_fpr': expected_fpr,
+        'clean_fpr': clean_fpr,
     })

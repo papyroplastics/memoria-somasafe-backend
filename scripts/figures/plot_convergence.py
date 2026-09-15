@@ -14,10 +14,6 @@ from ..common.reports import (
 COMPARABLE = ('metric', 'eval_subjects', 'train_subjects', 'batch_size', 'dataset_dir')
 
 
-def better_direction(metric: str) -> str:
-    return 'lower' if 'error' in metric or 'loss' in metric else 'higher'
-
-
 def load_curve(model: str, loop: str, tag: str | None = None) -> tuple[dict, list[float]]:
     """Returns a previous run's manifest and its held-out metric per step."""
     run = read_run(model, loop, tag)
@@ -39,19 +35,12 @@ def plot_convergence(model: str, run: dict, values: list[float]) -> None:
     write_metrics_csv([{'round': r, metric: v} for r, v in zip(rounds, values)],
                       report_dir, 'convergence.csv')
     write_yaml(report_dir / 'convergence.yaml', {
-        'shows': f"Simulated FL convergence of {model}: the held-out metric improves "
-                 f"round over round.",
-        'x_axis': {'name': 'global round', 'range': [1, len(values)]},
-        'y_axis': {'name': metric, 'better': better_direction(metric)},
-        'split': {'clients': run['clients'],
-                  'eval_subjects': run['eval_subjects'],
-                  'holdout': f"leave-{len(run['eval_subjects'])}-subject-out",
-                  'local_epochs': run['local_epochs'],
-                  'aggregation': 'weighted average'},
-        'headline': {'first_round': values[0], 'last_round': values[-1],
-                     'delta': values[-1] - values[0]},
-        'source': {'run': f"results/{model}/{loop_dir('federated', run['tag'])}/run.yaml",
-                   'seed': run['seed'], 'reproducible': True},
+        'model': model,
+        'metric': metric,
+        'clients': run['clients'],
+        'eval_subjects': run['eval_subjects'],
+        'local_epochs': run['local_epochs'],
+        'seed': run['seed'],
     })
 
 
@@ -71,34 +60,14 @@ def plot_overlay(model: str, fed_run: dict, fed_values: list[float],
          for s in steps],
         report_dir, 'centralized_vs_federated.csv')
 
-    caveats = ['per-step compute differs: each federated round runs '
-               f"{fed_run['local_epochs']} local passes, a centralized epoch runs one"]
-    if len(cen_values) != len(fed_values):
-        caveats.append(
-            f"the curves have different lengths (centralized {len(cen_values)} epochs, "
-            f"federated {len(fed_values)} rounds); compare the final values, not the ends "
-            f"of the x axis")
-
     write_yaml(report_dir / 'centralized_vs_federated.yaml', {
-        'shows': f"Centralized vs. federated {metric} for {model} on the same split: "
-                 f"FL reaches comparable quality without ever centralizing raw data.",
-        'x_axis': {'name': 'global round (federated) / epoch (centralized)',
-                   'centralized_range': [1, len(cen_values)],
-                   'federated_range': [1, len(fed_values)]},
-        'y_axis': {'name': metric, 'better': better_direction(metric)},
-        'split': {'eval_subjects': fed_run['eval_subjects'],
-                  'holdout': f"leave-{len(fed_run['eval_subjects'])}-subject-out",
-                  'train_subjects': fed_run['train_subjects'],
-                  'centralized': f"those {len(fed_run['train_subjects'])} subjects pooled",
-                  'federated': f"those subjects as {fed_run['clients']} separate clients, "
-                               f"{fed_run['local_epochs']} local epoch(s)/round"},
-        'headline': {'centralized_final': cen_values[-1],
-                     'federated_final': fed_values[-1],
-                     'gap_fed_minus_cen': fed_values[-1] - cen_values[-1]},
-        'caveats': caveats,
-        'source': {'federated_run': f"results/{model}/{loop_dir('federated', fed_run['tag'])}/run.yaml",
-                   'centralized_run': f"results/{model}/{loop_dir('normal', cen_run['tag'])}/run.yaml",
-                   'seed': fed_run['seed'], 'reproducible': True},
+        'model': model,
+        'metric': metric,
+        'eval_subjects': fed_run['eval_subjects'],
+        'train_subjects': fed_run['train_subjects'],
+        'clients': fed_run['clients'],
+        'local_epochs': fed_run['local_epochs'],
+        'seed': fed_run['seed'],
     })
 
 

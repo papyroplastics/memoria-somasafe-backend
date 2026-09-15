@@ -14,7 +14,7 @@ from ml.saving import load_weights, weights_path
 from ml.sources.dalia import CLEAN, MIXED
 
 from ..common.plots import roc_grid
-from ..common.reports import get_report_dir, write_yaml
+from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 from ..common.scoring import score_subjects, mixed_truth, variant_sources
 
 if __name__ == "__main__":
@@ -61,7 +61,7 @@ if __name__ == "__main__":
         recall = (anom[:, None] > thr).mean(axis=0) if len(anom) else np.full_like(fpr, np.nan)
         curves[sid] = (fpr.tolist(), recall.tolist())
         recalls.append(recall)
-        per_subject[sid] = {'auc': float(np.trapezoid(recall, fpr)),
+        per_subject[sid] = {'subject': sid, 'auc': float(np.trapezoid(recall, fpr)),
                             'anomalous_windows': int((t == 1).sum())}
 
     report_dir = get_report_dir(args.model, f'subject_roc/{args.dataset}')
@@ -87,29 +87,13 @@ if __name__ == "__main__":
     print(f"saved plot to {report_dir / 'roc_aggregate.png'}")
 
     aucs = [s['auc'] for s in per_subject.values()]
+    write_metrics_csv(list(per_subject.values()), report_dir, 'subject_roc.csv')
     write_yaml(report_dir / 'subject_roc.yaml', {
-        'dataset': {'key': args.dataset, 'name': BASES[args.dataset].name},
-        'shows': "Per-subject detectability of the reconstruction-error detector on one set "
-                 "of weights: each subject's ROC (recall vs. its own empirical clean FPR) and "
-                 "the mean +/- std recall across subjects. Answers whether the detector just "
-                 "catches some users better than others.",
+        'dataset': args.dataset,
         'weights': str(weights),
-        'threshold': ("single global threshold (the 1-f quantile of all subjects' pooled "
-                      "clean scores) — each subject's clean FPR drifts off f by its own "
-                      "error scale" if args.global_f else
-                      "per-subject threshold (the 1-f quantile of each subject's own clean "
-                      "scores) — each subject's clean FPR is f by construction"),
-        'x_axis': {'name': 'empirical clean FPR (grid) / expected FPR (aggregate)',
-                   'range': [0, 1]},
-        'y_axis': {'name': 'recall', 'range': [0, 1]},
-        'measured_on': {
-            'subjects': order,
-            'note': "every subject scored on the given model; if --tag is an all-users "
-                    "teacher then every subject was trained on, so this is the population "
-                    "spread of per-subject detectability, not a generalization number."},
+        'global_f': args.global_f,
+        'subjects': order,
         'highlight': sorted(highlight),
         'aggregate': {'mean_auc': float(np.mean(aucs)), 'std_auc': float(np.std(aucs)),
                       'min_auc': float(np.min(aucs)), 'max_auc': float(np.max(aucs))},
-        'per_subject': per_subject,
-        'source': {'reproducible': True},
     })

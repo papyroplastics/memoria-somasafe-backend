@@ -182,10 +182,12 @@ if __name__ == "__main__":
     print("\npooled over all eval windows:")
     print(f"  {'variant':<16} {'precision':>10} {'recall':>10} {'f1':>10} {'accuracy':>10}")
     overall = {}
+    overall_rows = []
     for v in VARIANTS:
         rep = classification_report(np.concatenate(pooled[v]['pred']),
                                     np.concatenate(pooled[v]['truth']))
         overall[v] = rep
+        overall_rows.append({'variant': v, **rep})
         print(f"  {v:<16} {rep['precision']:>10.4f} {rep['recall']:>10.4f} "
               f"{rep['f1']:>10.4f} {rep['accuracy']:>10.4f}")
 
@@ -197,48 +199,19 @@ if __name__ == "__main__":
 
     report_dir = get_report_dir(args.student, f'personalization/{args.dataset}')
     write_metrics_csv(rows, report_dir, 'personalization.csv')
+    write_metrics_csv(overall_rows, report_dir, 'personalization_overall.csv')
     write_yaml(report_dir / 'personalization.yaml', {
-        'dataset': {'key': args.dataset, 'name': BASES[args.dataset].name},
-        'shows': f"Leave-one-subject-out personalization of a distilled {args.student} "
-                 f"student against a {args.teacher} teacher (report Secs. 5.4/5.8): per-"
-                 f"fold precision/recall/F1/accuracy for the global vs. personalized "
-                 f"student, float and int8, plus a direct-supervision ceiling, all scored "
-                 f"against each held-out subject's true labels.",
-        'measured_on': {
-            'holdout': 'leave-one-subject-out',
-            'subjects': subjects,
-            'note': "each fold's global student never trains on the subject it is judged "
-                    "on; the teacher trained on all subjects so every fold's distilled "
-                    "labels are the same, teacher-seen quality.",
-        },
-        'variants': {
-            'global_float': "student trained on the other subjects' distilled soft labels",
-            'global_int8': 'the same student quantized to int8',
-            'personal_float': "global student fine-tuned on the held-out subject's own "
-                              'distilled labels',
-            'personal_int8': 'the same personalized student quantized to int8',
-            'direct_float': "ceiling: same student, same windows, trained on the other "
-                            "subjects' TRUE labels instead of the teacher's soft ones",
-        },
-        'config': {
-            'teacher': args.teacher, 'student': args.student, 'expected_fpr': expected_fpr,
-            'global_epochs': args.global_epochs, 'epochs': args.epochs,
-            'train_split': args.train_split, 'batch_size': args.batch_size,
-            'dataset': args.dataset,
-        },
-        'headline': overall,
+        'dataset': args.dataset,
+        'subjects': subjects,
+        'teacher': args.teacher, 'student': args.student, 'expected_fpr': expected_fpr,
+        'global_epochs': args.global_epochs, 'epochs': args.epochs,
+        'train_split': args.train_split, 'batch_size': args.batch_size,
         'personalization_delta_f1': {
             'float': overall['personal_float']['f1'] - overall['global_float']['f1'],
             'int8': overall['personal_int8']['f1'] - overall['global_int8']['f1'],
         },
         'distillation_cost_f1': {
             'float': overall['direct_float']['f1'] - overall['global_float']['f1'],
-            'means': 'direct - global: what the student loses by learning from the '
-                     'teacher instead of ground truth. Near zero means distillation '
-                     'reproduces direct supervision; large and positive means the '
-                     "teacher's labels are the bottleneck.",
         },
-        'per_subject': 'see personalization.csv',
-        'source': {'reproducible': True},
     })
     print(f"wrote report to {report_dir}/")

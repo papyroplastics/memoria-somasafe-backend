@@ -111,22 +111,13 @@ if __name__ == "__main__":
 
     report_dir = get_report_dir(args.model)
     write_yaml(report_dir / f'anomaly_detection.{args.dataset}.yaml', {
-        'dataset': {'key': args.dataset, 'name': BASES[args.dataset].name},
-        'shows': f"Detector evaluation for {args.model} (report Sec. 5.4): precision/"
-                 f"recall/F1/accuracy and clean false-positive rate against the true "
-                 f"mixed-window labels, plus per-anomaly-kind recall, on held-out subjects.",
-        'measured_on': {
-            'calibration_subjects': train_ids,
-            'eval_subjects': held_out,
-            'note': "the expected FPR is calibrated on the training subjects; every "
-                    "metric here is scored on the held-out subjects, so the numbers are "
-                    "generalization to an unseen user.",
-        },
-        'selection': {'expected_fpr': expected_fpr},
-        'headline': results['detector'],
+        'dataset': args.dataset,
+        'calibration_subjects': train_ids,
+        'eval_subjects': held_out,
+        'expected_fpr': expected_fpr,
+        'detector': results['detector'],
         'per_kind': results['per_kind'],
         'n_windows': results['n_windows'],
         'gt_anomaly_rate': results['gt_anomaly_rate'],
         'pred_anomaly_rate': results['pred_anomaly_rate'],
-        'source': {'reproducible': True},
     })

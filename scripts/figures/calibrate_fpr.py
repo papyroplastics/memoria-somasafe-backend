@@ -101,59 +101,19 @@ if __name__ == "__main__":
                      f"selected operating point (FPR={chosen['clean_fpr']:.4f})"),
               diagonal=True)
 
-    threshold_desc = ("single global threshold: the 1-f quantile of all subjects' pooled "
-                      "clean scores, applied unchanged to everyone (per-subject clean FPR "
-                      "then drifts off f with each subject's own error scale)"
-                      if args.global_f else
-                      "per-subject threshold: the 1-f quantile of each subject's own clean "
-                      "scores, so every subject's clean FPR is f by construction")
-
     write_metrics_csv(sweep, report_dir, 'calibration.csv')
     write_yaml(report_dir / 'calibration.yaml', {
-        'dataset': {'key': args.dataset, 'name': BASES[args.dataset].name},
-        'shows': "Detector calibration sweep: how recall and the empirical clean "
-                 "false-positive rate trade off as the expected FPR varies, and the "
-                 "operating point selected from it.",
-        'threshold': threshold_desc,
-        'x_axis': {'name': 'expected FPR', 'range': [min(levels), max(levels)]},
-        'y_axis': {'name': 'rate', 'range': [0, 1]},
-        'measured_on': {
-            'calibration_subjects': train_ids,
-            'sweep_subjects': held_out,
-            'note': "the operating point is selected on the training subjects; the sweep "
-                    "plotted here is evaluated on the held-out subjects, so the numbers "
-                    "are generalization to an unseen user."},
-        'selection': {
-            'criterion': "maximum Youden's J (recall - clean FPR), found by a dense "
-                         "grid argmax (J is not unimodal, so a scan-then-ternary search "
-                         "overshoots the peak and drifts across its noisy plateau)",
-            'why': "J is built from two rates each conditioned on a single class, so it "
-                   "is independent of the anomaly prevalence of the set it is measured "
-                   "on; precision (and therefore F1) mixes the classes and inherits that "
-                   "prevalence, so an F1-selected threshold would not transfer to a "
-                   "deployment whose prevalence is unknown and subject-varying.",
-            'expected_fpr': expected_fpr,
-        },
-        'sweep': sweep,
-        'headline': chosen,
-        'caveats': ["precision and F1 are reported at each level but are "
-                    "prevalence-dependent: the mixed set is ~50% anomalous by "
-                    "construction, and a real deployment's far lower rate would make "
-                    "precision worse than shown"],
-        'source': {'reproducible': True},
+        'dataset': args.dataset,
+        'global_f': args.global_f,
+        'calibration_subjects': train_ids,
+        'sweep_subjects': held_out,
+        'expected_fpr': expected_fpr,
     })
     write_yaml(report_dir / 'roc.yaml', {
-        'dataset': {'key': args.dataset, 'name': BASES[args.dataset].name},
-        'shows': "The detector's ROC curve on the held-out subjects: recall against the "
-                 "empirical clean false-positive rate as the expected FPR sweeps from 0 to "
-                 "1, with the selected operating point marked. See calibration.yaml/csv for "
-                 "the full sweep (including precision/F1/Youden's J per level).",
-        'threshold': threshold_desc,
-        'x_axis': {'name': 'empirical clean FPR', 'range': [0, 1]},
-        'y_axis': {'name': 'recall', 'range': [0, 1]},
-        'measured_on': {'subjects': held_out,
-                        'note': 'held-out subjects — generalization to an unseen user'},
-        'headline': {'expected_fpr': expected_fpr, 'clean_fpr': chosen['clean_fpr'],
-                     'recall': chosen['recall']},
-        'source': {'reproducible': True},
+        'dataset': args.dataset,
+        'global_f': args.global_f,
+        'subjects': held_out,
+        'expected_fpr': expected_fpr,
+        'clean_fpr': chosen['clean_fpr'],
+        'recall': chosen['recall'],
     })

@@ -78,31 +78,7 @@ def main() -> None:
     report_dir = get_report_dir('footprint')
     write_metrics_csv(rows, report_dir, 'footprint.csv')
 
-    write_yaml(report_dir / 'footprint.yaml', {
-        'shows': 'System footprint table: the edge-cost figures derivable from the models '
-                 'and their exported artifacts, one row per model.',
-        'columns': {
-            'params': 'flat trainable-weight count',
-            'trainable_bytes': 'on-disk float32 trainable .tflite size',
-            'trainable_zstd_bytes': 'the same artifact zstd-compressed, as the gateway '
-                                    'stores and serves it — one download per graph change',
-            'quantized_bytes': 'on-disk int8 quantized .tflite size',
-            'quantized_zstd_bytes': 'the same artifact zstd-compressed, as stored and served',
-            'weights_bytes': 'params x 4 — the flat float32 buffer, uploaded uncompressed '
-                             'as a client delta once per round',
-            'weights_zstd_bytes': 'the same buffer zstd-compressed, as /model/weights '
-                                  'serves it back once per round',
-        },
-        'models': {r['model']: {k: v for k, v in r.items() if k != 'model'} for r in rows},
-        'paste_in_rows': {'note': 'measured on the phone/ESP32/server and pasted into the '
-                                  'report table, not produced by this script',
-                          'todo': PASTE_IN_ROWS},
-        'source': {'artifacts': f'{MODELS_DIR}/<model>/',
-                   'compression': 'zstd at the level common.compression uses, so the '
-                                  'compressed columns are the exact bytes the gateway holds',
-                   'na_means': 'the artifact was not exported yet (train + seed the model '
-                               'first)'},
-    })
+    write_yaml(report_dir / 'footprint.yaml', {'paste_in_rows': PASTE_IN_ROWS})
     print(f"wrote footprint table to {report_dir}/ (results root {RESULTS_DIR})")
 
 

@@ -115,23 +115,15 @@ def main() -> None:
               f'{args.model} — Byzantine robustness')
     write_metrics_csv(rows, report_dir, 'byzantine.csv')
     write_yaml(report_dir / 'byzantine.yaml', {
-        'shows': f"Byzantine robustness of {args.model}: final {metric} vs. number of "
-                 f"malicious clients, under the plain mean vs. the trimmed mean.",
-        'x_axis': {'name': 'malicious clients', 'range': [0, args.max_malicious]},
-        'y_axis': {'name': f'final {metric} after {args.rounds} rounds',
-                   'better': 'lower' if 'error' in metric else 'higher'},
-        'split': {'honest_clients': len(clients), 'eval_subjects': args.eval_subjects,
-                  'holdout': f'leave-{args.eval_subjects}-subject-out',
-                  'local_epochs': args.local_epochs, 'rounds': args.rounds},
-        'aggregators': {'plain mean': 'undefended baseline',
-                        'trimmed mean': {'trim_per_side': args.trim}},
-        'attack': {'kind': 'large random (Gaussian) delta',
-                   'magnitude': f'{args.attack_magnitude}x the honest mean L2 norm'},
-        'headline': {'clean_baseline': {label: series[label][0] for label in aggregators},
-                     f'at_{args.max_malicious}_malicious':
-                         {label: series[label][-1] for label in aggregators}},
-        'conclusion': 'trimmed mean holds the round against gross outliers, and no more',
-        'source': {'seed': SEED, 'reproducible': True},
+        'model': args.model,
+        'metric': metric,
+        'trim': args.trim,
+        'honest_clients': len(clients),
+        'eval_subjects': args.eval_subjects,
+        'local_epochs': args.local_epochs,
+        'rounds': args.rounds,
+        'attack_magnitude': args.attack_magnitude,
+        'seed': SEED,
     })
 
 

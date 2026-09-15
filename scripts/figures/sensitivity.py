@@ -16,10 +16,6 @@ from ..common.plots import bar_plot, line_plot
 from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 
 
-def better_direction(metric: str) -> str:
-    return 'lower' if 'error' in metric else 'higher'
-
-
 def final_metric(key: str, clients: list, eval_dataset, local_epochs: int,
                  rounds: int) -> float:
     """The held-out primary metric after the last round of one federated run."""
@@ -44,17 +40,12 @@ def sweep_participants(key, subjects, metric, args, report_dir):
               f'{key} — clients per round')
     write_metrics_csv(rows, report_dir, 'participants.csv')
     write_yaml(report_dir / 'participants.yaml', {
-        'shows': f"Sensitivity of {key} to the number of participating client "
-                 f"subjects per round.",
-        'x_axis': {'name': 'participating clients', 'range': [counts[0], counts[-1]]},
-        'y_axis': {'name': f'final {metric} after {args.rounds} rounds',
-                   'better': better_direction(metric)},
-        'split': {'eval_subjects': args.eval_subjects,
-                  'holdout': f'leave-{args.eval_subjects}-subject-out',
-                  'local_epochs': args.local_epochs, 'rounds': args.rounds},
-        'headline': {'min': min(values), 'max': max(values),
-                     'spread': max(values) - min(values)},
-        'source': {'seed': SEED, 'reproducible': True},
+        'model': key,
+        'metric': metric,
+        'eval_subjects': args.eval_subjects,
+        'local_epochs': args.local_epochs,
+        'rounds': args.rounds,
+        'seed': SEED,
     })
 
 
@@ -74,16 +65,12 @@ def sweep_local_epochs(key, subjects, metric, args, report_dir):
               f'{key} — local epochs')
     write_metrics_csv(rows, report_dir, 'local_epochs.csv')
     write_yaml(report_dir / 'local_epochs.yaml', {
-        'shows': f"Sensitivity of {key} to the number of local epochs per round.",
-        'x_axis': {'name': 'local epochs per round', 'range': [1, args.max_local_epochs]},
-        'y_axis': {'name': f'final {metric} after {args.rounds} rounds',
-                   'better': better_direction(metric)},
-        'split': {'clients': len(clients), 'eval_subjects': args.eval_subjects,
-                  'holdout': f'leave-{args.eval_subjects}-subject-out',
-                  'rounds': args.rounds},
-        'headline': {'min': min(values), 'max': max(values),
-                     'spread': max(values) - min(values)},
-        'source': {'seed': SEED, 'reproducible': True},
+        'model': key,
+        'metric': metric,
+        'clients': len(clients),
+        'eval_subjects': args.eval_subjects,
+        'rounds': args.rounds,
+        'seed': SEED,
     })
 
 
@@ -103,17 +90,14 @@ def sweep_loso(key, subjects, metric, args, report_dir):
              f'{key} — leave-one-subject-out', mean_line=mean)
     write_metrics_csv(rows, report_dir, 'loso.csv')
     write_yaml(report_dir / 'loso.yaml', {
-        'shows': f"Leave-one-subject-out generalization of {key}: the conclusions "
-                 f"hold whichever subject is held out.",
-        'x_axis': {'name': 'held-out subject (fold)', 'folds': folds},
-        'y_axis': {'name': f'final {metric} on that unseen subject after {args.rounds} '
-                           f'rounds',
-                   'better': better_direction(metric)},
-        'split': {'clients_per_fold': len(subjects) - 1, 'eval_subjects': 1,
-                  'holdout': 'leave-1-subject-out, rotated',
-                  'local_epochs': args.local_epochs, 'rounds': args.rounds},
-        'headline': {'mean': mean, 'std': std, 'min': min(values), 'max': max(values)},
-        'source': {'seed': SEED, 'reproducible': True},
+        'model': key,
+        'metric': metric,
+        'folds': folds,
+        'clients_per_fold': len(subjects) - 1,
+        'local_epochs': args.local_epochs,
+        'rounds': args.rounds,
+        'mean': mean, 'std': std,
+        'seed': SEED,
     })
 
 
