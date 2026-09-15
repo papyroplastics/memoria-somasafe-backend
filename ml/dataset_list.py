@@ -5,6 +5,7 @@ from pathlib import Path
 from ml.sources.common import DataSource
 from ml.sources.dalia import (
     FEATURES, LOW_ACTIVITY, SIGNAL, VARIANTS, DaliaFeatureSource, DaliaSignalSource,
+    prepare_ppg_dalia,
 )
 
 
@@ -13,6 +14,7 @@ class DatasetBase:
     key: str
     name: str
     activities: tuple[int, ...] | None
+    prepare: Callable[[Path], None]
 
 
 @dataclass(frozen=True)
@@ -24,9 +26,11 @@ class DatasetSpec:
 
 BASES: dict[str, DatasetBase] = {
     "ppg-dalia": DatasetBase(
-        key="ppg-dalia", name="PPG-DaLiA (all activities)", activities=None),
+        key="ppg-dalia", name="PPG-DaLiA (all activities)", activities=None,
+        prepare=prepare_ppg_dalia),
     "ppg-dalia-low": DatasetBase(
-        key="ppg-dalia-low", name="PPG-DaLiA (low-activity windows)", activities=LOW_ACTIVITY),
+        key="ppg-dalia-low", name="PPG-DaLiA (low-activity windows)", activities=LOW_ACTIVITY,
+        prepare=prepare_ppg_dalia),
 }
 
 DATASETS: dict[str, DatasetSpec] = {}

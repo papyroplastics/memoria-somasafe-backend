@@ -23,17 +23,31 @@ LOOP_OPTIONS = ['normal', 'federated']
 
 def parse_eval_selection(value: str, sids: list[str]) -> list[str]:
     value = value.strip()
+    n = len(sids)
     if value == 'none':
         return []
-    if re.fullmatch(r'\d+-\d+', value):
+
+    if value.startswith('last:'):
+        k = int(value[len('last:'):])
+        idx = range(max(n - k, 0), n)
+    elif value.startswith('first:'):
+        k = int(value[len('first:'):])
+        idx = range(0, min(k, n))
+    elif value.startswith('frac:'):
+        k = round(float(value[len('frac:'):]) * n)
+        idx = range(max(n - k, 0), n)
+    elif re.fullmatch(r'\d+-\d+', value):
         lo, hi = (int(x) for x in value.split('-'))
-        ids = {f'S{i}' for i in range(lo, hi + 1)}
+        idx = range(lo, hi + 1)
     else:
-        ids = {f'S{int(i)}' for i in value.split(',')}
-    missing = ids - set(sids)
-    if missing:
-        raise SystemExit(f"eval subjects {sorted(missing)} not found among {sids}")
-    return [s for s in sids if s in ids]
+        idx = [int(x) for x in value.split(',')]
+
+    idx = sorted(set(idx))
+    bad = [i for i in idx if i < 0 or i >= n]
+    if bad:
+        raise SystemExit(
+            f"eval subject indices {bad} out of range; subjects are {list(enumerate(sids))}")
+    return [sids[i] for i in idx]
 
 
 def run_loop(trainer: Trainer, loop: str, eval_ids: list[str],
@@ -65,10 +79,12 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('model', choices=sorted(MODELS), help='Model to train')
     parser.add_argument('--loop', choices=LOOP_OPTIONS, default='normal', help='Training loop')
-    parser.add_argument('--eval-subjects', default='14-15',
-                        help="Subjects held out whole for evaluation: an id N, an inclusive "
-                             "range 'n-m', a list 'i,j,k', or 'none' to train on everyone "
-                             "and skip evaluation")
+    parser.add_argument('--eval-subjects', default=None,
+                        help="Subjects held out whole for evaluation, by index into the "
+                             "trainer's subject list: an index N, a list 'i,j,k', an "
+                             "inclusive range 'lo-hi', 'last:N', 'first:N', 'frac:0.2', or "
+                             "'none' to train on everyone and skip evaluation. Defaults to "
+                             "the trainer's own default_holdout")
     parser.add_argument('--epochs', type=int, default=5, help='Epochs for the normal loop')
     parser.add_argument('--local-epochs', type=int, default=2, help='Local epochs per round (federated)')
     parser.add_argument('--batch-size', type=int, default=None,
@@ -102,7 +118,8 @@ if __name__ == "__main__":
         trainer.model.restore(load_weights(source))
         print(f"Loaded weights from {source}")
 
-    eval_ids = parse_eval_selection(args.eval_subjects, trainer.subject_ids())
+    selection = args.eval_subjects if args.eval_subjects is not None else trainer.default_holdout
+    eval_ids = parse_eval_selection(selection, trainer.subject_ids())
     history, eval_dataset, train_ids, held_ids = run_loop(
         trainer, args.loop, eval_ids, args.epochs, args.local_epochs)
 

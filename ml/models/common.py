@@ -145,6 +145,7 @@ class Trainer(ABC):
     calibration_key: str | None = None
     shuffle_buffer: int = 1000
     cache_batches: bool = True
+    default_holdout: str = 'last:2'
 
     def __init__(self, model: TrainableModel, data_root: Path):
         self.model = model
@@ -156,8 +157,8 @@ class Trainer(ABC):
     def subject_arrays(self, sid: str) -> tuple[np.ndarray, ...]:
         """One subject's datapoints, one array per entry of ``dataset_tensors``."""
 
-    def calibration_arrays(self) -> np.ndarray:
-        return self.calibration.calibration_data()
+    def calibration_arrays(self) -> tuple[np.ndarray, ...]:
+        return (self.calibration.calibration_data(),)
 
     @abstractmethod
     def eval_metrics(self, datapoints: list, outputs: list[dict]) -> dict[str, float]:
@@ -184,9 +185,8 @@ class Trainer(ABC):
                 for sid in self.subject_ids()]
 
     def representative_dataset(self) -> tf.data.Dataset:
-        """Feed-dict stream for the int8 TFLite converter."""
         names = self.dataset_tensors[:self.n_eval_inputs]
-        return (to_dataset(self.calibration_arrays())
+        return (to_dataset(*self.calibration_arrays())
                 .batch(self.model.batch_size, drop_remainder=True)
                 .map(lambda *tensors: dict(zip(names, tensors))))
 

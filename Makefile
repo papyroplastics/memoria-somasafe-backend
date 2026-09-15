@@ -12,7 +12,7 @@ shared:
 	$(MAKE) -C shared setup
 
 ml-data: shared
-	uv run -m scripts.system.get_dataset
+	uv run -m scripts.system.get_dataset ppg-dalia
 
 ml-test:
 	uv run pytest ml/test/

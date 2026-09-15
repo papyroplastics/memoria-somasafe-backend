@@ -3,6 +3,9 @@ and feature extraction, plus the two DataSource variants (signal / features) tha
 the result back through ml.dataset_list's registry."""
 
 import pickle as pkl
+import tempfile
+import urllib.request
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -11,6 +14,8 @@ from numpy.lib.stride_tricks import sliding_window_view
 from common.config import SEED
 
 from .common import DataSource
+
+DATASET_URL = 'https://archive.ics.uci.edu/static/public/495/ppg+dalia.zip'
 
 RAW_SUBDIR = 'PPG_FieldStudy'
 CLEAN_SUBDIR = 'clean-signals'
@@ -239,6 +244,44 @@ def create_anomalous_signals(subjects_dir: Path, anomalous_dir: Path):
             save_dir.mkdir(parents=True, exist_ok=True)
             np.save(save_dir / 'bvp.npy', anomalous_bvp)
         print(f"  {kind}: {len(subject_dirs)} subjects")
+
+
+def prepare_ppg_dalia(datasets_dir: Path) -> None:
+    raw_dir = datasets_dir / RAW_SUBDIR
+    subjects_dir = datasets_dir / CLEAN_SUBDIR
+    anomalous_dir = datasets_dir / ANOMALOUS_SUBDIR
+
+    if raw_dir.is_dir():
+        print(f"Raw dataset already present at {raw_dir}")
+    else:
+        datasets_dir.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=datasets_dir) as tmp:
+            tmp_dir = Path(tmp)
+            outer_zip = tmp_dir / 'ppg-dalia.zip'
+            print(f"Downloading {DATASET_URL} ...")
+            urllib.request.urlretrieve(DATASET_URL, outer_zip)
+
+            with zipfile.ZipFile(outer_zip) as zf:
+                zf.extractall(tmp_dir)
+
+            inner_zip = tmp_dir / 'data.zip'
+            print(f"Extracting dataset into {datasets_dir}/ ...")
+            with zipfile.ZipFile(inner_zip) as zf:
+                zf.extractall(datasets_dir)
+        print(f"Raw dataset ready at {raw_dir}")
+
+    if subjects_dir.is_dir():
+        print(f"{CLEAN_SUBDIR} already present at {subjects_dir}")
+    else:
+        print(f"\nStage 1: Extracting raw signals into {subjects_dir}/ ...")
+        written = extract_subject_signals(raw_dir, subjects_dir)
+        print(f"Processed {len(written)} subjects")
+
+    if anomalous_dir.is_dir() and any(anomalous_dir.glob('*/S*')):
+        print(f"{ANOMALOUS_SUBDIR} already present at {anomalous_dir}")
+    else:
+        print(f"\nStage 2: Creating per-type anomalous signals in {anomalous_dir}/ ...")
+        create_anomalous_signals(subjects_dir, anomalous_dir)
 
 
 # ---------------------------------------------------------------------------
