@@ -9,12 +9,7 @@ from .common import ReconstructionTrainer, TrainableAutoencoder
 
 
 class FeatureAutoencoder(TrainableAutoencoder):
-    """Dense autoencoder over the same hand-crafted feature vector ``feature-mlp``
-    classifies, rather than over the waveform. Reconstruction error on the waveform only
-    grows with how *hard* a window is to reconstruct, so a slowed rhythm — a smoother,
-    more predictable wave than the physiological one — scores below the clean threshold;
-    the feature vector replaces that with quantities whose normal range is bounded on
-    both sides. Four dense layers, no labels."""
+    """Dense autoencoder over the hand-crafted feature vector rather than the waveform."""
 
     def __init__(self, name: str, batch_size: int, n_features: int = N_FEATURES,
                  hidden_dim: int = 32, latent_dim: int = 6,
@@ -41,11 +36,10 @@ class FeatureAutoencoder(TrainableAutoencoder):
 
 
 class FeatureAutoencoderTrainer(ReconstructionTrainer):
-    """Feeds feature vectors where AutoencoderTrainer feeds windows, on the
-    non-overlapping grid the labels and the feature vectors live on."""
 
     dataset_tensors = ['features']
-    variant_suffix = 'features-clean'
+    training_key = 'ppg-dalia-low-features-clean'
+    calibration_key = 'ppg-dalia-features-clean'
 
     def __init__(self, model: FeatureAutoencoder, data_root: Path):
         super().__init__(model, data_root)

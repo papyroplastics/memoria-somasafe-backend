@@ -1,5 +1,5 @@
 """
-Train a SomaSafe model with a chosen loop on the low-activity dataset, holding out whole
+Train a SomaSafe model with a chosen loop on its trainer's dataset, holding out whole
 subjects for evaluation. Weights and serving artifacts go to shared/gen/models/<model>;
 the history, plots, run manifest and eval report to results/<model>/<loop>.
 """
@@ -9,7 +9,6 @@ import re
 from pathlib import Path
 import tensorflow as tf
 
-from ml.dataset_list import TRAINING_DATASET
 from ml.sources.common import pool
 from ml.models.common import Trainer
 from ml.saving import load_weights, save_artifacts, weights_path
@@ -133,7 +132,7 @@ if __name__ == "__main__":
         'train_subjects': train_ids,
         'eval_subjects': held_ids,
         'batch_size': batch_size,
-        'dataset': TRAINING_DATASET,
+        'dataset': trainer.training_key,
         'dataset_dir': args.dataset_dir,
         'seed': SEED,
         'history': 'training.csv',

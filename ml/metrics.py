@@ -8,17 +8,17 @@ def mse_loss(x: tf.Tensor, y: tf.Tensor) -> tf.Tensor:
 
 
 @tf.function
-def first_difference_loss(reconstruction: tf.Tensor, signal: tf.Tensor) -> tf.Tensor:
+def first_difference_loss(reconstruction: tf.Tensor, target: tf.Tensor) -> tf.Tensor:
     def diff(x: tf.Tensor) -> tf.Tensor:
         n = x.shape[1] - 1
         return (tf.slice(x, [0, 1, 0], [-1, n, -1])
                 - tf.slice(x, [0, 0, 0], [-1, n, -1]))
 
-    return tf.reduce_mean((diff(reconstruction) - diff(signal)) ** 2)
+    return tf.reduce_mean((diff(reconstruction) - diff(target)) ** 2)
 
 
-def reconstruction_error(reconstruction: tf.Tensor, signal: tf.Tensor) -> tf.Tensor:
-    squared = tf.square(reconstruction - signal)
+def reconstruction_error(reconstruction: tf.Tensor, target: tf.Tensor) -> tf.Tensor:
+    squared = tf.square(reconstruction - target)
     return tf.reduce_mean(tf.reshape(squared, [tf.shape(squared)[0], -1]), axis=1)
 
 

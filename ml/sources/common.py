@@ -5,12 +5,8 @@ import tensorflow as tf
 
 
 class DataSource(ABC):
-    """Everything a trainer needs to read one dataset, already through whatever load-time
-    filter its DatasetSpec applies and already z-scored — no model normalizes its own
-    input. One source is always a single modality and a single variant (clean, mixed, one
-    anomaly kind, ...); which modality/variant it serves is fixed by ml.dataset_list's
-    registry, not by an argument here, so a new kind of dataset (image, text, ...) only
-    has to implement this shape."""
+    """One dataset through whatever load-time filter its registry entry applies, as a
+    single modality and variant."""
 
     key: str
 
@@ -20,12 +16,10 @@ class DataSource(ABC):
 
     @abstractmethod
     def datapoints(self, sid: str) -> np.ndarray:
-        """``(n, *shape)`` already-normalized, model-ready array for one subject."""
+        """``(n, *shape)`` model-ready array for one subject."""
 
     def labels(self, sid: str) -> np.ndarray | None:
-        """Optional per-datapoint ground truth aligned to ``datapoints()``. None when
-        this source carries no ground truth (e.g. a clean-only or single-anomaly-kind
-        variant, whose label is implicit in which source it is)."""
+        """Per-datapoint ground truth aligned to ``datapoints()``, when the source has any."""
         return None
 
     @abstractmethod
@@ -37,10 +31,11 @@ def to_dataset(*arrays: np.ndarray) -> tf.data.Dataset:
     return tf.data.Dataset.from_tensor_slices(tuple(arrays))
 
 
-def batched(ds: tf.data.Dataset, batch_size: int) -> tf.data.Dataset:
-    return (ds.shuffle(1000, reshuffle_each_iteration=False)
-              .batch(batch_size, drop_remainder=True)
-              .cache())
+def batched(ds: tf.data.Dataset, batch_size: int, shuffle_buffer: int = 1000,
+            cache: bool = True) -> tf.data.Dataset:
+    ds = (ds.shuffle(shuffle_buffer, reshuffle_each_iteration=False)
+            .batch(batch_size, drop_remainder=True))
+    return ds.cache() if cache else ds
 
 
 def pool(datasets: list[tf.data.Dataset]) -> tf.data.Dataset:

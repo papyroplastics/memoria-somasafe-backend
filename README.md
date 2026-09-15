@@ -54,9 +54,10 @@ ml/        TensorFlow models + training, imported by worker + scripts, never by 
            Two parallel registries are the single source of truth: model_list.py (key ->
            metadata + model/trainer builders) and dataset_list.py (key -> a DataSource
            builder, generated as every activity-filter x modality x variant combination a
-           dataset module offers, plus which keys training and int8 calibration use).
-           models/ holds one file per architecture (FeatureMLP, CNN/LSTM/GRU/feature
-           autoencoders) built on shared bases in common.py; sources/ mirrors it with one
+           dataset module offers). models/ holds one file per architecture (FeatureMLP,
+           CNN/LSTM/GRU/feature autoencoders) built on the dataset-agnostic bases in
+           common.py, plus signal.py for the PPG-specific waveform-autoencoder base and
+           its trainer; sources/ mirrors it with one
            module per dataset (dalia.py, holding PPG-DaLiA's raw download, injection and
            feature extraction alongside its DataSource variants) over the generic
            DataSource ABC and the dataset-agnostic tf.data helpers (to_dataset, batched,
@@ -102,11 +103,18 @@ Training is split into three layers so any model can be run under any loop:
 - **Model** (`TrainableModel`): the graph — `eval` / `train` / `save` / `restore`, plus
   `transfer_from` (copy compatible trainable weights from another instance of the same
   architecture, transferring the overlapping region where a shape differs — used for
-  cross-batch-size transfer learning).
+  cross-batch-size transfer learning). That is the whole contract: all state in
+  `trainable_variables`, saved and restored as one flat float32 buffer, and `train` need
+  only mutate the variables and return a dict carrying `loss`. Gradient descent is *not*
+  part of it — `BackpropModel` is the intermediate subclass that owns the Adam and the
+  tape/apply step, so a subclass writes only the forward pass and the loss. A model that
+  trains by accumulating statistics rather than by backprop inherits `TrainableModel`
+  directly and carries no optimizer.
 - **DataSource** (`ml/sources/`): a generic 3-method ABC — `subject_ids`, `datapoints`
-  (the already-normalized, model-ready array for one subject) and `calibration_data` (an
+  (the model-ready array for one subject) and `calibration_data` (an
   int8 calibration sample), plus an optional `labels` for the sources that carry ground
-  truth. A source is always a single modality and variant (e.g. "PPG-DaLiA's clean signal
+  truth. Whether those arrays are normalized is the dataset's business, not a contract:
+  PPG-DaLiA z-scores per subject (below), a future image source would not. A source is always a single modality and variant (e.g. "PPG-DaLiA's clean signal
   windows" or "its mixed feature vectors, low-activity only") — there is no selector
   argument, so a new kind of dataset (a different signal type, images, text) only has to
   implement this shape. Which combinations exist is generated in `ml/dataset_list.py`
@@ -116,12 +124,17 @@ Training is split into three layers so any model can be run under any loop:
 - **Trainer** (`Trainer`): only what is model-specific — `subject_arrays` (shape one
   subject's datapoints, reading `self.data.datapoints`/`.labels`) and `eval_metrics`
   (accuracy for the MLP, reconstruction error for the autoencoders); `calibration_arrays`
-  has a generic default (`self.calibration.calibration_data()`). A `variant_suffix` class
-  attribute (e.g. `"signal-clean"`, `"features-mixed"`) names the one `ml.dataset_list`
-  entry this model family always trains on; it is built with a data root and pins itself
-  to the training dataset accordingly. `subject_datasets()` is its single data entry
-  point, returning every subject's batched dataset in subject order, which
-  `ml.sources.common.holdout` splits and `.pool` merges. It offers no way to select a
+  has a generic default (`self.calibration.calibration_data()`). Two class attributes name
+  the `ml.dataset_list` entries this model family uses, as **full registry keys**: a
+  `training_key` (e.g. `"ppg-dalia-low-signal-clean"`) and an optional `calibration_key`
+  for the int8 converter, defaulting to `training_key` when a dataset has no separate
+  calibration variant. The trainer is built with a data root and resolves both through
+  `DATASETS`, so there is no global training dataset — each model family picks its own.
+  `subject_datasets()` is its single data entry point, returning every subject's batched
+  dataset in subject order, which `ml.sources.common.holdout` splits and `.pool` merges;
+  the `shuffle_buffer` and `cache_batches` class attributes tune the batching per dataset
+  (a 50k-image shard wants a different buffer and no in-memory cache than DaLiA's window
+  counts do). It offers no way to select a
   dataset — its consumers are the system itself (`train.py`, `fed_client.py`,
   `worker.tasks`), which trains on one dataset by definition; the figure scripts that
   already know their architecture build a bare model with `ModelSpec.build_model` and
@@ -153,7 +166,7 @@ its twenty values are ACC statistics. Anomalies are injected into BVP alone, so 
 carry no anomaly signal and only add reconstruction error that tracks the wearer's motion —
 part of why the detector is scored on the low-activity dataset.
 
-No model normalizes its own input. Every array a `DataSource` hands out is already
+No model normalizes its own input. Every array PPG-DaLiA's `DataSource`s hand out is
 z-scored, **per subject**, from statistics taken over that subject's own clean recording —
 the offline stand-in for a wearable calibrating on its wearer's resting signal. A model
 therefore carries no normalization constants, and `eval` is its only forward signature:
@@ -214,8 +227,8 @@ hand-enumerated, so each entry is a single, argument-free `DataSource`:
 
 `modality` is `signal` (BVP windows) or `features` (the 20-value vector); `variant` is
 `clean`, `mixed` (the synthetic anomaly mix) or one of the five anomaly kinds below. A
-`Trainer` pins itself to one full key via its `variant_suffix`
-(`ml/models/common.py`); a script comparing variants (`scripts/figures/anomaly_kinds.py`
+`Trainer` pins itself to one full key via its `training_key` (and its `calibration_key`
+for the int8 converter); a script comparing variants (`scripts/figures/anomaly_kinds.py`
 and friends) builds a `{variant: source}` dict over one activity filter + modality with
 `scripts.common.scoring.variant_sources`.
 
@@ -225,12 +238,14 @@ activities (id 0) are dropped. It is applied at load time, never on disk, and id
 to every variant and every derived array, so a window index means the same eight seconds
 everywhere.
 
-Training and its in-loop evaluation always run on `ppg-dalia-low` (`TRAINING_DATASET`):
-motion artefacts during cycling, stairs, table soccer and walking dominate the waveform,
-so an autoencoder trained across all of them spends its capacity on motion rather than on
-the morphology the detector reads. int8 calibration deliberately stays on the unfiltered
-`ppg-dalia` (`CALIBRATION_DATASET`) — the device runs everywhere, so the tensor scales
-must cover the full range. The analysis scripts take `--dataset` to score the same weights
+Every PPG trainer's `training_key` names a `ppg-dalia-low` variant, so training and its
+in-loop evaluation run on the low-activity windows: motion artefacts during cycling,
+stairs, table soccer and walking dominate the waveform, so an autoencoder trained across
+all of them spends its capacity on motion rather than on the morphology the detector
+reads. Their `calibration_key` deliberately names the unfiltered `ppg-dalia` clean variant
+instead — the device runs everywhere, so the tensor scales must cover the full range. That
+is a per-trainer choice, not a global rule: a dataset with no such split just leaves
+`calibration_key` unset and calibrates on what it trains on. The analysis scripts take `--dataset` to score the same weights
 either way.
 
 Per-subject normalization is deliberately **not** filtered with them: a subject's z-score

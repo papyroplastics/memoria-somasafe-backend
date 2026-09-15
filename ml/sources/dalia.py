@@ -61,7 +61,7 @@ FEATURES = 'features'
 EVAL_WINDOW = BVP_WINDOW
 EVAL_SHIFT = BVP_WINDOW
 # The waveform autoencoders' denser, overlapping training grid (see AutoencoderTrainer in
-# ml.models.common) — more training data per subject than the eval grid gives.
+# ml.models.signal) — more training data per subject than the eval grid gives.
 TRAIN_SHIFT = BVP_RATE * 3
 
 
@@ -464,9 +464,7 @@ class DaliaSignalSource(DataSource):
         return self._base.raw_acc(sid)
 
     def with_grid(self, window: int | None = None, shift: int | None = None) -> 'DaliaSignalSource':
-        """A new source over the same subject/variant/activity-filter data, on a
-        different ``(window, shift)`` grid — e.g. ``AutoencoderTrainer``'s denser,
-        overlapping training grid (``TRAIN_SHIFT``)."""
+        """The same data on a different ``(window, shift)`` grid."""
         return DaliaSignalSource(self._base.data_root, key=self.key, variant=self.variant,
                                  activities=self._base.activities,
                                  window=self.window if window is None else window,

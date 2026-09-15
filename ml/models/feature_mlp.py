@@ -4,13 +4,12 @@ import numpy as np
 import tensorflow as tf
 
 from ..layers import Dense, relu
-from .common import TrainableModel, Trainer
+from .common import BackpropModel, Trainer
 from ..sources.dalia import N_FEATURES
-from ..optimizers import Adam
 
 
-class FeatureMLP(TrainableModel):
-    """Supervised binary anomaly classifier over hand-crafted window features. """
+class FeatureMLP(BackpropModel):
+    """Supervised binary anomaly classifier over hand-crafted window features."""
 
     default_batch_size = 1
 
@@ -30,7 +29,7 @@ class FeatureMLP(TrainableModel):
             Dense(hidden_dim, hidden_dim, activation=relu) for _ in range(hidden_layers)
         ]
 
-        self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
+        self._init_optimizer(learning_rate, beta1, beta2, epsilon)
 
         signature = [tf.TensorSpec(shape=self.in_shape, dtype=tf.float32)]
         self.eval = tf.function(self.eval_eager, input_signature=signature)
@@ -51,23 +50,18 @@ class FeatureMLP(TrainableModel):
         return {'logits': self._logits(features)}
 
     def train_eager(self, features: tf.Tensor, labels: tf.Tensor):
-        with tf.GradientTape() as tape:
-            logits = self._logits(features)
-            loss = tf.reduce_mean(
-                tf.nn.sigmoid_cross_entropy_with_logits(labels=labels, logits=logits))
-        grads = tape.gradient(loss, self.trainable_variables)
-        self.optimizer.apply(self.trainable_variables, grads)
-        return {'loss': loss}
+        return self._apply_step(lambda: tf.reduce_mean(
+            tf.nn.sigmoid_cross_entropy_with_logits(
+                labels=labels, logits=self._logits(features))))
 
 
 class FeatureMLPTrainer(Trainer):
-    """Trains the FeatureMLP on the feature vectors the source extracts from each
-    subject's mixed signal, against that mix's per-window labels."""
 
     primary_metric = 'accuracy'
     dataset_tensors = ['features', 'labels']
     n_eval_inputs = 1
-    variant_suffix = 'features-mixed'
+    training_key = 'ppg-dalia-low-features-mixed'
+    calibration_key = 'ppg-dalia-features-clean'
 
     def __init__(self, model: FeatureMLP, data_root: Path):
         super().__init__(model, data_root)

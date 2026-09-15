@@ -4,7 +4,7 @@ import tensorflow as tf
 
 from ..layers import Dense, LSTMCell
 from ..sources.dalia import BVP_WINDOW
-from .common import SignalAutoencoder, AutoencoderTrainer
+from .signal import SignalAutoencoder, AutoencoderTrainer
 
 
 class LSTMAutoencoder(SignalAutoencoder):

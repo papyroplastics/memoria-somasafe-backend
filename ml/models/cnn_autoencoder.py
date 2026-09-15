@@ -4,7 +4,7 @@ import tensorflow as tf
 
 from ..layers import Conv1D, Dense, relu, upsample2
 from ..sources.dalia import BVP_WINDOW
-from .common import SignalAutoencoder, AutoencoderTrainer
+from .signal import SignalAutoencoder, AutoencoderTrainer
 
 class CNNAutoencoder(SignalAutoencoder):
     """Conv1D autoencoder over an 8-second BVP window, scored by reconstruction error.

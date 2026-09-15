@@ -145,7 +145,7 @@ def validate_weight_submission(submission_id: int) -> None:
         base = session.get(GlobalWeights, submission.base_weights_id)
         if base is None or base.model_key not in _models:
             return
-        model, _, _, _, _ = _models[base.model_key]
+        model, _, _ = _models[base.model_key]
         reason = malformed_reason(submission, model.total_weight_size)
         submission.valid = reason is None
         if reason is not None:
