@@ -19,7 +19,7 @@ def relu(x: tf.Tensor):
 
 
 def upsample2(x: tf.Tensor) -> tf.Tensor:
-    _, seq_len, channels = (int(d) for d in x.shape)
+    _, seq_len, channels = (int(d or 0) for d in x.shape)
     return tf.reshape(tf.stack([x, x], axis=2), [-1, 2 * seq_len, channels])
 
 
@@ -28,19 +28,19 @@ def conv1d_same_nocustom(x: tf.Tensor, kernel: tf.Tensor, stride: int) -> tf.Ten
 
 
 def _same_padding(seq_len: int, kernel_size: int, stride: int) -> tuple[int, int]:
-    out_len = seq_len // stride
+    out_len = -(-seq_len // stride)
     total = max((out_len - 1) * stride + kernel_size - seq_len, 0)
     return total // 2, total - total // 2
 
 
 def _conv1d_same_grad(dy: tf.Tensor, x: tf.Tensor, kernel: tf.Tensor,
                       stride: int) -> tuple[tf.Tensor, tf.Tensor]:
-    batch, seq_len, in_ch = (int(d) for d in x.shape)
-    kernel_size, _, out_ch = (int(d) for d in kernel.shape)
-    out_len = seq_len // stride
+    batch, seq_len, in_ch = (int(d or 0) for d in x.shape)
+    kernel_size, _, out_ch = (int(d or 0) for d in kernel.shape)
+    out_len = -(-seq_len // stride)
     pad_left, pad_right = _same_padding(seq_len, kernel_size, stride)
 
-    dx = tf.nn.conv1d_transpose(dy, kernel, output_shape=[batch, seq_len, in_ch],
+    dx = tf.nn.conv1d_transpose(dy, kernel, output_shape=tf.constant([batch, seq_len, in_ch]),
                                 strides=stride, padding='SAME')
 
     x_pad = tf.pad(x, [[0, 0], [pad_left, pad_right], [0, 0]])
@@ -50,12 +50,13 @@ def _conv1d_same_grad(dy: tf.Tensor, x: tf.Tensor, kernel: tf.Tensor,
     # dk[tap, ci, co] = sum over (b, o) of x_pad[b, o * stride + tap, ci] * dy[b, o, co]
     dk_taps = []
     for tap in range(kernel_size):
-        # the one input sample per output position that tap multiplies: [batch, out_len, in_ch]
         x_tap = x_pad[:, tap : tap + last_window + 1 : stride, :]
-        dk_taps.append(tf.matmul(tf.reshape(x_tap, [batch * out_len, in_ch]),
-                                 dy_flat, transpose_a=True))
+        x_tap_flat = tf.reshape(x_tap, [batch * out_len, in_ch])
+        dk_taps.append(tf.matmul(x_tap_flat, dy_flat, transpose_a=True))
 
-    return dx, tf.stack(dk_taps)
+    dk = tf.stack(dk_taps)
+
+    return dx, dk
 
 
 @tf.custom_gradient
