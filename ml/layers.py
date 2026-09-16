@@ -71,6 +71,21 @@ def conv1d_same(x: tf.Tensor, kernel: tf.Tensor, stride: int):
     return y, grad
 
 
+def softmax_cross_entropy_nocustom(labels: tf.Tensor, logits: tf.Tensor) -> tf.Tensor:
+    return tf.nn.softmax_cross_entropy_with_logits(labels=labels, logits=logits)
+
+
+@tf.custom_gradient
+def softmax_cross_entropy(labels: tf.Tensor, logits: tf.Tensor):
+    probs = tf.nn.softmax(logits)
+    loss = -tf.reduce_sum(labels * tf.math.log(probs + 1e-9), axis=-1)
+
+    def grad(dy: tf.Tensor):
+        return None, (probs - labels) * dy[:, None]
+
+    return loss, grad
+
+
 class Dense(tf.Module):
     def __init__(self, in_dim: int, out_dim: int, activation: Callable | None =None):
         limit = math.sqrt(6.0 / (in_dim + out_dim))

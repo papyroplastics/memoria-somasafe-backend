@@ -3,7 +3,8 @@ import pytest
 import tensorflow as tf
 
 from ..layers import (Conv1D, conv1d_same, conv1d_same_nocustom, relu,
-                      relu_nocustom)
+                      relu_nocustom, softmax_cross_entropy,
+                      softmax_cross_entropy_nocustom)
 from ..models.cnn_autoencoder import CNNAutoencoder
 
 # CNNAutoencoder's convolutions, in encoder-then-decoder order, scaled down by 8 in
@@ -59,6 +60,29 @@ def test_relu_gradient_at_zero():
 
     np.testing.assert_array_equal(custom, builtin)
     np.testing.assert_array_equal(custom, [[0.0, 0.0, 1.0]])
+
+
+def one_hot(idx: np.ndarray, n_classes: int) -> tf.Tensor:
+    return tf.constant(np.eye(n_classes, dtype=np.float32)[idx])
+
+
+def test_softmax_cross_entropy_forward_matches_builtin():
+    logits = tf.random.normal([8, 10])
+    labels = one_hot(np.random.randint(0, 10, size=8), 10)
+
+    np.testing.assert_allclose(softmax_cross_entropy(labels, logits).numpy(),
+                               softmax_cross_entropy_nocustom(labels, logits).numpy(), **TOL)
+
+
+def test_softmax_cross_entropy_gradient_matches_builtin():
+    logits = tf.random.normal([8, 10])
+    labels = one_hot(np.random.randint(0, 10, size=8), 10)
+    dy = tf.random.normal([8])
+
+    (custom,) = vjp(lambda x: softmax_cross_entropy(labels, x), [logits], dy)
+    (builtin,) = vjp(lambda x: softmax_cross_entropy_nocustom(labels, x), [logits], dy)
+
+    np.testing.assert_allclose(custom, builtin, **TOL)
 
 
 @pytest.mark.parametrize('case', CONV_CASES, ids=lambda c: 'len{}_{}to{}_s{}'.format(*c))

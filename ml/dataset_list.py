@@ -7,6 +7,7 @@ from ml.sources.dalia import (
     FEATURES, LOW_ACTIVITY, SIGNAL, VARIANTS, DaliaFeatureSource, DaliaSignalSource,
     prepare_ppg_dalia,
 )
+from ml.sources.mnist import IID, NONIID, MnistShardSource, MnistTestSource, prepare_mnist
 
 
 @dataclass(frozen=True)
@@ -31,6 +32,9 @@ BASES: dict[str, DatasetBase] = {
     "ppg-dalia-low": DatasetBase(
         key="ppg-dalia-low", name="PPG-DaLiA (low-activity windows)", activities=LOW_ACTIVITY,
         prepare=prepare_ppg_dalia),
+    "mnist": DatasetBase(
+        key="mnist", name="MNIST", activities=None,
+        prepare=prepare_mnist),
 }
 
 DATASETS: dict[str, DatasetSpec] = {}
@@ -44,3 +48,13 @@ for _base in BASES.values():
                 build=lambda root, cls=_cls, variant=_variant, activities=_base.activities, key=_key:
                     cls(root, key=key, variant=variant, activities=activities),
             )
+
+DATASETS["mnist-iid"] = DatasetSpec(
+    key="mnist-iid", name="MNIST (IID shards)",
+    build=lambda root: MnistShardSource(root, key="mnist-iid", partition=IID))
+DATASETS["mnist-noniid"] = DatasetSpec(
+    key="mnist-noniid", name="MNIST (non-IID Dirichlet shards)",
+    build=lambda root: MnistShardSource(root, key="mnist-noniid", partition=NONIID))
+DATASETS["mnist-test"] = DatasetSpec(
+    key="mnist-test", name="MNIST (test split)",
+    build=lambda root: MnistTestSource(root, key="mnist-test"))

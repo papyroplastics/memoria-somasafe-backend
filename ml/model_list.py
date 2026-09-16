@@ -9,6 +9,7 @@ from ml.models import (
     feature_mlp,
     gru_autoencoder,
     lstm_autoencoder,
+    mnist_mlp,
 )
 from ml.models.common import Trainer, TrainableModel
 
@@ -89,6 +90,15 @@ MODELS: dict[str, ModelSpec] = {
         build_trainer=cnn_autoencoder.get_trainer,
         build_model=cnn_autoencoder.get_model,
         submission_type=SubmissionType.raw,
+    ),
+    "mnist-mlp": ModelSpec(
+        key="mnist-mlp",
+        name="MNIST MLP",
+        min_app_version="1.0.0",
+        build_trainer=mnist_mlp.get_trainer,
+        build_model=mnist_mlp.get_model,
+        submission_type=SubmissionType.quantize,
+        contract_version=1,
     ),
 }
 
