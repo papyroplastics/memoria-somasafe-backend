@@ -11,7 +11,7 @@ import numpy as np
 
 from common.config import DATASETS_DIR, EXPORTS_DIR
 from ml.dataset_list import DATASETS
-from ml.sources.dalia import ACC_WINDOW, BVP_WINDOW, CLEAN, MIXED, WINDOW_SECONDS
+from ml.sources.dalia import BVP_WINDOW, CLEAN, MIXED, WINDOW_SECONDS
 from shared.gen.code import dataset_pb2 as pb
 
 FORMAT_VERSION = 1
@@ -40,17 +40,15 @@ def export_subject(subject: int, datasets_dir: Path, out_path: Path,
     feats  = DATASETS[f'ppg-dalia-features-{variant}'].build(datasets_dir)
 
     bvp      = signal.raw_signal(sid).astype(np.float32)
-    acc      = signal.raw_acc(sid).astype(np.float32)
     features = feats.raw_features(sid).astype(np.float32)
     labels   = (feats.labels(sid) if variant == MIXED
                 else np.zeros(len(features), dtype=np.float32))
 
-    count = min(len(bvp) // BVP_WINDOW, len(acc) // ACC_WINDOW, len(features), len(labels))
+    count = min(len(bvp) // BVP_WINDOW, len(features), len(labels))
     if count == 0:
         raise ValueError(f"{sid}: no complete windows to export")
 
     ppg_win  = window_raw(bvp, BVP_WINDOW, count)
-    acc_win  = window_raw(acc, ACC_WINDOW, count)
     feat_win = features[:count].astype(np.float32)
     score    = labels[:count].astype(np.int8).reshape(count, 1)
 
@@ -84,7 +82,6 @@ def export_subject(subject: int, datasets_dir: Path, out_path: Path,
             w.device_start_ms = int(dev_start[i])
             w.device_end_ms = int(dev_end[i])
             w.ppg = ppg_win[i].tobytes()
-            w.acc = acc_win[i].tobytes()
         if feat_present[i]:
             w.features = feat_win[i].tobytes()
             w.score = score[i].tobytes()

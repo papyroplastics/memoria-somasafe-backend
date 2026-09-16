@@ -1,6 +1,5 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from typing import Protocol
 from pathlib import Path
 import hashlib
 import numpy as np
@@ -189,16 +188,6 @@ class Trainer(ABC):
         return (to_dataset(*self.calibration_arrays())
                 .batch(self.model.batch_size, drop_remainder=True)
                 .map(lambda *tensors: dict(zip(names, tensors))))
-
-
-class TrainerBuilder(Protocol):
-    def __call__(self, data_root: Path, batch_size: int | None = None) -> Trainer: ...
-
-
-class ModelBuilder(Protocol):
-    def __call__(self, data_root: Path,
-                 batch_size: int | None = None) -> TrainableModel: ...
-
 
 class ReconstructionTrainer(Trainer):
 

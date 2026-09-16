@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from typing import Protocol
+from pathlib import Path
 
 from common.db import SubmissionType
 from ml.models import (
@@ -8,25 +10,28 @@ from ml.models import (
     gru_autoencoder,
     lstm_autoencoder,
 )
-from ml.models.common import ModelBuilder, TrainerBuilder
+from ml.models.common import Trainer, TrainableModel
+
+class TrainerBuilder(Protocol):
+    def __call__(self, data_root: Path, batch_size: int | None = None) -> Trainer: ...
+
+
+class ModelBuilder(Protocol):
+    def __call__(self, data_root: Path,
+                 batch_size: int | None = None) -> TrainableModel: ...
+
 
 @dataclass(frozen=True)
 class ModelSpec:
     key: str
     name: str
-    min_app_version: str   # oldest app that can use the current version
+    min_app_version: str
     build_trainer: TrainerBuilder
-    # The bare model, for consumers that already know the architecture and load their own
-    # data (the figure scripts) — a Trainer would only pin them to the training dataset.
     build_model: ModelBuilder
-    # Upload path + aggregation strategy for this model's weight updates.
     submission_type: SubmissionType
     firmware_id: int | None = None
     version: int = 1
     contract_version: int = 0
-    # Set when this entry is a second registry key over an architecture another entry
-    # already owns, so it is served and seeded from that key's exported artifacts instead
-    # of its own. The two keys differ only in the upload path their weight updates take.
     artifacts_key: str | None = None
 
     @property

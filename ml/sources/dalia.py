@@ -23,17 +23,15 @@ ANOMALOUS_SUBDIR = 'anomalous-signals'      # per-type fully-anomalous BVP: <kin
 ACTIVITY_FILE = 'activity.npy'
 
 BVP_RATE = 64
-ACC_RATE = 32
 ACTIVITY_RATE = 4
 WINDOW_SECONDS = 8
 BVP_WINDOW = BVP_RATE * WINDOW_SECONDS    # 512 samples
-ACC_WINDOW = ACC_RATE * WINDOW_SECONDS    # 256 samples
 ANOMALY_PROB = 0.5
 MIN_ANOMALY_WINDOWS = 8
 MAX_ANOMALY_WINDOWS = 30
 
 ANOMALY_KINDS = ('blowup', 'noise', 'tachy', 'brady', 'afib')
-N_FEATURES = 20
+N_FEATURES = 13
 
 # Pulse band for the three shape features, 0.5-4.0 Hz = 30-240 bpm. Deliberately wider
 # than the HR-band ratio's 0.7-3.5 Hz so a slowed rhythm still falls inside it.
@@ -95,7 +93,7 @@ def upsample_activity(activity: np.ndarray, length: int) -> np.ndarray:
 
 
 def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
-    """Extract raw BVP (64 Hz), ACC magnitude (32 Hz) and the upsampled activity track per subject."""
+    """Extract raw BVP (64 Hz) and the upsampled activity track per subject."""
     subjects_dir.mkdir(parents=True, exist_ok=True)
 
     subject_raw_dirs = get_sorted_paths(raw_dir)
@@ -110,22 +108,18 @@ def extract_subject_signals(raw_dir: Path, subjects_dir: Path) -> list[int]:
         wrist = raw['signal']['wrist']
         bvp = wrist['BVP'].flatten().astype(np.float32)
 
-        acc_g = wrist['ACC'] / 64.0
-        acc = np.sqrt(np.sum(acc_g ** 2, axis=1)).astype(np.float32)
-
         activity = upsample_activity(np.asarray(raw['activity']), len(bvp))
 
         save_dir = subjects_dir / subject_dir_name
         save_dir.mkdir(parents=True, exist_ok=True)
         np.save(save_dir / 'bvp.npy', bvp)
-        np.save(save_dir / 'acc.npy', acc)
         np.save(save_dir / ACTIVITY_FILE, activity)
 
         processed.append(subject_dir_name)
 
         low = float(np.isin(activity, LOW_ACTIVITY).mean())
         print(f"  {subject_dir_name}: BVP {len(bvp)} samples @ {BVP_RATE} Hz, "
-              f"ACC {len(acc)} samples @ {ACC_RATE} Hz, {low:.1%} low-activity")
+              f"{low:.1%} low-activity")
 
     return processed
 
@@ -288,20 +282,17 @@ def prepare_ppg_dalia(datasets_dir: Path) -> None:
 # Load-time feature extraction
 # ---------------------------------------------------------------------------
 
-def extract_features(bvp_window: np.ndarray, acc_window: np.ndarray) -> np.ndarray:
-    """20-feature vector from an 8-second BVP window (512 samples) and ACC window (256 samples)"""
-    feats: list[float] = []
-
-    for ch in (bvp_window, acc_window):
-        feats += [
-            float(ch.mean()),
-            float(ch.std()),
-            float(ch.min()),
-            float(ch.max()),
-            float(ch.max() - ch.min()),
-            float(np.sqrt(np.mean(ch ** 2))),
-            float(np.mean(np.abs(np.diff(ch)))),
-        ]
+def extract_features(bvp_window: np.ndarray) -> np.ndarray:
+    """13-feature vector from an 8-second BVP window (512 samples)"""
+    feats: list[float] = [
+        float(bvp_window.mean()),
+        float(bvp_window.std()),
+        float(bvp_window.min()),
+        float(bvp_window.max()),
+        float(bvp_window.max() - bvp_window.min()),
+        float(np.sqrt(np.mean(bvp_window ** 2))),
+        float(np.mean(np.abs(np.diff(bvp_window)))),
+    ]
 
     bvp   = bvp_window - bvp_window.mean()
     signs = np.sign(bvp)
@@ -336,8 +327,7 @@ def extract_features(bvp_window: np.ndarray, acc_window: np.ndarray) -> np.ndarr
 
 class _DaliaBase:
     """Shared plumbing behind both Dalia DataSource variants: subject listing, the
-    variant-aware raw BVP stream (clean / mixed / one fully-anomalous kind), the raw ACC
-    stream (always the clean one — anomalies are injected into BVP only), window-grid
+    variant-aware raw BVP stream (clean / mixed / one fully-anomalous kind), window-grid
     arithmetic, the activity filter and per-subject z-score stats."""
 
     def __init__(self, data_root: Path, activities: tuple[int, ...] | None = None):
@@ -366,11 +356,6 @@ class _DaliaBase:
     def n_windows(self, sid: str, window: int, shift: int) -> int:
         n_bvp = self._length(self.clean_dir / sid / 'bvp.npy')
         count = (n_bvp - window) // shift + 1 if n_bvp >= window else 0
-        if window == BVP_WINDOW and shift == BVP_WINDOW:
-            # The feature grid is also bounded by ACC, which runs at half the rate and
-            # can end a window short (see extract_features' pairing of the two).
-            n_acc = self._length(self.clean_dir / sid / 'acc.npy')
-            count = min(count, (n_acc - ACC_WINDOW) // ACC_WINDOW + 1)
         return max(count, 0)
 
     def window_mask(self, sid: str, window: int, shift: int) -> np.ndarray:
@@ -403,9 +388,6 @@ class _DaliaBase:
             raise DatasetUnavailibleError(self.signal_dir(variant))
         return np.load(path)
 
-    def raw_acc(self, sid: str) -> np.ndarray:
-        return np.load(self.clean_dir / sid / 'acc.npy')
-
     def _raw_windows(self, sid: str, variant: str, window: int, shift: int) -> np.ndarray:
         """``(n, window)`` un-normalized BVP windows on the kept grid."""
         signal = self.raw_signal(sid, variant)
@@ -421,13 +403,7 @@ class _DaliaBase:
         if not len(bvp):
             return np.empty((0, N_FEATURES), dtype=np.float32)
 
-        acc = self.raw_acc(sid)
-        count = self.n_windows(sid, window, shift)
-        acc_windows = np.stack([acc[i * ACC_WINDOW:(i + 1) * ACC_WINDOW]
-                                for i in range(count)])
-        acc_windows = acc_windows[self.window_mask(sid, window, shift)]
-
-        return np.stack([extract_features(b, a) for b, a in zip(bvp, acc_windows)])
+        return np.stack([extract_features(b) for b in bvp])
 
     def labels_on_grid(self, sid: str, window: int, shift: int) -> np.ndarray:
         """Per-window binary anomaly truth for the mixed variant, on the given grid."""
@@ -465,10 +441,9 @@ class _DaliaBase:
 
 class DaliaSignalSource(DataSource):
     """One modality/variant of PPG-DaLiA's BVP signal: z-scored sliding windows on
-    ``(window, shift)``, defaulting to the non-overlapping eval grid. ``labels`` and
-    ``raw_signal``/``raw_acc`` (the latter two outside the generic interface, for the
-    firmware/app export script) are only meaningful for the ``mixed`` variant / any
-    variant respectively."""
+    ``(window, shift)``, defaulting to the non-overlapping eval grid. ``labels`` is only
+    meaningful for the ``mixed`` variant; ``raw_signal`` (outside the generic interface,
+    for the firmware/app export script) works for any variant."""
 
     def __init__(self, data_root: Path, key: str, variant: str,
                  activities: tuple[int, ...] | None = None,
@@ -501,10 +476,6 @@ class DaliaSignalSource(DataSource):
         unfiltered — what a sensor would emit. Only the export script wants this; a model
         is fed by ``datapoints``."""
         return self._base.raw_signal(sid, self.variant)
-
-    def raw_acc(self, sid: str) -> np.ndarray:
-        """The subject's whole raw ACC magnitude stream (always the clean one)."""
-        return self._base.raw_acc(sid)
 
     def with_grid(self, window: int | None = None, shift: int | None = None) -> 'DaliaSignalSource':
         """The same data on a different ``(window, shift)`` grid."""
