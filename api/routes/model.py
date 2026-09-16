@@ -15,7 +15,6 @@ from common.config import (
     DOWNLOAD_COOLDOWN_SECONDS,
     QUANTIZE_DAILY_LIMIT,
     QUANTIZE_DAILY_WINDOW_SECONDS,
-    RESULT_POLL_TIMEOUT_SECONDS,
     SUBMIT_DAILY_LIMIT,
     SUBMIT_DAILY_WINDOW_SECONDS,
 )
@@ -30,7 +29,6 @@ from common.db import (
     SubmissionType,
     User,
     ClientDeltaSubmission,
-    engine,
     get_latest_version,
     get_latest_weights,
     get_model_def,
@@ -267,24 +265,14 @@ def _settled_result(session: Session, job_id: uuid.UUID, user: User) -> Response
 
 
 @router.get("/quantize/result/{job_id}")
-def quantize_result(job_id: uuid.UUID, user: User = Depends(get_current_user)):
-    with Session(engine) as session:
-        settled = _settled_result(session, job_id, user)
-        if settled is not None:
-            return settled
-
-    try:
-        celery_app.AsyncResult(str(job_id)).get(
-            timeout=RESULT_POLL_TIMEOUT_SECONDS, propagate=False)
-    except Exception:
-        pass  # timeout (or a backend hiccup) — report whatever state the DB holds
-
-    with Session(engine) as session:
-        settled = _settled_result(session, job_id, user)
-        if settled is not None:
-            return settled
-        job = session.get(QuantizationJob, job_id)
-        return JSONResponse(status_code=202, content={"status": job.status.value})
+def quantize_result(job_id: uuid.UUID,
+                    session: Session = Depends(get_session),
+                    user: User = Depends(get_current_user)):
+    settled = _settled_result(session, job_id, user)
+    if settled is not None:
+        return settled
+    job = session.get(QuantizationJob, job_id)
+    return JSONResponse(status_code=202, content={"status": job.status.value})
 
 
 def _resolve_weights(session: Session, key: str,
