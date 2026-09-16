@@ -1,10 +1,4 @@
-"""Headless federated client harness — drives the real HTTP API end to end, picking
-between two aggregation strategies by the model's ``submission_type``: dense (``raw`` /
-``quantize``) has each training subject pull the global weights, train one pass and
-upload a plaintext delta for the daily aggregation task; secure runs a round as a
-first-class object with join/seal/masked-submit phases and a round-scoped aggregation
-task, verifying client-side that the masks cancel. Scores the fresh snapshot on the
-held-out subjects each round and writes a convergence CSV + plot."""
+"""Headless federated client harness — drives the real HTTP API end to end"""
 
 import argparse
 import base64

@@ -1,7 +1,4 @@
-"""Time one federated aggregation round end to end (report Sec. 5.5, tab:costo-borde).
-
-Measures the wall time from enqueuing the ``federated_aggregation`` task to its result
-landing, so the figure is the round itself and not the interpreter start-up."""
+"""Time one federated aggregation round end to end (report Sec. 5.5, tab:costo-borde). """
 
 import sys
 import time

@@ -1,10 +1,6 @@
 """Queue a federated aggregation round by hand, for testing — the same
 ``federated_aggregation`` task the daily beat runs, but on demand. Blocks on the task and
-prints its per-model summary. Requires the worker (and its broker/DB) to be up.
-
-    uv run -m scripts.integration.queue_aggregation           # every initialized model
-    uv run -m scripts.integration.queue_aggregation cnn-ae    # a single model
-"""
+prints its per-model summary. Requires the worker (and its broker/DB) to be up. """
 
 import argparse
 

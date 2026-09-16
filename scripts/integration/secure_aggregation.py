@@ -1,8 +1,4 @@
-"""Headless secure-aggregation correctness harness — drives the real HTTP API end to end
-like the secure path of ``scripts.fed_client``, but does no training: each client draws a
-random weight tensor, submits the masked delta against the round's base ``W``, and the
-script confirms the global weights the server bakes equal the plaintext mean of those
-tensors, up to quantization and float32 error."""
+"""Headless secure-aggregation correctness harness — drives the real HTTP API end to end"""
 
 import argparse
 import base64
