@@ -40,6 +40,12 @@ SERVER_PRIVATE_KEY_FILE = Path(os.environ.get("SERVER_PRIVATE_KEY", "shared/gen/
 DATABASE_URL = _require("DATABASE_URL")
 REDIS_URL = _require("REDIS_URL")
 
+# Celery broker/result-backend Redis, separate from REDIS_URL (auth sessions and
+# rate limiting). Defaults to REDIS_URL so a single-instance local setup still
+# works unchanged.
+CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", REDIS_URL)
+CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", REDIS_URL)
+
 # Quantization-result lifetime. A served result is kept for SERVE_GRACE_SECONDS
 # so the client can retry the download; an unclaimed one is kept up to
 # RESULT_TTL_SECONDS. The cleanup sweep runs every CLEANUP_INTERVAL_SECONDS.
@@ -83,12 +89,12 @@ SEED_EMAIL = os.environ.get("SEED_EMAIL") or None
 DOWNLOAD_COOLDOWN_SECONDS = int(os.environ.get("DOWNLOAD_COOLDOWN_SECONDS", MINUTE * 5))
 # Per-user, per-interface cooldown between firmware image downloads.
 OTA_DOWNLOAD_COOLDOWN_SECONDS = int(os.environ.get("OTA_DOWNLOAD_COOLDOWN_SECONDS", MINUTE * 5))
-# Per-user, per-model daily cap on quantization submissions.
-QUANTIZE_DAILY_LIMIT = int(os.environ.get("QUANTIZE_DAILY_LIMIT", 2))
-QUANTIZE_DAILY_WINDOW_SECONDS = int(os.environ.get("QUANTIZE_DAILY_WINDOW_SECONDS", DAY))
-# Per-user, per-model daily cap on submit-only weight uploads.
+# Per-user, per-model daily cap on weight submissions, shared by raw, quantize
+# and secure submit paths (they all cost the same budget).
 SUBMIT_DAILY_LIMIT = int(os.environ.get("SUBMIT_DAILY_LIMIT", 2))
 SUBMIT_DAILY_WINDOW_SECONDS = int(os.environ.get("SUBMIT_DAILY_WINDOW_SECONDS", DAY))
+# Per-user, per-model cooldown between secure-round joins.
+SECURE_JOIN_COOLDOWN_SECONDS = int(os.environ.get("SECURE_JOIN_COOLDOWN_SECONDS", MINUTE * 5))
 
 # --- Device attestation (see api.routes.device) ---
 # How long an issued ownership challenge stays valid before it must be reissued.

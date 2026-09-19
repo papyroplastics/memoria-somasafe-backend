@@ -6,15 +6,31 @@ signing and the client verifies after decompressing — it is a pure transport
 wrapper, invisible to the signing scheme.
 """
 
+import threading
+
 import zstandard
 
-_compressor = zstandard.ZstdCompressor(level=19)
+_LEVEL = 19
+
+_compressor = zstandard.ZstdCompressor(level=_LEVEL)
 _decompressor = zstandard.ZstdDecompressor()
+_compress_lock = threading.Lock()
+_decompress_lock = threading.Lock()
 
 
 def compress(data: bytes) -> bytes:
-    return _compressor.compress(data)
+    if _compress_lock.acquire(blocking=False):
+        try:
+            return _compressor.compress(data)
+        finally:
+            _compress_lock.release()
+    return zstandard.ZstdCompressor(level=_LEVEL).compress(data)
 
 
 def decompress(data: bytes) -> bytes:
-    return _decompressor.decompress(data)
+    if _decompress_lock.acquire(blocking=False):
+        try:
+            return _decompressor.decompress(data)
+        finally:
+            _decompress_lock.release()
+    return zstandard.ZstdDecompressor().decompress(data)

@@ -3,18 +3,16 @@ import uuid
 from datetime import datetime
 
 import numpy as np
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from worker.celery_app import app as celery_app
 
-from common.celery_tasks import QUANTIZE_TASK, VALIDATE_TASK
+from common.celery_tasks import QUANTIZE_TASK
 from common.config import (
     DOWNLOAD_COOLDOWN_SECONDS,
-    QUANTIZE_DAILY_LIMIT,
-    QUANTIZE_DAILY_WINDOW_SECONDS,
     SUBMIT_DAILY_LIMIT,
     SUBMIT_DAILY_WINDOW_SECONDS,
 )
@@ -27,7 +25,6 @@ from common.db import (
     QuantizationJob,
     QuantizationResult,
     SubmissionType,
-    User,
     ClientDeltaSubmission,
     get_latest_version,
     get_latest_weights,
@@ -40,7 +37,7 @@ from common.db import (
 )
 from common.ratelimit import RateLimit
 from api.lib.ratelimit import check_limit, record_usage
-from api.lib.session import get_current_user
+from api.lib.session import get_current_user_id
 from api.lib.challenge import require_device_owner
 
 router = APIRouter(prefix="/model")
@@ -120,12 +117,13 @@ def check_submission(session: Session, key: str, weights_id: int,
 
 
 def store_submission(session: Session, base: GlobalWeights, body: bytes,
-                     user: User) -> ClientDeltaSubmission:
+                     user_id: int) -> ClientDeltaSubmission:
     submission = ClientDeltaSubmission(
-        user_id=user.id,
+        user_id=user_id,
         base_weights_id=base.id,
         deltas=bytes(body),
         weight_count=session.get(ModelVersion, base.version_id).weight_count,
+        valid=True,
     )
     session.add(submission)
     session.commit()
@@ -147,7 +145,7 @@ def _version_info(session: Session, version: ModelVersion) -> ModelVersionInfo:
 
 @router.get("/list", response_model=list[ModelInfo])
 def list_models(session: Session = Depends(get_session),
-                user: User = Depends(get_current_user)):
+                user_id: int = Depends(get_current_user_id)):
     out = []
     for meta in list_model_defs(session):
         latest = get_latest_version(session, meta.key)
@@ -170,7 +168,7 @@ def list_models(session: Session = Depends(get_session),
 @router.get("/versions/{key}", response_model=list[ModelVersionInfo])
 def list_versions(key: str,
                   session: Session = Depends(get_session),
-                  user: User = Depends(get_current_user)):
+                  user_id: int = Depends(get_current_user_id)):
     require_model(session, key)
     versions = session.exec(
         select(ModelVersion)
@@ -181,18 +179,17 @@ def list_versions(key: str,
 
 
 @router.post("/submit/quantize/{key}/{weights_id}", status_code=202)
-async def quantize_model(key: str, weights_id: int, request: Request,
-                         session: Session = Depends(get_session),
-                         user: User = Depends(get_current_user)):
-    check_limit(RateLimit.weight_submit, user.id, key,
-                QUANTIZE_DAILY_LIMIT, QUANTIZE_DAILY_WINDOW_SECONDS)
+def quantize_model(key: str, weights_id: int, body: bytes = Body(...),
+                   session: Session = Depends(get_session),
+                   user_id: int = Depends(get_current_user_id)):
+    check_limit(RateLimit.weight_submit, user_id, key,
+                SUBMIT_DAILY_LIMIT, SUBMIT_DAILY_WINDOW_SECONDS)
     require_submission_type(session, key, {SubmissionType.quantize})
-    require_device_owner(session, user)
-    body = await request.body()
+    require_device_owner(session, user_id)
     base = check_submission(session, key, weights_id, body)
 
     try:
-        submission = store_submission(session, base, body, user)
+        submission = store_submission(session, base, body, user_id)
         job = QuantizationJob(submission_id=submission.id, model_key=key)
         session.add(job)
         session.commit()
@@ -201,36 +198,34 @@ async def quantize_model(key: str, weights_id: int, request: Request,
         celery_app.send_task(QUANTIZE_TASK, args=[str(job.id)], task_id=str(job.id))
         return {"job_id": str(job.id)}
     finally:
-        record_usage(RateLimit.weight_submit, user.id, key, QUANTIZE_DAILY_WINDOW_SECONDS)
+        record_usage(RateLimit.weight_submit, user_id, key, SUBMIT_DAILY_WINDOW_SECONDS)
 
 
 @router.post("/submit/raw/{key}/{weights_id}", status_code=202)
-async def submit_weights(key: str, weights_id: int, request: Request,
-                         session: Session = Depends(get_session),
-                         user: User = Depends(get_current_user)):
-    check_limit(RateLimit.weight_submit, user.id, key,
+def submit_weights(key: str, weights_id: int, body: bytes = Body(...),
+                   session: Session = Depends(get_session),
+                   user_id: int = Depends(get_current_user_id)):
+    check_limit(RateLimit.weight_submit, user_id, key,
                 SUBMIT_DAILY_LIMIT, SUBMIT_DAILY_WINDOW_SECONDS)
     require_submission_type(session, key,
                             {SubmissionType.raw, SubmissionType.quantize})
-    require_device_owner(session, user)
-    body = await request.body()
+    require_device_owner(session, user_id)
     base = check_submission(session, key, weights_id, body)
 
     try:
-        submission = store_submission(session, base, body, user)
-        celery_app.send_task(VALIDATE_TASK, args=[submission.id])
+        submission = store_submission(session, base, body, user_id)
         return {"submission_id": submission.id}
     finally:
-        record_usage(RateLimit.weight_submit, user.id, key, SUBMIT_DAILY_WINDOW_SECONDS)
+        record_usage(RateLimit.weight_submit, user_id, key, SUBMIT_DAILY_WINDOW_SECONDS)
 
 
-def _settled_result(session: Session, job_id: uuid.UUID, user: User) -> Response | None:
+def _settled_result(session: Session, job_id: uuid.UUID, user_id: int) -> Response | None:
     job = session.get(QuantizationJob, job_id)
     if job is None or job.status == JobStatus.expired:
         raise HTTPException(status_code=404, detail="Result not found or expired")
 
     submission = session.get(ClientDeltaSubmission, job.submission_id)
-    if submission is None or submission.user_id != user.id:
+    if submission is None or submission.user_id != user_id:
         raise HTTPException(status_code=404, detail="Result not found or expired")
 
     if job.status in (JobStatus.pending, JobStatus.running):
@@ -267,8 +262,8 @@ def _settled_result(session: Session, job_id: uuid.UUID, user: User) -> Response
 @router.get("/quantize/result/{job_id}")
 def quantize_result(job_id: uuid.UUID,
                     session: Session = Depends(get_session),
-                    user: User = Depends(get_current_user)):
-    settled = _settled_result(session, job_id, user)
+                    user_id: int = Depends(get_current_user_id)):
+    settled = _settled_result(session, job_id, user_id)
     if settled is not None:
         return settled
     job = session.get(QuantizationJob, job_id)
@@ -307,9 +302,9 @@ def _weights_headers(ver: ModelVersion, weights: GlobalWeights) -> dict[str, str
 @router.get("/weights/{key}")
 def download_weights(key: str, version: int | None = None,
                      session: Session = Depends(get_session),
-                     user: User = Depends(get_current_user)):
-    check_limit(RateLimit.weights_download, user.id, key, 1, DOWNLOAD_COOLDOWN_SECONDS)
-    require_device_owner(session, user)
+                     user_id: int = Depends(get_current_user_id)):
+    check_limit(RateLimit.weights_download, user_id, key, 1, DOWNLOAD_COOLDOWN_SECONDS)
+    require_device_owner(session, user_id)
     ver, weights = _resolve_weights(session, key, version)
 
     try:
@@ -320,15 +315,16 @@ def download_weights(key: str, version: int | None = None,
         return Response(content=weights.weights,
                         media_type="application/octet-stream", headers=headers)
     finally:
-        record_usage(RateLimit.weights_download, user.id, key, DOWNLOAD_COOLDOWN_SECONDS)
+        record_usage(RateLimit.weights_download, user_id, key, DOWNLOAD_COOLDOWN_SECONDS)
 
 
 @router.get("/download/{artifact}/{key}")
 def download_model(artifact: Artifact, key: str, version: int | None = None,
                    session: Session = Depends(get_session),
-                   user: User = Depends(get_current_user)):
-    check_limit(RateLimit.model_download, user.id, key, 1, DOWNLOAD_COOLDOWN_SECONDS)
-    require_device_owner(session, user)
+                   user_id: int = Depends(get_current_user_id)):
+    resource = f"{key}:{artifact.value}"
+    check_limit(RateLimit.model_download, user_id, resource, 1, DOWNLOAD_COOLDOWN_SECONDS)
+    require_device_owner(session, user_id)
     ver, weights = _resolve_weights(session, key, version)
 
     baked = get_weights_artifact(session, weights.id, artifact)
@@ -349,4 +345,4 @@ def download_model(artifact: Artifact, key: str, version: int | None = None,
         return Response(content=baked.data, media_type="application/octet-stream",
                         headers=headers)
     finally:
-        record_usage(RateLimit.model_download, user.id, key, DOWNLOAD_COOLDOWN_SECONDS)
+        record_usage(RateLimit.model_download, user_id, resource, DOWNLOAD_COOLDOWN_SECONDS)

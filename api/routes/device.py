@@ -31,8 +31,8 @@ from sqlmodel import Session, select
 
 from api.lib import challenge
 from common.config import DEVICE_ATTEST_COOLDOWN_SECONDS
-from common.db import Device, User, get_session, utcnow
-from api.lib.session import get_current_user
+from common.db import Device, get_session, utcnow
+from api.lib.session import get_current_user_id
 
 router = APIRouter(prefix="/device")
 
@@ -57,19 +57,19 @@ class AttestRequest(BaseModel):
 
 @router.get("/owned")
 def owned_devices(session: Session = Depends(get_session),
-                  user: User = Depends(get_current_user)) -> list[str]:
+                  user_id: int = Depends(get_current_user_id)) -> list[str]:
     """Serials of every device the caller currently owns. Lets a client check
     whether the server still considers it the owner (ownership can be lost when
     someone else re-attests the same device)."""
     return list(session.exec(
-        select(Device.serial).where(Device.owner_id == user.id)
+        select(Device.serial).where(Device.owner_id == user_id)
     ).all())
 
 
 @router.post("/challenge")
 def request_challenge(body: ChallengeRequest,
                       session: Session = Depends(get_session),
-                      user: User = Depends(get_current_user)) -> ChallengeResponse:
+                      user_id: int = Depends(get_current_user_id)) -> ChallengeResponse:
     device = session.get(Device, body.serial)
     if device is None:
         raise HTTPException(status_code=404, detail=f"Device '{body.serial}' not found")
@@ -92,24 +92,24 @@ def request_challenge(body: ChallengeRequest,
         "serial": device.serial,
         "nonce": base64.b64encode(nonce).decode(),
         "server_time": server_time,
-        "user_id": user.id,
+        "user_id": user_id,
     })
     return ChallengeResponse(
         instance_id=instance_id,
         nonce=base64.b64encode(nonce).decode(),
         server_time=server_time,
-        user_id=user.id,
+        user_id=user_id,
     )
 
 
 @router.post("/attest")
 def attest(body: AttestRequest,
            session: Session = Depends(get_session),
-           user: User = Depends(get_current_user)):
+           user_id: int = Depends(get_current_user_id)):
     stored = challenge.take(body.instance_id)
     if stored is None:
         raise HTTPException(status_code=410, detail="Challenge not found or expired")
-    if stored["user_id"] != user.id:
+    if stored["user_id"] != user_id:
         raise HTTPException(status_code=403, detail="Challenge belongs to another user")
 
     device = session.get(Device, stored["serial"])
@@ -130,8 +130,8 @@ def attest(body: AttestRequest,
         # Failed attestation does not consume the per-device cooldown.
         raise HTTPException(status_code=400, detail="Signature verification failed")
 
-    device.owner_id = user.id
+    device.owner_id = user_id
     device.last_attested_at = utcnow()
     session.add(device)
     session.commit()
-    return {"serial": device.serial, "owner_id": user.id}
+    return {"serial": device.serial, "owner_id": user_id}

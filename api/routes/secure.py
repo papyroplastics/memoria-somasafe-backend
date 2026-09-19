@@ -10,26 +10,32 @@ is no seal endpoint, so a client can never freeze a roster mid-join.
 
 import base64
 
-from fastapi import Depends, HTTPException, Request
+from fastapi import Body, Depends, HTTPException
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from common.config import SECURE_CLIP_BOUND
+from common.config import (
+    SECURE_CLIP_BOUND,
+    SECURE_JOIN_COOLDOWN_SECONDS,
+    SUBMIT_DAILY_LIMIT,
+    SUBMIT_DAILY_WINDOW_SECONDS,
+)
 from common.db import (
     ModelVersion,
     SecureRound,
     SecureRoundMember,
     SecureRoundStatus,
     SubmissionType,
-    User,
     get_latest_version,
     get_latest_weights,
     get_open_round,
     get_session,
     utcnow,
 )
+from common.ratelimit import RateLimit
 from common.secure_agg import RING_MODULUS
-from api.lib.session import get_current_user
+from api.lib.ratelimit import check_limit, record_usage
+from api.lib.session import get_current_user_id
 from api.lib.challenge import require_device_owner
 from .model import require_submission_type, router
 
@@ -76,47 +82,51 @@ def _decode_ka_key(encoded: str) -> bytes:
 @router.post("/secure/join/{key}", response_model=SecureJoinResponse, status_code=202)
 def secure_join(key: str, body: SecureJoinRequest,
                 session: Session = Depends(get_session),
-                user: User = Depends(get_current_user)):
+                user_id: int = Depends(get_current_user_id)):
+    check_limit(RateLimit.secure_join, user_id, key, 1, SECURE_JOIN_COOLDOWN_SECONDS)
     require_submission_type(session, key, {SubmissionType.secure})
-    require_device_owner(session, user)
+    require_device_owner(session, user_id)
     ka_key = _decode_ka_key(body.ka_public_key)
 
-    active = get_latest_weights(session, key)
-    if active is None:
-        raise HTTPException(status_code=404, detail=f"No weights for model '{key}'")
+    try:
+        active = get_latest_weights(session, key)
+        if active is None:
+            raise HTTPException(status_code=404, detail=f"No weights for model '{key}'")
 
-    round = get_open_round(session, key)
-    if round is None:
-        latest = get_latest_version(session, key)
-        round = SecureRound(model_key=key, version_id=latest.id,
-                            base_weights_id=active.id, clip_bound=SECURE_CLIP_BOUND)
-        session.add(round)
+        round = get_open_round(session, key)
+        if round is None:
+            latest = get_latest_version(session, key)
+            round = SecureRound(model_key=key, version_id=latest.id,
+                                base_weights_id=active.id, clip_bound=SECURE_CLIP_BOUND)
+            session.add(round)
+            session.commit()
+            session.refresh(round)
+        elif round.base_weights_id != active.id:
+            # The round's pinned base was superseded — only aggregation moves a secure
+            # model's weights, and that seals first, so this is not expected in practice.
+            raise HTTPException(status_code=409,
+                                detail="Open round's base weights are stale; retry")
+
+        member = session.get(SecureRoundMember, (round.id, user_id))
+        if member is None:
+            member = SecureRoundMember(round_id=round.id, user_id=user_id,
+                                       ka_public_key=ka_key)
+        else:
+            member.ka_public_key = ka_key
+        session.add(member)
         session.commit()
-        session.refresh(round)
-    elif round.base_weights_id != active.id:
-        # The round's pinned base was superseded — only aggregation moves a secure
-        # model's weights, and that seals first, so this is not expected in practice.
-        raise HTTPException(status_code=409,
-                            detail="Open round's base weights are stale; retry")
-
-    member = session.get(SecureRoundMember, (round.id, user.id))
-    if member is None:
-        member = SecureRoundMember(round_id=round.id, user_id=user.id,
-                                   ka_public_key=ka_key)
-    else:
-        member.ka_public_key = ka_key
-    session.add(member)
-    session.commit()
-    return SecureJoinResponse(round_id=round.id, base_weights_id=active.id,
-                              user_id=user.id)
+        return SecureJoinResponse(round_id=round.id, base_weights_id=active.id,
+                                  user_id=user_id)
+    finally:
+        record_usage(RateLimit.secure_join, user_id, key, SECURE_JOIN_COOLDOWN_SECONDS)
 
 
 def _require_member(session: Session, round_id: int,
-                    user: User) -> tuple[SecureRound, SecureRoundMember]:
+                    user_id: int) -> tuple[SecureRound, SecureRoundMember]:
     round = session.get(SecureRound, round_id)
     if round is None:
         raise HTTPException(status_code=404, detail="Round not found")
-    member = session.get(SecureRoundMember, (round_id, user.id))
+    member = session.get(SecureRoundMember, (round_id, user_id))
     if member is None:
         raise HTTPException(status_code=404, detail="Round not found")
     return round, member
@@ -125,8 +135,8 @@ def _require_member(session: Session, round_id: int,
 @router.get("/secure/round/{round_id}", response_model=SecureRoundDescriptor)
 def secure_descriptor(round_id: int,
                       session: Session = Depends(get_session),
-                      user: User = Depends(get_current_user)):
-    round, _ = _require_member(session, round_id, user)
+                      user_id: int = Depends(get_current_user_id)):
+    round, _ = _require_member(session, round_id, user_id)
     if round.status != SecureRoundStatus.sealed:
         raise HTTPException(status_code=409,
                             detail=f"Round is {round.status.value}, not sealed")
@@ -149,11 +159,13 @@ def secure_descriptor(round_id: int,
 
 
 @router.post("/secure/submit/{round_id}", status_code=202)
-async def secure_submit(round_id: int, request: Request,
-                        session: Session = Depends(get_session),
-                        user: User = Depends(get_current_user)):
-    round, member = _require_member(session, round_id, user)
-    require_device_owner(session, user)
+def secure_submit(round_id: int, body: bytes = Body(...),
+                  session: Session = Depends(get_session),
+                  user_id: int = Depends(get_current_user_id)):
+    round, member = _require_member(session, round_id, user_id)
+    require_device_owner(session, user_id)
+    check_limit(RateLimit.weight_submit, user_id, round.model_key,
+                SUBMIT_DAILY_LIMIT, SUBMIT_DAILY_WINDOW_SECONDS)
 
     if round.status != SecureRoundStatus.sealed:
         raise HTTPException(status_code=409,
@@ -166,14 +178,17 @@ async def secure_submit(round_id: int, request: Request,
         raise HTTPException(status_code=409,
                             detail="Round base weights are stale; the round is void")
 
-    body = await request.body()
     version = session.get(ModelVersion, round.version_id)
     if len(body) != version.weight_count * 4:
         raise HTTPException(status_code=400,
                             detail=f"Expected {version.weight_count} little-endian uint32 elements")
 
-    member.masked = bytes(body)
-    member.submitted_at = utcnow()
-    session.add(member)
-    session.commit()
-    return {"round_id": round_id, "submitted": True}
+    try:
+        member.masked = bytes(body)
+        member.submitted_at = utcnow()
+        session.add(member)
+        session.commit()
+        return {"round_id": round_id, "submitted": True}
+    finally:
+        record_usage(RateLimit.weight_submit, user_id, round.model_key,
+                     SUBMIT_DAILY_WINDOW_SECONDS)

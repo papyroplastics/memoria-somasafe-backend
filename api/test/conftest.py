@@ -40,7 +40,6 @@ def pub_point(priv: ec.EllipticCurvePrivateKey) -> bytes:
 
 @pytest.fixture(scope="session")
 def client():
-    # The context manager runs the lifespan (init_db) before the first request.
     with TestClient(app) as c:
         yield c
 

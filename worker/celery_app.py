@@ -2,13 +2,14 @@ from celery import Celery
 
 from common.celery_tasks import CLEANUP_TASK, FED_AGG_TASK
 from common.config import (
-    REDIS_URL,
+    CELERY_BROKER_URL,
+    CELERY_RESULT_BACKEND,
     CLEANUP_INTERVAL_SECONDS,
     FED_AGG_INTERVAL_SECONDS,
     RESULT_TTL_SECONDS,
 )
 
-app = Celery("somasafe", broker=REDIS_URL, backend=REDIS_URL)
+app = Celery("somasafe", broker=CELERY_BROKER_URL, backend=CELERY_RESULT_BACKEND)
 
 # Job state lives in PostgreSQL (see worker.tasks). The Redis result backend exists
 # only so callers can await a task and read its return value (e.g. the aggregation

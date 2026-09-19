@@ -17,7 +17,7 @@ from fastapi import HTTPException
 
 from common.config import DEVICE_CHALLENGE_TTL_SECONDS
 from common.redis import client
-from common.db import user_owns_device, User
+from common.db import user_owns_device
 
 _PREFIX = "device:challenge:"
 
@@ -43,8 +43,8 @@ def take(instance_id: str) -> dict | None:
     raw = client.getdel(_PREFIX + instance_id)
     return json.loads(raw) if raw is not None else None
 
-def require_device_owner(session: Session, user: User) -> None:
-    if not user_owns_device(session, user.id):
+def require_device_owner(session: Session, user_id: int) -> None:
+    if not user_owns_device(session, user_id):
         raise HTTPException(status_code=403, detail="No attested device for this user")
 
 

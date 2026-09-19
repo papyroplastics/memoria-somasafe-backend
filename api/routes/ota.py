@@ -8,7 +8,6 @@ from sqlmodel import Session
 
 from common.config import OTA_DOWNLOAD_COOLDOWN_SECONDS
 from common.db import (
-    User,
     get_firmware,
     get_session,
     list_firmware,
@@ -16,7 +15,7 @@ from common.db import (
 from common.ratelimit import RateLimit
 from api.lib.challenge import require_device_owner
 from api.lib.ratelimit import check_limit, record_usage
-from api.lib.session import get_current_user
+from api.lib.session import get_current_user_id
 
 router = APIRouter(prefix="/ota")
 
@@ -34,7 +33,7 @@ class FirmwareInfo(BaseModel):
 @router.get("/versions/{interface}", response_model=list[FirmwareInfo])
 def list_versions(interface: int,
                   session: Session = Depends(get_session),
-                  user: User = Depends(get_current_user)):
+                  user_id: int = Depends(get_current_user_id)):
     return [FirmwareInfo(
         version=fw.version, interface_version=fw.interface_version,
         supported_contracts=fw.supported_contracts, size=fw.size,
@@ -45,10 +44,10 @@ def list_versions(interface: int,
 @router.get("/download/{interface}/{version}")
 def download_firmware(interface: int, version: str,
                       session: Session = Depends(get_session),
-                      user: User = Depends(get_current_user)):
-    check_limit(RateLimit.ota_download, user.id, str(interface), 1,
+                      user_id: int = Depends(get_current_user_id)):
+    check_limit(RateLimit.ota_download, user_id, str(interface), 1,
                 OTA_DOWNLOAD_COOLDOWN_SECONDS)
-    require_device_owner(session, user)
+    require_device_owner(session, user_id)
 
     firmware = get_firmware(session, interface, version)
     if firmware is None:
@@ -68,5 +67,5 @@ def download_firmware(interface: int, version: str,
         return Response(content=firmware.data,
                         media_type="application/octet-stream", headers=headers)
     finally:
-        record_usage(RateLimit.ota_download, user.id, str(interface),
+        record_usage(RateLimit.ota_download, user_id, str(interface),
                      OTA_DOWNLOAD_COOLDOWN_SECONDS)

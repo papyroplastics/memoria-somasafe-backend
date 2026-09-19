@@ -29,12 +29,14 @@ class RateLimit(str, Enum):
     weights_download = "weights"
     weight_submit = "submit"
     ota_download = "ota-download"
+    secure_join = "secure-join"
 
 
 # Model-scoped actions, keyed by model key — the ones a federated round clears so
 # clients can immediately re-pull and re-submit. (``ota_download`` is per-interface
 # and unrelated to a model round.)
-_MODEL_ACTIONS = (RateLimit.model_download, RateLimit.weights_download, RateLimit.weight_submit)
+_MODEL_ACTIONS = (RateLimit.model_download, RateLimit.weights_download,
+                  RateLimit.weight_submit, RateLimit.secure_join)
 
 
 def _key(action: RateLimit, user_id: int, resource: str) -> str:
@@ -62,8 +64,10 @@ def add_usage(action: RateLimit, user_id: int, resource: str, window: int) -> No
 
 
 def clear_model_limits(model_key: str) -> None:
+    # Trailing "*" also matches resources with a suffix beyond the bare model key
+    # (e.g. model_download's "{model_key}:{artifact}").
     for action in _MODEL_ACTIONS:
-        keys = list(client.scan_iter(match=f"rl:{action.value}:*:{model_key}"))
+        keys = list(client.scan_iter(match=f"rl:{action.value}:*:{model_key}*"))
         if keys:
             client.delete(*keys)
 

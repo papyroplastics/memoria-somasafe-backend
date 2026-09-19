@@ -9,7 +9,7 @@ from pydantic import BaseModel
 from sqlmodel import Session, select
 
 from api.lib.session import (
-    get_current_user,
+    get_current_user_id,
     oauth2_scheme,
     put_access,
     revoke_access,
@@ -32,12 +32,6 @@ class TokenPair(BaseModel):
 
 class RefreshRequest(BaseModel):
     refresh_token: str
-
-
-class UserPublic(BaseModel):
-    id: int
-    username: str
-    email: str | None = None
 
 
 def hash_password(password: str) -> str:
@@ -68,7 +62,7 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(),
         password_hash.verify(form_data.password, "dummypassword") 
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
 
-    if user.disabled or not password_hash.verify(form_data.password, user.hashed_password):
+    if not password_hash.verify(form_data.password, user.hashed_password):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
 
     return _new_session(session, user.id)
@@ -104,19 +98,14 @@ def logout(token: str = Depends(oauth2_scheme),
 
 
 @router.post("/logout-all", status_code=status.HTTP_204_NO_CONTENT)
-def logout_all(user: User = Depends(get_current_user),
+def logout_all(user_id: int = Depends(get_current_user_id),
                session: Session = Depends(get_session)) -> None:
-    revoke_all_access(user.id)
+    revoke_all_access(user_id)
     rows = session.exec(
-        select(AuthSession).where(AuthSession.user_id == user.id,
+        select(AuthSession).where(AuthSession.user_id == user_id,
                                   AuthSession.revoked == False)  # noqa: E712
     ).all()
     for row in rows:
         row.revoked = True
         session.add(row)
     session.commit()
-
-
-@router.get("/me")
-def me(user: User = Depends(get_current_user)) -> UserPublic:
-    return UserPublic(id=user.id, username=user.username, email=user.email)

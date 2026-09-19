@@ -5,12 +5,7 @@ description = "Backend component of SomaSafe"
 readme = "README.md"
 requires-python = "==3.13.*"
 dependencies = [
-    "tensorflow>=2.21.0",
-    "ai-edge-litert>=2.1.6",
     "numpy>=2.4.6",
-    "pandas>=2.2",
-    "matplotlib>=3.10.9",
-    "pyqt6>=6.11.0",
     "tqdm>=4.68",
     "sqlmodel>=0.0.22",
     "redis>=5.2",
@@ -28,9 +23,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# CUDA-enabled TensorFlow (pulls the nvidia pip wheels). Opt in with:
-#   uv sync --extra cuda
-cuda = ["tensorflow[and-cuda]"]
+ml = [
+    "tensorflow>=2.21.0",
+    "ai-edge-litert>=2.1.6",
+    "pandas>=2.2",
+    "matplotlib>=3.10.9",
+    "pyqt6>=6.11.0",
+]
+cuda = ["somasafe-backend[ml]", "tensorflow[and-cuda]"]
 
 [dependency-groups]
 dev = [

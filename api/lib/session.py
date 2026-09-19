@@ -18,10 +18,8 @@ import uuid
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-from sqlmodel import Session
 
 from common.config import ACCESS_TOKEN_TTL_SECONDS
-from common.db import User, get_session
 from common.redis import client
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/token")
@@ -60,18 +58,12 @@ def revoke_all_access(user_id: int) -> None:
     client.delete(idx_key)
 
 
-async def get_current_user(token: str = Depends(oauth2_scheme),
-                           session: Session = Depends(get_session)) -> User:
-    unauthorized = HTTPException(
-        status_code=status.HTTP_401_UNAUTHORIZED,
-        detail="Could not validate credentials",
-        headers={"WWW-Authenticate": "Bearer"},
-    )
+def get_current_user_id(token: str = Depends(oauth2_scheme)) -> int:
     data = lookup_access(token)
     if data is None:
-        raise unauthorized
-
-    user = session.get(User, data["user_id"])
-    if user is None or user.disabled:
-        raise unauthorized
-    return user
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    return data["user_id"]

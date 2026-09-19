@@ -76,7 +76,6 @@ class User(IntPKModel, table=True):
     username: str = Field(unique=True, index=True)
     email: str | None = None
     hashed_password: str
-    disabled: bool = False
     created_at: datetime = Field(default_factory=utcnow)
 
 

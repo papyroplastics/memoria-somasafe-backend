@@ -7,7 +7,7 @@ quantize job is expected to actually complete and produce a result.
 import pytest
 
 from common.compression import decompress
-from common.config import QUANTIZE_DAILY_LIMIT, SUBMIT_DAILY_LIMIT
+from common.config import SUBMIT_DAILY_LIMIT
 
 FINGERPRINT_HEADER = "X-Model-Fingerprint"
 MODEL_VERSION_HEADER = "X-Model-Version"
@@ -182,7 +182,7 @@ def test_quantize_daily_limit(client, auth_headers, owned_device):
     weights_id = int(resp.headers[WEIGHTS_ID_HEADER])
     url = f"/model/submit/quantize/{model['key']}/{weights_id}"
 
-    for _ in range(QUANTIZE_DAILY_LIMIT):
+    for _ in range(SUBMIT_DAILY_LIMIT):
         assert client.post(url, headers=auth_headers | OCTET_STREAM,
                            content=_zero_params(model)).status_code == 202
     # One over the daily cap is rejected.

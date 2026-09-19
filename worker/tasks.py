@@ -14,7 +14,6 @@ from common.celery_tasks import (
     FED_AGG_TASK,
     QUANTIZE_TASK,
     SECURE_AGG_TASK,
-    VALIDATE_TASK,
 )
 from common.config import (
     DATASETS_DIR,
@@ -132,27 +131,6 @@ def quantize_submission(job_id: str) -> None:
             job.finished_at = utcnow()
             session.add(job)
             session.commit()
-
-
-@app.task(name=VALIDATE_TASK)
-def validate_weight_submission(submission_id: int) -> None:
-    """Background verdict for a submit-only upload. Cached on the row for
-    aggregation; never surfaced to the client."""
-    with Session(engine) as session:
-        submission = session.get(ClientDeltaSubmission, submission_id)
-        if submission is None:
-            return
-        base = session.get(GlobalWeights, submission.base_weights_id)
-        if base is None or base.model_key not in _models:
-            return
-        model, _, _ = _models[base.model_key]
-        reason = malformed_reason(submission, model.total_weight_size)
-        submission.valid = reason is None
-        if reason is not None:
-            print(f"[validate] {base.model_key}: "
-                  f"submission {submission.id} rejected: {reason}")
-        session.add(submission)
-        session.commit()
 
 
 def _bake_and_store(session: Session, key: str, latest, new_weights: np.ndarray,
