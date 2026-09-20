@@ -1,14 +1,13 @@
-from pathlib import Path
-
 import tensorflow as tf
 
 from ..layers import Dense, GRUCell
 from ..sources.dalia import BVP_WINDOW
-from .signal import SignalAutoencoder, AutoencoderTrainer
+from .signal import SignalAutoencoder
 
 
 class GRUAutoencoder(SignalAutoencoder):
-    def __init__(self, name: str, batch_size: int, seq_len: int,
+    def __init__(self, name: str = 'dalia_gru_ae', batch_size: int | None = None,
+                 seq_len: int = BVP_WINDOW,
                  n_signals: int = 1, hidden_dim: int = 64, latent_dim: int = 32,
                  learning_rate: float = 1e-3, n_outputs: int = 1,
                  diff_weight: float = 1.0, beta1: float = 0.9, beta2: float = 0.999,
@@ -45,15 +44,3 @@ class GRUAutoencoder(SignalAutoencoder):
             outputs.append(self.out_dense(dh2))
 
         return tf.stack(outputs, axis=1)
-
-
-def get_model(data_root: Path, batch_size: int | None = None) -> GRUAutoencoder:
-    return GRUAutoencoder(
-        name='dalia_gru_ae',
-        batch_size=batch_size or SignalAutoencoder.default_batch_size,
-        seq_len=BVP_WINDOW,
-    )
-
-
-def get_trainer(data_root: Path, batch_size: int | None = None) -> AutoencoderTrainer:
-    return AutoencoderTrainer(get_model(data_root, batch_size), data_root)

@@ -31,7 +31,8 @@ if __name__ == "__main__":
     report_dir = get_report_dir(args.model)
 
     # Target: a fresh model at the default batch size — the one we fine-tune and export.
-    target_trainer = MODELS[args.model].build_trainer(data_dir)
+    spec = MODELS[args.model]
+    target_trainer = spec.trainer_cls(spec.model_cls(), data_dir)
     target_batch_size = target_trainer.model.batch_size
     if args.source_batch_size < target_batch_size:
         raise SystemExit(
@@ -39,7 +40,7 @@ if __name__ == "__main__":
             f"batch size ({target_batch_size}) of '{args.model}'")
 
     # Source: rebuilt at its batch size, weights restored from its saved .npy.
-    source_trainer = MODELS[args.model].build_trainer(data_dir, batch_size=args.source_batch_size)
+    source_trainer = spec.trainer_cls(spec.model_cls(batch_size=args.source_batch_size), data_dir)
     source_path = weights_path(result_dir, str(args.source_batch_size))
     if not source_path.exists():
         raise SystemExit(

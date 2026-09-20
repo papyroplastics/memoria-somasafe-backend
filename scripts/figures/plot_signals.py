@@ -42,7 +42,7 @@ if __name__ == "__main__":
 
     rng = np.random.default_rng(args.seed)
 
-    model = MODELS[args.model].build_model(DATASETS_DIR)
+    model = MODELS[args.model].model_cls()
     if not hasattr(model, 'seq_len'):
         raise SystemExit(f"{args.model} does not reconstruct a waveform, so there is "
                          f"nothing to overlay on one — this plot is for the LSTM/GRU/CNN "

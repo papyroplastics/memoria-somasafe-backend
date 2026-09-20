@@ -19,7 +19,8 @@ from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 def final_metric(key: str, clients: list, eval_dataset, local_epochs: int,
                  rounds: int) -> float:
     """The held-out primary metric after the last round of one federated run."""
-    trainer = MODELS[key].build_trainer(DATASETS_DIR)
+    spec = MODELS[key]
+    trainer = spec.trainer_cls(spec.model_cls(), DATASETS_DIR)
     history = federated_loop(trainer, clients, eval_dataset, local_epochs, rounds)
     return history[-1][2][trainer.primary_metric]
 
@@ -123,7 +124,8 @@ def main() -> None:
     parser.add_argument('--loso-folds', type=int, default=0, help='LOSO folds (0 = every subject)')
     args = parser.parse_args()
 
-    trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
+    spec = MODELS[args.model]
+    trainer = spec.trainer_cls(spec.model_cls(), DATASETS_DIR)
     subjects = trainer.subject_datasets()
     report_dir = get_report_dir(args.model, 'sensitivity')
 

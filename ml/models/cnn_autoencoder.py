@@ -1,17 +1,16 @@
-from pathlib import Path
-
 import tensorflow as tf
 
 from ..layers import Conv1D, Dense, relu, upsample2
 from ..sources.dalia import BVP_WINDOW
-from .signal import SignalAutoencoder, AutoencoderTrainer
+from .signal import SignalAutoencoder
 
 class CNNAutoencoder(SignalAutoencoder):
     """Conv1D autoencoder over an 8-second BVP window, scored by reconstruction error.
     Strided convolutions downsample the window into one ``latent_dim`` code; the decoder
     projects back with nearest-neighbour upsampling. ``seq_len`` must be divisible by ``2 ** 3``."""
 
-    def __init__(self, name: str, batch_size: int, seq_len: int,
+    def __init__(self, name: str = 'dalia_cnn_ae', batch_size: int | None = None,
+                 seq_len: int = BVP_WINDOW,
                  n_signals: int = 1, hidden_dim: int = 32, latent_dim: int = 48,
                  kernel_size: int = 5, n_outputs: int = 1,
                  diff_weight: float = 1.0, learning_rate: float = 5e-4,
@@ -65,15 +64,3 @@ class CNNAutoencoder(SignalAutoencoder):
 
         x = self.dec_out(x)
         return x
-
-
-def get_model(data_root: Path, batch_size: int | None = None) -> CNNAutoencoder:
-    return CNNAutoencoder(
-        name='dalia_cnn_ae',
-        batch_size=batch_size or SignalAutoencoder.default_batch_size,
-        seq_len=BVP_WINDOW,
-    )
-
-
-def get_trainer(data_root: Path, batch_size: int | None = None) -> AutoencoderTrainer:
-    return AutoencoderTrainer(get_model(data_root, batch_size), data_root)

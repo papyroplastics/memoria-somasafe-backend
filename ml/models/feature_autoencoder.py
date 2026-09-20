@@ -11,7 +11,8 @@ from .common import ReconstructionTrainer, TrainableAutoencoder
 class FeatureAutoencoder(TrainableAutoencoder):
     """Dense autoencoder over the hand-crafted feature vector rather than the waveform."""
 
-    def __init__(self, name: str, batch_size: int, n_features: int = N_FEATURES,
+    def __init__(self, name: str = 'dalia_feature_ae', batch_size: int | None = None,
+                 n_features: int = N_FEATURES,
                  hidden_dim: int = 32, latent_dim: int = 6,
                  learning_rate: float = 1e-3, beta1: float = 0.9, beta2: float = 0.999,
                  epsilon: float = 1e-7):
@@ -63,14 +64,3 @@ class FeatureAutoencoderTrainer(ReconstructionTrainer):
             plt.close(fig)
             print(f"saved reconstruction plot to {result_dir / 'reconstruction.png'}")
             break
-
-
-def get_model(data_root: Path, batch_size: int | None = None) -> FeatureAutoencoder:
-    return FeatureAutoencoder(
-        name='dalia_feature_ae',
-        batch_size=batch_size or FeatureAutoencoder.default_batch_size,
-    )
-
-
-def get_trainer(data_root: Path, batch_size: int | None = None) -> FeatureAutoencoderTrainer:
-    return FeatureAutoencoderTrainer(get_model(data_root, batch_size), data_root)

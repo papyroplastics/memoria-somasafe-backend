@@ -13,15 +13,15 @@ N_CLASSES = 10
 class MnistMLP(BackpropModel):
     default_batch_size = 32
 
-    def __init__(self, name: str, batch_size: int,
+    def __init__(self, name: str = 'mnist_mlp', batch_size: int | None = None,
                  hidden1: int = 128, hidden2: int = 64,
                  learning_rate: float = 1e-3,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
         super().__init__(name=name)
 
-        self.batch_size = batch_size
-        self.in_shape = (batch_size, N_PIXELS)
-        self.label_shape = (batch_size, N_CLASSES)
+        self.batch_size = batch_size or self.default_batch_size
+        self.in_shape = (self.batch_size, N_PIXELS)
+        self.label_shape = (self.batch_size, N_CLASSES)
 
         self.in_layer = Dense(N_PIXELS, hidden1, activation=relu)
         self.hidden_layer = Dense(hidden1, hidden2, activation=relu)
@@ -76,14 +76,3 @@ class MnistMLPTrainer(Trainer):
             correct += float(np.sum(pred == truth))
             total += float(len(truth))
         return {'accuracy': correct / total if total else 0.0}
-
-
-def get_model(data_root: Path, batch_size: int | None = None) -> MnistMLP:
-    return MnistMLP(
-        name='mnist_mlp',
-        batch_size=batch_size or MnistMLP.default_batch_size,
-    )
-
-
-def get_trainer(data_root: Path, batch_size: int | None = None) -> MnistMLPTrainer:
-    return MnistMLPTrainer(get_model(data_root, batch_size), data_root)

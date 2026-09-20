@@ -22,6 +22,7 @@ WEEK = 7 * DAY
 # Storage of the trained artifacts served as-is (the train.py outputs).
 MODELS_DIR = Path(os.environ.get("MODELS_DIR", "shared/gen/models"))
 DATASETS_DIR = Path(os.environ.get("DATASETS_DIR", "shared/gen/datasets"))
+CALIBRATION_DIR = Path(os.environ.get("CALIBRATION_DIR", "shared/gen/calibration"))
 # Subject exports (the .ssds capture protobuf) the app imports and the firmware harness
 # streams; both read them straight out of shared/gen.
 EXPORTS_DIR = Path(os.environ.get("EXPORTS_DIR", "shared/gen/exports"))

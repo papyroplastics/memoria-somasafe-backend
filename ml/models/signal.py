@@ -11,7 +11,7 @@ class SignalAutoencoder(TrainableAutoencoder):
     """The waveform variants (LSTM/GRU/CNN): reconstruct the BVP window itself, with a
     first-difference (slope) term alongside the MSE that penalizes a flat-line output."""
 
-    def __init__(self, name: str, batch_size: int, seq_len: int, n_signals: int = 1,
+    def __init__(self, name: str, batch_size: int | None, seq_len: int, n_signals: int = 1,
                  n_outputs: int = 1, diff_weight: float = 1.0):
         super().__init__(name=name, batch_size=batch_size,
                          input_shape=(seq_len, n_signals))

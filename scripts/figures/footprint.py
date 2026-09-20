@@ -9,7 +9,7 @@ import argparse
 import numpy as np
 
 from common.compression import compress
-from common.config import DATASETS_DIR, MODELS_DIR, RESULTS_DIR
+from common.config import MODELS_DIR, RESULTS_DIR
 from ml.model_list import MODELS
 from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 
@@ -52,7 +52,7 @@ def main() -> None:
         if MODELS[key].artifacts_key is not None:
             continue
         try:
-            params = MODELS[key].build_model(DATASETS_DIR).total_weight_size
+            params = MODELS[key].model_cls().total_weight_size
         except Exception as e:
             print(f"skipped {key}: {e}")
             continue

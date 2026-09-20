@@ -137,7 +137,7 @@ def _strategy_for(submission_type: SubmissionType):
 def run(base: str, key: str, rounds: int, eval_subjects: int) -> None:
     spec = MODELS[key]
     strategy = _strategy_for(spec.submission_type)
-    trainer = spec.build_trainer(DATASETS_DIR)
+    trainer = spec.trainer_cls(spec.model_cls(), DATASETS_DIR)
     client_datasets, held_out = holdout(trainer.subject_datasets(), eval_subjects)
     eval_data = [dp for ds in held_out for dp in list(ds)]
     strategy.setup(len(client_datasets))

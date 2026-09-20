@@ -109,7 +109,8 @@ if __name__ == "__main__":
 
     report_dir = get_report_dir(args.model, loop_dir(args.loop, args.tag))
 
-    trainer = MODELS[args.model].build_trainer(data_dir, batch_size=args.batch_size)
+    spec = MODELS[args.model]
+    trainer = spec.trainer_cls(spec.model_cls(batch_size=args.batch_size), data_dir)
 
     if args.load_weights:
         source = weights_path(result_dir, args.tag)

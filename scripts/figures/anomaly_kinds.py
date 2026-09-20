@@ -51,7 +51,7 @@ if __name__ == "__main__":
                         help='Dataset to score on')
     args = parser.parse_args()
 
-    model = MODELS[args.model].build_model(DATASETS_DIR)
+    model = MODELS[args.model].model_cls()
     sources = variant_sources(model, args.dataset, DATASETS_DIR)
     weights = weights_path(MODELS_DIR / args.model, args.tag)
     model.restore(load_weights(weights))

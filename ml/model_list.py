@@ -1,6 +1,4 @@
 from dataclasses import dataclass
-from typing import Protocol
-from pathlib import Path
 
 from common.db import SubmissionType
 from ml.models import (
@@ -12,14 +10,7 @@ from ml.models import (
     mnist_mlp,
 )
 from ml.models.common import Trainer, TrainableModel
-
-class TrainerBuilder(Protocol):
-    def __call__(self, data_root: Path, batch_size: int | None = None) -> Trainer: ...
-
-
-class ModelBuilder(Protocol):
-    def __call__(self, data_root: Path,
-                 batch_size: int | None = None) -> TrainableModel: ...
+from ml.models.signal import AutoencoderTrainer
 
 
 @dataclass(frozen=True)
@@ -27,8 +18,8 @@ class ModelSpec:
     key: str
     name: str
     min_app_version: str
-    build_trainer: TrainerBuilder
-    build_model: ModelBuilder
+    model_cls: type[TrainableModel]
+    trainer_cls: type[Trainer]
     submission_type: SubmissionType
     firmware_id: int | None = None
     version: int = 1
@@ -45,8 +36,8 @@ MODELS: dict[str, ModelSpec] = {
         key="feature-mlp",
         name="Feature-based MLP",
         min_app_version="1.0.0",
-        build_trainer=feature_mlp.get_trainer,
-        build_model=feature_mlp.get_model,
+        model_cls=feature_mlp.FeatureMLP,
+        trainer_cls=feature_mlp.FeatureMLPTrainer,
         submission_type=SubmissionType.quantize,
         contract_version=1,
     ),
@@ -54,32 +45,32 @@ MODELS: dict[str, ModelSpec] = {
         key="lstm-ae",
         name="LSTM Autoencoder",
         min_app_version="1.0.0",
-        build_trainer=lstm_autoencoder.get_trainer,
-        build_model=lstm_autoencoder.get_model,
+        model_cls=lstm_autoencoder.LSTMAutoencoder,
+        trainer_cls=AutoencoderTrainer,
         submission_type=SubmissionType.raw,
     ),
     "gru-ae": ModelSpec(
         key="gru-ae",
         name="GRU Autoencoder",
         min_app_version="1.0.0",
-        build_trainer=gru_autoencoder.get_trainer,
-        build_model=gru_autoencoder.get_model,
+        model_cls=gru_autoencoder.GRUAutoencoder,
+        trainer_cls=AutoencoderTrainer,
         submission_type=SubmissionType.raw,
     ),
     "feature-ae": ModelSpec(
         key="feature-ae",
         name="Feature Autoencoder",
         min_app_version="1.0.0",
-        build_trainer=feature_autoencoder.get_trainer,
-        build_model=feature_autoencoder.get_model,
+        model_cls=feature_autoencoder.FeatureAutoencoder,
+        trainer_cls=feature_autoencoder.FeatureAutoencoderTrainer,
         submission_type=SubmissionType.raw,
     ),
     "feature-ae-secure": ModelSpec(
         key="feature-ae-secure",
         name="Feature Autoencoder (secure)",
         min_app_version="1.0.0",
-        build_trainer=feature_autoencoder.get_trainer,
-        build_model=feature_autoencoder.get_model,
+        model_cls=feature_autoencoder.FeatureAutoencoder,
+        trainer_cls=feature_autoencoder.FeatureAutoencoderTrainer,
         submission_type=SubmissionType.secure,
         artifacts_key="feature-ae",
     ),
@@ -87,18 +78,17 @@ MODELS: dict[str, ModelSpec] = {
         key="cnn-ae",
         name="CNN Autoencoder",
         min_app_version="1.0.0",
-        build_trainer=cnn_autoencoder.get_trainer,
-        build_model=cnn_autoencoder.get_model,
+        model_cls=cnn_autoencoder.CNNAutoencoder,
+        trainer_cls=AutoencoderTrainer,
         submission_type=SubmissionType.raw,
     ),
     "mnist-mlp": ModelSpec(
         key="mnist-mlp",
         name="MNIST MLP",
         min_app_version="1.0.0",
-        build_trainer=mnist_mlp.get_trainer,
-        build_model=mnist_mlp.get_model,
+        model_cls=mnist_mlp.MnistMLP,
+        trainer_cls=mnist_mlp.MnistMLPTrainer,
         submission_type=SubmissionType.quantize,
         contract_version=1,
     ),
 }
-

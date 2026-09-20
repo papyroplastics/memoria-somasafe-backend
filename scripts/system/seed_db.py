@@ -40,6 +40,7 @@ from common.db import (
 )
 from ml.sources.dalia import CLEAN_SUBDIR, get_sorted_paths
 from ml.model_list import MODELS
+from ml.models.common import arch_fingerprint
 from ml.payload import sign_blob, sign_model
 from ml.saving import load_weights, trainable_path, weights_path
 
@@ -99,8 +100,8 @@ def seed_models(session: Session, reseed: bool = False) -> None:
             print(f"  - model '{key}' skipped (no {', '.join(str(p) for p in missing)})")
             continue
 
-        trainer = spec.build_trainer(DATASETS_DIR)
-        fingerprint = trainer.arch_fingerprint()
+        model = spec.model_cls()
+        fingerprint = arch_fingerprint(model)
 
         definition = session.get(ModelDefinition, key)
         if definition is None:
@@ -134,7 +135,7 @@ def seed_models(session: Session, reseed: bool = False) -> None:
                     print(f"  ~ model '{key}' v{spec.version} re-seeded "
                           f"[{latest.fingerprint} -> {fingerprint}]")
                 latest.fingerprint = fingerprint
-                latest.weight_count = trainer.model.total_weight_size
+                latest.weight_count = model.total_weight_size
                 latest.submission_type = spec.submission_type
                 latest.contract_version = spec.contract_version
                 latest.min_app_version = spec.min_app_version
@@ -142,7 +143,7 @@ def seed_models(session: Session, reseed: bool = False) -> None:
         else:
             version = ModelVersion(
                 model_key=key, version=spec.version, fingerprint=fingerprint,
-                weight_count=trainer.model.total_weight_size,
+                weight_count=model.total_weight_size,
                 submission_type=spec.submission_type,
                 contract_version=spec.contract_version,
                 min_app_version=spec.min_app_version,

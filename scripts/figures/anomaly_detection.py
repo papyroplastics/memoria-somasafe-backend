@@ -79,7 +79,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     data_dir = DATASETS_DIR
-    model = MODELS[args.model].build_model(data_dir)
+    model = MODELS[args.model].model_cls()
     sources = variant_sources(model, args.dataset, data_dir)
     weights = weights_path(MODELS_DIR / args.model, args.tag)
     model.restore(load_weights(weights))

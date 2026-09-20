@@ -46,6 +46,7 @@ from common.ratelimit import clear_model_limits
 from common.secure_agg import dequantize, ring_sum
 
 from ml.model_list import MODELS
+from ml.models.common import arch_fingerprint
 from ml.payload import sign_model
 from ml.saving import get_optimized_model, get_trainable_model
 from ml.training import trimmed_mean
@@ -54,13 +55,13 @@ _models: dict[str, tuple] = {}
 
 @worker_process_init.connect
 def _load_models(**_) -> None:
-    for key in MODELS:
+    for key, spec in MODELS.items():
         try:
-            trainer = MODELS[key].build_trainer(DATASETS_DIR)
-            fingerprint = trainer.arch_fingerprint()
+            trainer = spec.trainer_cls(spec.model_cls(), DATASETS_DIR)
+            fingerprint = arch_fingerprint(trainer.model)
             rep = trainer.representative_dataset()
             _models[key] = (trainer.model, rep, fingerprint)
-        except Exception as exc:  # missing dataset / build error — skip, don't crash boot
+        except Exception as exc:  # build error — skip, don't crash boot
             print(f"[worker] model '{key}' unavailable, skipping: {exc}")
 
 

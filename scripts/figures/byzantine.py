@@ -86,7 +86,8 @@ def main() -> None:
         'trimmed mean': lambda deltas: trimmed_mean(deltas, args.trim),
     }
 
-    trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
+    spec = MODELS[args.model]
+    trainer = spec.trainer_cls(spec.model_cls(), DATASETS_DIR)
     metric = trainer.primary_metric
     clients, held_out = holdout(trainer.subject_datasets(), args.eval_subjects)
     eval_dataset = pool(held_out)
@@ -97,7 +98,7 @@ def main() -> None:
     for n in counts:
         values = {}
         for label, aggregate in aggregators.items():
-            trainer = MODELS[args.model].build_trainer(DATASETS_DIR)
+            trainer = spec.trainer_cls(spec.model_cls(), DATASETS_DIR)
             history = byzantine_loop(trainer, clients, eval_dataset, args.local_epochs,
                                      args.rounds, aggregate, n, args.attack_magnitude,
                                      np.random.default_rng(SEED + n))

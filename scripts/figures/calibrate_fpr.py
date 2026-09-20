@@ -44,7 +44,7 @@ if __name__ == "__main__":
     thresholds_fn = global_thresholds if args.global_f else subject_thresholds
     mode = 'global' if args.global_f else 'per-subject'
 
-    model = MODELS[args.model].build_model(DATASETS_DIR)
+    model = MODELS[args.model].model_cls()
     sources = variant_sources(model, args.dataset, DATASETS_DIR, variants=(CLEAN, MIXED))
     weights = weights_path(MODELS_DIR / args.model, args.tag)
     model.restore(load_weights(weights))

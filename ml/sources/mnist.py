@@ -70,8 +70,16 @@ class MnistShardSource(DataSource):
         self.key = key
         self.data_root = data_root
         self.partition = partition
+        self.alpha = alpha
+        self._images: np.ndarray | None = None
+        self._labels: np.ndarray | None = None
+        self._shards: list[np.ndarray] | None = None
 
-        mnist_dir = data_root / 'mnist'
+    def _ensure_loaded(self) -> None:
+        if self._shards is not None:
+            return
+
+        mnist_dir = self.data_root / 'mnist'
         images_path, labels_path = mnist_dir / TRAIN_IMAGES, mnist_dir / TRAIN_LABELS
         if not images_path.exists():
             raise DatasetUnavailibleError(mnist_dir)
@@ -79,21 +87,24 @@ class MnistShardSource(DataSource):
         self._images = np.load(images_path)
         self._labels = np.load(labels_path)
 
-        rng = np.random.default_rng([SEED, PARTITIONS.index(partition)])
-        self._shards = (iid_partition(self._labels, N_SHARDS, rng) if partition == IID
-                        else dirichlet_partition(self._labels, N_SHARDS, alpha, rng))
+        rng = np.random.default_rng([SEED, PARTITIONS.index(self.partition)])
+        self._shards = (iid_partition(self._labels, N_SHARDS, rng) if self.partition == IID
+                        else dirichlet_partition(self._labels, N_SHARDS, self.alpha, rng))
 
     def subject_ids(self) -> list[str]:
         return [f'shard{i}' for i in range(N_SHARDS)]
 
     def _shard(self, sid: str) -> np.ndarray:
+        self._ensure_loaded()
         return self._shards[int(sid[len('shard'):])]
 
     def datapoints(self, sid: str) -> np.ndarray:
+        self._ensure_loaded()
         images = self._images[self._shard(sid)].reshape(-1, IMAGE_PIXELS).astype(np.float32)
         return images / 255.0
 
     def labels(self, sid: str) -> np.ndarray:
+        self._ensure_loaded()
         return np.eye(N_CLASSES, dtype=np.float32)[self._labels[self._shard(sid)]]
 
     def calibration_data(self, per_subject: int = 10) -> np.ndarray:
@@ -113,8 +124,14 @@ class MnistTestSource(DataSource):
     def __init__(self, data_root: Path, key: str):
         self.key = key
         self.data_root = data_root
+        self._images: np.ndarray | None = None
+        self._labels: np.ndarray | None = None
 
-        mnist_dir = data_root / 'mnist'
+    def _ensure_loaded(self) -> None:
+        if self._images is not None:
+            return
+
+        mnist_dir = self.data_root / 'mnist'
         images_path, labels_path = mnist_dir / TEST_IMAGES, mnist_dir / TEST_LABELS
         if not images_path.exists():
             raise DatasetUnavailibleError(mnist_dir)
@@ -126,10 +143,12 @@ class MnistTestSource(DataSource):
         return ['test']
 
     def datapoints(self, sid: str) -> np.ndarray:
+        self._ensure_loaded()
         images = self._images.reshape(-1, IMAGE_PIXELS).astype(np.float32)
         return images / 255.0
 
     def labels(self, sid: str) -> np.ndarray:
+        self._ensure_loaded()
         return np.eye(N_CLASSES, dtype=np.float32)[self._labels]
 
     def calibration_data(self, per_subject: int = 100) -> np.ndarray:

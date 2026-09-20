@@ -5,6 +5,7 @@ import hashlib
 import numpy as np
 import tensorflow as tf
 
+from common.config import CALIBRATION_DIR
 from ..optimizers import Adam
 from ..metrics import mse_loss, reconstruction_error
 from ..dataset_list import DATASETS
@@ -19,6 +20,14 @@ class UnboundError(NotImplementedError):
 
 def unbound(*_, **__):
     raise UnboundError('This function is bound dynamically at init time')
+
+
+def arch_fingerprint(model: 'TrainableModel') -> str:
+    manifest = [
+        (var.name, tuple(int(d) for d in var.shape), var.dtype.name)
+        for var in model.trainable_variables
+    ]
+    return hashlib.sha256(repr(manifest).encode()).hexdigest()[:16]
 
 
 class TrainableModel(tf.Module):
@@ -98,10 +107,10 @@ class TrainableAutoencoder(BackpropModel):
 
     default_batch_size = 64
 
-    def __init__(self, name: str, batch_size: int, input_shape: tuple[int, ...]):
+    def __init__(self, name: str, batch_size: int | None, input_shape: tuple[int, ...]):
         super().__init__(name=name)
-        self.batch_size = batch_size
-        self.input_shape = (batch_size, *input_shape)
+        self.batch_size = batch_size or self.default_batch_size
+        self.input_shape = (self.batch_size, *input_shape)
 
     def _bind(self, learning_rate: float, beta1: float, beta2: float, epsilon: float):
         """Bind train/eval/save/restore; call once all layers exist."""
@@ -149,15 +158,19 @@ class Trainer(ABC):
     def __init__(self, model: TrainableModel, data_root: Path):
         self.model = model
         self.data: DataSource = DATASETS[self.training_key].build(data_root)
-        self.calibration: DataSource = DATASETS[
-            self.calibration_key or self.training_key].build(data_root)
 
     @abstractmethod
     def subject_arrays(self, sid: str) -> tuple[np.ndarray, ...]:
         """One subject's datapoints, one array per entry of ``dataset_tensors``."""
 
     def calibration_arrays(self) -> tuple[np.ndarray, ...]:
-        return (self.calibration.calibration_data(),)
+        key = self.calibration_key or self.training_key
+        path = CALIBRATION_DIR / f'{key}.npy'
+        if not path.exists():
+            raise FileNotFoundError(
+                f"no calibration artifact for '{key}' at {path}; run "
+                f"scripts/system/get_dataset.py to generate it")
+        return (np.load(path),)
 
     @abstractmethod
     def eval_metrics(self, datapoints: list, outputs: list[dict]) -> dict[str, float]:
@@ -166,14 +179,6 @@ class Trainer(ABC):
     def report(self, result_dir: Path, eval_dataset: tf.data.Dataset) -> None:
         """Optional model-specific artifact."""
         pass
-
-    def arch_fingerprint(self) -> str:
-        """Stable hash of the ordered trainable-variable layout."""
-        manifest = [
-            (var.name, tuple(int(d) for d in var.shape), var.dtype.name)
-            for var in self.model.trainable_variables
-        ]
-        return hashlib.sha256(repr(manifest).encode()).hexdigest()[:16]
 
     def subject_ids(self) -> list[str]:
         return self.data.subject_ids()

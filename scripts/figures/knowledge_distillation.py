@@ -99,7 +99,7 @@ if __name__ == "__main__":
     if not teacher_weights.exists():
         raise SystemExit(f"teacher weights not found at {teacher_weights}.")
 
-    teacher = MODELS[args.teacher].build_model(data_dir)
+    teacher = MODELS[args.teacher].model_cls()
     teacher.restore(load_weights(teacher_weights))
     teacher_sources = variant_sources(teacher, args.dataset, data_dir, variants=(CLEAN, MIXED))
     student_source = DATASETS[f'{args.dataset}-features-{MIXED}'].build(data_dir)
@@ -114,7 +114,8 @@ if __name__ == "__main__":
     distilled = distilled_labels(mixed, clean, expected_fpr)
     print(f"expected_fpr={expected_fpr:.4f}; distilled soft labels for {len(distilled)} subjects")
 
-    base = MODELS[args.student].build_trainer(data_dir, args.batch_size)
+    student_spec = MODELS[args.student]
+    base = student_spec.trainer_cls(student_spec.model_cls(batch_size=args.batch_size), data_dir)
     rep_dataset = base.representative_dataset()
 
     subjects = student_source.subject_ids()
@@ -136,11 +137,11 @@ if __name__ == "__main__":
         X_global = np.concatenate(Xs)
         y_global, y_global_true = np.concatenate(ys), np.concatenate(ys_true)
 
-        gmodel = MODELS[args.student].build_model(data_dir, args.batch_size)
+        gmodel = student_spec.model_cls(batch_size=args.batch_size)
         train_on(gmodel, X_global, y_global, args.global_epochs, args.batch_size)
         global_weights = np.asarray(gmodel.save()['weights'])
 
-        dmodel = MODELS[args.student].build_model(data_dir, args.batch_size)
+        dmodel = student_spec.model_cls(batch_size=args.batch_size)
         train_on(dmodel, X_global, y_global_true, args.global_epochs, args.batch_size)
         direct_weights = np.asarray(dmodel.save()['weights'])
 
@@ -149,16 +150,16 @@ if __name__ == "__main__":
         n_train = int(len(X) * args.train_split)
         X_ev, y_ev = X[n_train:], y_true[n_train:]
 
-        global_model = MODELS[args.student].build_model(data_dir, args.batch_size)
+        global_model = student_spec.model_cls(batch_size=args.batch_size)
         global_model.restore(tf.constant(global_weights, dtype=tf.float32))
         global_int8 = get_optimized_model(global_model, rep_dataset)
 
-        personal_model = MODELS[args.student].build_model(data_dir, args.batch_size)
+        personal_model = student_spec.model_cls(batch_size=args.batch_size)
         personal_model.restore(tf.constant(global_weights, dtype=tf.float32))
         train_on(personal_model, X[:n_train], y_distill[:n_train], args.epochs, args.batch_size)
         personal_int8 = get_optimized_model(personal_model, rep_dataset)
 
-        direct_model = MODELS[args.student].build_model(data_dir, args.batch_size)
+        direct_model = student_spec.model_cls(batch_size=args.batch_size)
         direct_model.restore(tf.constant(direct_weights, dtype=tf.float32))
 
         logits = {

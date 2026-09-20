@@ -13,15 +13,15 @@ class FeatureMLP(BackpropModel):
 
     default_batch_size = 1
 
-    def __init__(self, name: str, batch_size: int,
+    def __init__(self, name: str = 'feature_anomaly', batch_size: int | None = None,
                  n_features: int = N_FEATURES,
                  hidden_dim: int = 32, hidden_layers: int = 3, learning_rate: float = 1e-3,
                  beta1: float = 0.9, beta2: float = 0.999, epsilon: float = 1e-7):
         super().__init__(name=name)
 
-        self.batch_size = batch_size
-        self.in_shape = (batch_size, n_features)
-        self.label_shape = (batch_size, 1)
+        self.batch_size = batch_size or self.default_batch_size
+        self.in_shape = (self.batch_size, n_features)
+        self.label_shape = (self.batch_size, 1)
 
         self.in_layer = Dense(n_features, hidden_dim, activation=relu)
         self.out_layer = Dense(hidden_dim, 1)
@@ -110,14 +110,3 @@ class FeatureMLPTrainer(Trainer):
             correct += float(np.sum(pred == (y > 0.5)))
             total += float(y.size)
         return {'accuracy': correct / total if total else 0.0}
-
-
-def get_model(data_root: Path, batch_size: int | None = None) -> FeatureMLP:
-    return FeatureMLP(
-        name='feature_anomaly',
-        batch_size=batch_size or FeatureMLP.default_batch_size,
-    )
-
-
-def get_trainer(data_root: Path, batch_size: int | None = None) -> FeatureMLPTrainer:
-    return FeatureMLPTrainer(get_model(data_root, batch_size), data_root)
