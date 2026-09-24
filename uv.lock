@@ -1793,31 +1793,37 @@ name = "somasafe-backend"
 version = "1.0.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "ai-edge-litert" },
     { name = "celery", extra = ["redis"] },
     { name = "cryptography" },
     { name = "fastapi", extra = ["standard"] },
     { name = "httpx2" },
-    { name = "matplotlib" },
     { name = "numpy" },
-    { name = "pandas" },
     { name = "psycopg", extra = ["binary"] },
     { name = "pwdlib", extra = ["argon2"] },
-    { name = "pyqt6" },
     { name = "pytest" },
     { name = "python-dotenv" },
     { name = "python-multipart" },
     { name = "pyyaml" },
     { name = "redis" },
     { name = "sqlmodel" },
-    { name = "tensorflow" },
     { name = "tqdm" },
     { name = "zstandard" },
 ]
 
 [package.optional-dependencies]
 cuda = [
+    { name = "ai-edge-litert" },
+    { name = "matplotlib" },
+    { name = "pandas" },
+    { name = "pyqt6" },
     { name = "tensorflow", extra = ["and-cuda"] },
+]
+ml = [
+    { name = "ai-edge-litert" },
+    { name = "matplotlib" },
+    { name = "pandas" },
+    { name = "pyqt6" },
+    { name = "tensorflow" },
 ]
 
 [package.dev-dependencies]
@@ -1830,29 +1836,30 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "ai-edge-litert", specifier = ">=2.1.6" },
+    { name = "ai-edge-litert", marker = "extra == 'ml'", specifier = ">=2.1.6" },
     { name = "celery", extras = ["redis"], specifier = ">=5.4" },
     { name = "cryptography", specifier = ">=44.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.136.3" },
     { name = "httpx2", specifier = ">=2.5.0" },
-    { name = "matplotlib", specifier = ">=3.10.9" },
+    { name = "matplotlib", marker = "extra == 'ml'", specifier = ">=3.10.9" },
     { name = "numpy", specifier = ">=2.4.6" },
-    { name = "pandas", specifier = ">=2.2" },
+    { name = "pandas", marker = "extra == 'ml'", specifier = ">=2.2" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pwdlib", extras = ["argon2"], specifier = ">=0.2.1" },
-    { name = "pyqt6", specifier = ">=6.11.0" },
+    { name = "pyqt6", marker = "extra == 'ml'", specifier = ">=6.11.0" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "python-multipart", specifier = ">=0.0.18" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "redis", specifier = ">=5.2" },
+    { name = "somasafe-backend", extras = ["ml"], marker = "extra == 'cuda'" },
     { name = "sqlmodel", specifier = ">=0.0.22" },
-    { name = "tensorflow", specifier = ">=2.21.0" },
+    { name = "tensorflow", marker = "extra == 'ml'", specifier = ">=2.21.0" },
     { name = "tensorflow", extras = ["and-cuda"], marker = "extra == 'cuda'" },
     { name = "tqdm", specifier = ">=4.68" },
     { name = "zstandard", specifier = ">=0.23" },
 ]
-provides-extras = ["cuda"]
+provides-extras = ["ml", "cuda"]
 
 [package.metadata.requires-dev]
 dev = [

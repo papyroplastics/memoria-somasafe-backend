@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from common.db import SubmissionType
 from ml.models import (
     cnn_autoencoder,
+    covertype_nb,
     feature_autoencoder,
     feature_mlp,
     gru_autoencoder,
@@ -90,5 +91,13 @@ MODELS: dict[str, ModelSpec] = {
         trainer_cls=mnist_mlp.MnistMLPTrainer,
         submission_type=SubmissionType.quantize,
         contract_version=1,
+    ),
+    "covertype-nb": ModelSpec(
+        key="covertype-nb",
+        name="Covertype Gaussian Naive Bayes",
+        min_app_version="1.0.0",
+        model_cls=covertype_nb.CovertypeNB,
+        trainer_cls=covertype_nb.CovertypeNBTrainer,
+        submission_type=SubmissionType.raw,
     ),
 }

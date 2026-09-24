@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ml.sources.common import DataSource
+from ml.sources.covertype import CovertypeSource, prepare_covertype
 from ml.sources.dalia import (
     FEATURES, LOW_ACTIVITY, SIGNAL, VARIANTS, DaliaFeatureSource, DaliaSignalSource,
     prepare_ppg_dalia,
@@ -35,6 +36,9 @@ BASES: dict[str, DatasetBase] = {
     "mnist": DatasetBase(
         key="mnist", name="MNIST", activities=None,
         prepare=prepare_mnist),
+    "covertype": DatasetBase(
+        key="covertype", name="Covertype", activities=None,
+        prepare=prepare_covertype),
 }
 
 DATASETS: dict[str, DatasetSpec] = {}
@@ -58,3 +62,7 @@ DATASETS["mnist-noniid"] = DatasetSpec(
 DATASETS["mnist-test"] = DatasetSpec(
     key="mnist-test", name="MNIST (test split)",
     build=lambda root: MnistTestSource(root, key="mnist-test"))
+
+DATASETS["covertype-wilderness"] = DatasetSpec(
+    key="covertype-wilderness", name="Covertype (wilderness-area shards)",
+    build=lambda root: CovertypeSource(root, key="covertype-wilderness"))

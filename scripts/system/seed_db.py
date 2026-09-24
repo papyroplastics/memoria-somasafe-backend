@@ -246,16 +246,12 @@ def seed_users(session: Session) -> User:
     return user
 
 
-def seed_test_users(session: Session) -> None:
-    subjects = get_sorted_paths(DATASETS_DIR / CLEAN_SUBDIR)
-    if not subjects:
-        raise SystemExit(f"no subjects under {DATASETS_DIR / CLEAN_SUBDIR}; "
-                         f"run scripts/get_dataset.py first")
+def seed_test_users(session: Session, test_users: int) -> None:
+    if test_users <= 0:
+        return
 
-    # Attestation is bypassed for these fakes, so the stored key is never used;
-    # a well-formed 65-byte uncompressed P-256 point is enough.
     placeholder_pubkey = b"\x04" + bytes(64)
-    for i in range(1, len(subjects) + 1):
+    for i in range(1, test_users + 1):
         name = f"test_{i}"
         user = session.exec(select(User).where(User.username == name)).first()
         if user is None:
@@ -272,7 +268,7 @@ def seed_test_users(session: Session) -> None:
         device.owner_id = user.id
         device.last_attested_at = utcnow()
     session.commit()
-    print(f"  + {len(subjects)} test users with owned devices")
+    print(f"  + {test_users} test users with owned devices")
 
 
 def _parse_factory_nvs(path: Path) -> dict[str, str]:
@@ -316,7 +312,7 @@ def main() -> None:
                         help="directory of exported firmware versions to seed")
     parser.add_argument("--assign-device", action="store_true",
                         help="assign the seeded device to the seed user, even if either already existed")
-    parser.add_argument("--test-users", action="store_true",
+    parser.add_argument("--test-users", type=int, default=0, nargs='?',
                         help="create a test_N user (owning a placeholder device) per "
                              "dataset subject, for the headless federated harness")
     parser.add_argument("--reseed", action="store_true",
@@ -325,6 +321,10 @@ def main() -> None:
                              "overwriting the version row in place, moved fingerprint "
                              "included")
     args = parser.parse_args()
+
+    test_users = args.test_users
+    if args.test_users is None:
+        test_users = 15         # when argument is passed without a value
 
     if not args.factory_nvs.exists():
         parser.error(f"{args.factory_nvs} does not exist.")
@@ -335,8 +335,8 @@ def main() -> None:
         seed_firmware(session, args.firmware_dir)
         user = seed_users(session)
         seed_device(session, args.factory_nvs, user if args.assign_device else None)
-        if args.test_users:
-            seed_test_users(session)
+        seed_test_users(session, test_users)
+
     print("Seed complete.")
 
 

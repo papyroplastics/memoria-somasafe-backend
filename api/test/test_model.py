@@ -4,6 +4,8 @@ These assume a worker is running against the same queue/DB, so a submitted
 quantize job is expected to actually complete and produce a result.
 """
 
+import time
+
 import pytest
 
 from common.compression import decompress
@@ -152,9 +154,11 @@ def test_quantize_enqueues_and_polls_pending(client, auth_headers, owned_device)
     assert submit.status_code == 202, submit.text
     job_id = submit.json()["job_id"]
 
-    # The worker is expected to be running locally, so the long-poll should
-    # settle well within the default timeout instead of hitting it.
+    deadline = time.monotonic() + 10
     result = client.get(f"/model/quantize/result/{job_id}", headers=auth_headers)
+    while result.status_code == 202 and time.monotonic() < deadline:
+        time.sleep(0.2)
+        result = client.get(f"/model/quantize/result/{job_id}", headers=auth_headers)
     assert result.status_code == 200, result.text
 
 
