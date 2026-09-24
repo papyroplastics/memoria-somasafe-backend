@@ -6,7 +6,6 @@ import base64
 import numpy as np
 from sqlmodel import Session
 
-from common.celery_tasks import FED_AGG_TASK, SECURE_AGG_TASK
 from common.config import DATASETS_DIR, SECURE_MIN_MEMBERS
 from common.db import SubmissionType, engine, get_latest_version
 from common.secure_agg import (
@@ -31,12 +30,11 @@ from scripts.common.api import (
     submit_delta,
     submit_masked,
     wait_for_aggregation,
-    wait_for_round,
 )
 from scripts.common.litert import LiteRTClient
 from scripts.common.plots import line_plot
 from scripts.common.reports import get_report_dir, write_metrics_csv, write_yaml
-from scripts.common.secure import seal_round
+from scripts.common.secure import run_round, seal_round
 
 
 class DenseStrategy:
@@ -63,8 +61,8 @@ class DenseStrategy:
             submit_delta(base, token, key, weights_id,
                          delta.astype(np.float32).tobytes(), spec.submission_type)
             logout(base, token)
-        summary = wait_for_aggregation(app.send_task(FED_AGG_TASK, args=[key]), key)
-        print(f"{prefix} aggregated: {summary}")
+        result = wait_for_aggregation(app, key)
+        print(f"{prefix} aggregated: {result['detail']}")
 
 
 class SecureStrategy:
@@ -124,7 +122,7 @@ class SecureStrategy:
             - dequantize(ring_sum(plain_q), scale, n))))
         print(f"{prefix} mask-cancellation residual: {residual:.3e}")
 
-        summary = wait_for_round(app.send_task(SECURE_AGG_TASK, args=[round_id]))
+        summary = run_round(app, round_id)
         print(f"{prefix} aggregated: {summary}")
 
 

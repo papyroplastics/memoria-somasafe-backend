@@ -6,6 +6,7 @@ from tqdm import tqdm
 
 from common.config import DISABLE_TQDM
 
+from .aggregation import trimmed_mean
 from .models.common import Trainer
 
 History = list[tuple[int, float, dict[str, float]]]
@@ -20,16 +21,6 @@ def weighted_average(vectors: Sequence[tf.Tensor | np.ndarray],
     stacked = np.stack([np.asarray(vector) for vector in vectors])
     return np.average(stacked, axis=0,
                       weights=np.asarray(sizes, dtype=stacked.dtype))
-
-
-def trimmed_mean(vectors: Sequence[tf.Tensor | np.ndarray],
-                 trim: float) -> np.ndarray:
-    if not 0.0 <= trim < 0.5:
-        raise ValueError(f"trim must be in [0, 0.5), got {trim}")
-    stacked = np.sort(np.stack([np.asarray(vector) for vector in vectors]), axis=0)
-    k = int(len(stacked) * trim)
-    kept = stacked[k:len(stacked) - k] if k else stacked
-    return kept.mean(axis=0)
 
 
 def evaluate(trainer: Trainer, dataset: tf.data.Dataset, prefix: str = '') -> dict[str, float]:

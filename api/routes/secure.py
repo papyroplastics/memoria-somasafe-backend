@@ -3,15 +3,14 @@ round for a model, the cohort is sealed (roster + public keys frozen), then each
 member uploads a *masked* weight vector; only the summed round is ever unmasked,
 so the server sees the aggregate and never an individual update. The full scheme
 and its invariants are in shared/docs/secure-aggregation.md.
-
-Sealing and aggregation are driven out-of-band (scripts.fed_client, secure path): there
-is no seal endpoint, so a client can never freeze a roster mid-join.
 """
 
 import base64
 
 from fastapi import Body, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy import text
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import Session, select
 
 from common.config import (
@@ -79,6 +78,23 @@ def _decode_ka_key(encoded: str) -> bytes:
     return key
 
 
+def _open_round(session: Session, key: str, version_id: int,
+                base_weights_id: int) -> SecureRound:
+    round = get_open_round(session, key, lock=True)
+    for _ in range(3):
+        if round is not None:
+            return round
+        session.execute(
+            pg_insert(SecureRound)
+            .values(model_key=key, version_id=version_id, base_weights_id=base_weights_id,
+                    clip_bound=SECURE_CLIP_BOUND, status=SecureRoundStatus.open,
+                    created_at=utcnow())
+            .on_conflict_do_nothing(index_elements=["model_key"],
+                                    index_where=text("status = 'open'")))
+        round = get_open_round(session, key, lock=True)
+    raise HTTPException(status_code=503, detail="Could not open a round; retry")
+
+
 @router.post("/secure/join/{key}", response_model=SecureJoinResponse, status_code=202)
 def secure_join(key: str, body: SecureJoinRequest,
                 session: Session = Depends(get_session),
@@ -93,17 +109,9 @@ def secure_join(key: str, body: SecureJoinRequest,
         if active is None:
             raise HTTPException(status_code=404, detail=f"No weights for model '{key}'")
 
-        round = get_open_round(session, key)
-        if round is None:
-            latest = get_latest_version(session, key)
-            round = SecureRound(model_key=key, version_id=latest.id,
-                                base_weights_id=active.id, clip_bound=SECURE_CLIP_BOUND)
-            session.add(round)
-            session.commit()
-            session.refresh(round)
-        elif round.base_weights_id != active.id:
-            # The round's pinned base was superseded — only aggregation moves a secure
-            # model's weights, and that seals first, so this is not expected in practice.
+        round = _open_round(session, key, get_latest_version(session, key).id, active.id)
+        if round.base_weights_id != active.id:
+            # Stale open rounds are failed by the worker's sweep.
             raise HTTPException(status_code=409,
                                 detail="Open round's base weights are stale; retry")
 

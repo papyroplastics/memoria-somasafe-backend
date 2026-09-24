@@ -6,7 +6,6 @@ import base64
 import numpy as np
 from sqlmodel import Session
 
-from common.celery_tasks import SECURE_AGG_TASK
 from ml.model_list import MODELS
 from common.config import SECURE_MIN_MEMBERS, SEED
 from common.db import SubmissionType, engine, get_latest_version
@@ -28,9 +27,8 @@ from scripts.common.api import (
     login,
     logout,
     submit_masked,
-    wait_for_round,
 )
-from scripts.common.secure import seal_round
+from scripts.common.secure import run_round, seal_round
 
 
 def run(base: str, key: str, clients: int, rounds: int) -> None:
@@ -90,7 +88,7 @@ def run(base: str, key: str, clients: int, rounds: int) -> None:
             - dequantize(ring_sum([quantize(d, B, scale) for d in deltas]), scale, n))))
         print(f"{prefix} mask-cancellation residual: {residual:.3e}")
 
-        summary = wait_for_round(app.send_task(SECURE_AGG_TASK, args=[round_id]))
+        summary = run_round(app, round_id)
         print(f"{prefix} aggregated: {summary}")
 
         clear_model_limits(key)

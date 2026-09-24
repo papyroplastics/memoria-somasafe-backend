@@ -4,9 +4,11 @@ aggregation-only harness (which never trains) can share them too.
 """
 
 import base64
+import time
 
 import requests
 
+from common.celery_tasks import FED_AGG_TASK
 from common.db import SubmissionType
 from common.compression import decompress
 
@@ -75,19 +77,13 @@ def submit_masked(base: str, token: str, round_id: int, body: bytes) -> None:
     resp.raise_for_status()
 
 
-def wait_for_aggregation(result, key: str, timeout: float = 300.0) -> str:
-    """Block on a dense ``federated_aggregation`` task and return its summary for
-    ``key``, raising if the round was skipped or its export invalidated it."""
-    message = result.get(timeout=timeout).get(key, "no summary returned")
-    if message.startswith("skipped") or "export failed" in message:
-        raise SystemExit(f"aggregation for {key} produced no new weights: {message}")
-    return message
-
-
-def wait_for_round(result, timeout: float = 300.0) -> str:
-    """Block on a ``secure_aggregation`` task and return its summary, raising if the
-    round was skipped/failed or its export invalidated it."""
-    summary = result.get(timeout=timeout)
-    if summary.startswith(("skipped", "failed")) or "export failed" in summary:
-        raise SystemExit(f"secure round produced no new weights: {summary}")
-    return summary
+def wait_for_aggregation(app, key: str, timeout: float = 300.0, attempts: int = 3) -> dict:
+    for attempt in range(attempts):
+        result = app.send_task(FED_AGG_TASK, args=[key]).get(timeout=timeout)
+        if result["outcome"] != "skipped_locked" or attempt == attempts - 1:
+            break
+        time.sleep(5)
+    if result["outcome"] != "aggregated":
+        raise SystemExit(f"aggregation for {key} produced no new weights: "
+                         f"{result['outcome']} ({result['detail']})")
+    return result

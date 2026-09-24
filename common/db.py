@@ -10,7 +10,8 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import DDL, JSON, BigInteger, Column, UniqueConstraint, event
+from sqlalchemy import DDL, JSON, BigInteger, Column, Index, UniqueConstraint, event, text, update
+from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import defer
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
@@ -56,8 +57,9 @@ class SecureRoundStatus(str, Enum):
 
     open = "open"              # accepting members (roster still mutable)
     sealed = "sealed"          # roster + keys frozen; accepting masked vectors
+    aggregating = "aggregating"  # claimed by the aggregation task
     aggregated = "aggregated"  # summed, dequantized, baked into new weights
-    failed = "failed"          # a member never submitted — masks can't cancel
+    failed = "failed"          # timed out, went stale, or failed to aggregate
 
 
 class IntPKModel(SQLModel):
@@ -67,6 +69,28 @@ class IntPKModel(SQLModel):
     needless narrowing at every query site."""
 
     id: int = Field(default=None, primary_key=True)  # type: ignore[assignment]
+
+
+class ClaimableModel(SQLModel):
+    """A table whose ``status`` column is its lock: every status change is a
+    conditional UPDATE whose row count says whether it happened."""
+
+    @classmethod
+    def transition(cls, session: Session, pk, frm, to, **fields) -> bool:
+        sources = frm if isinstance(frm, tuple) else (frm,)
+        pk_column = sa_inspect(cls).primary_key[0]
+        stmt = (update(cls)
+                .where(pk_column == pk, cls.status.in_(sources))  # type: ignore[attr-defined]
+                .values(status=to, **fields)
+                .execution_options(synchronize_session=False))
+        return session.execute(stmt).rowcount == 1  # type: ignore[attr-defined]
+
+    @classmethod
+    def claim(cls, pk, frm, to, **fields) -> bool:
+        with Session(engine) as session:
+            claimed = cls.transition(session, pk, frm, to, **fields)
+            session.commit()
+            return claimed
 
 
 class User(IntPKModel, table=True):
@@ -133,14 +157,20 @@ class ModelVersion(IntPKModel, table=True):
 
 class GlobalWeights(IntPKModel, table=True):
     """A snapshot of a version's global weights, its serving artifacts kept as
-    keyed WeightsArtifact rows. The active weights are the latest **valid** row
-    (``created_at`` gates client re-pulls); ``valid`` is also a kill switch."""
+    keyed WeightsArtifact rows. The active weights are the latest **valid** row;
+    ``valid`` is also a kill switch. ``parent_weights_id`` is the snapshot a round
+    aggregated from (null when seeded); at most one valid child per parent."""
 
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version_id: int = Field(foreign_key="modelversion.id", index=True)
+    parent_weights_id: int | None = Field(default=None, foreign_key="globalweights.id",
+                                          ondelete="SET NULL")
     weights: bytes             # zstd-compressed packed float32 (np.float32 .tobytes())
     valid: bool = True
     created_at: datetime = Field(default_factory=utcnow, index=True)
+
+    __table_args__ = (Index("uq_globalweights_parent_valid", "parent_weights_id",
+                            unique=True, postgresql_where=text("valid")),)
 
 
 class WeightsArtifact(SQLModel, table=True):
@@ -158,17 +188,17 @@ class WeightsArtifact(SQLModel, table=True):
 class ClientDeltaSubmission(IntPKModel, table=True):
     """A client-uploaded weight *delta* (Δ = local − global). ``base_weights_id``
     is the GlobalWeights it trained from — aggregation matches on it so only
-    same-base deltas mix; ``valid`` is the cached structural-check verdict."""
+    same-base deltas mix; ``valid`` is a revocation switch."""
 
     user_id: int = Field(foreign_key="user.id", index=True)
     base_weights_id: int = Field(foreign_key="globalweights.id", index=True)
     deltas: bytes              # packed float32 delta (np.float32 .tobytes())
     weight_count: int
-    valid: bool | None = None
+    valid: bool = True
     created_at: datetime = Field(default_factory=utcnow)
 
 
-class SecureRound(IntPKModel, table=True):
+class SecureRound(IntPKModel, ClaimableModel, table=True):
     """One secure-aggregation round, pinned to the ``base_weights`` every member
     trains against. ``member_count`` and ``scale`` are null until seal; ``clip_bound``
     bounds per-coordinate influence (see shared/docs/secure-aggregation.md)."""
@@ -182,7 +212,12 @@ class SecureRound(IntPKModel, table=True):
     scale: int | None = Field(default=None, sa_column=Column(BigInteger))
     created_at: datetime = Field(default_factory=utcnow)
     sealed_at: datetime | None = None
+    aggregating_at: datetime | None = None
     finished_at: datetime | None = None
+    error: str | None = None
+
+    __table_args__ = (Index("uq_secureround_open_per_model", "model_key", unique=True,
+                            postgresql_where=text("status = 'open'")),)
 
 
 class SecureRoundMember(SQLModel, table=True):
@@ -197,7 +232,7 @@ class SecureRoundMember(SQLModel, table=True):
     submitted_at: datetime | None = None
 
 
-class QuantizationJob(SQLModel, table=True):
+class QuantizationJob(ClaimableModel, table=True):
     """Tracks one quantization request end to end; the int8 .tflite is a keyed
     QuantizationResult row and ``signature`` the server's ECDSA over it. Both are
     dropped by the cleanup sweep once served (after a grace) or expired."""
@@ -238,13 +273,15 @@ class Firmware(IntPKModel, table=True):
     created_at: datetime = Field(default_factory=utcnow)
 
 
-# The blob columns already hold zstd output, so TOAST's compression pass can only
-# burn CPU failing to shrink them: keep them out of line and uncompressed.
-for _blob_model in (WeightsArtifact, QuantizationResult, Firmware):
+# Blob columns are zstd output or float noise, so TOAST compression only burns CPU.
+for _blob_model, _column in ((WeightsArtifact, "data"), (QuantizationResult, "data"),
+                             (Firmware, "data"), (GlobalWeights, "weights"),
+                             (ClientDeltaSubmission, "deltas"),
+                             (SecureRoundMember, "masked")):
     event.listen(
         _blob_model.__table__, "after_create",  # type: ignore[attr-defined]
         DDL(f"ALTER TABLE {_blob_model.__tablename__} "
-            f"ALTER COLUMN data SET STORAGE EXTERNAL"))
+            f"ALTER COLUMN {_column} SET STORAGE EXTERNAL"))
 
 
 engine = create_engine(DATABASE_URL)
@@ -302,16 +339,16 @@ def get_latest_weights(session: Session, key: str) -> GlobalWeights | None:
     return get_version_weights(session, latest.id)
 
 
-def get_open_round(session: Session, key: str) -> "SecureRound | None":
-    """The model's current ``open`` secure round, if any — the one a joining
-    client is added to. ``None`` once it seals (a new round opens on the next
-    join), so a fresh round always pins the then-active base weights."""
-    return session.exec(
-        select(SecureRound)
-        .where(SecureRound.model_key == key,
-               SecureRound.status == SecureRoundStatus.open)
-        .order_by(SecureRound.created_at.desc())  # type: ignore[attr-defined]
-    ).first()
+def get_open_round(session: Session, key: str, lock: bool = False) -> "SecureRound | None":
+    """The model's current ``open`` secure round, if any. ``lock`` holds a share
+    lock on it until commit, so a concurrent seal waits for the join."""
+    stmt = (select(SecureRound)
+            .where(SecureRound.model_key == key,
+                   SecureRound.status == SecureRoundStatus.open)
+            .order_by(SecureRound.created_at.desc()))  # type: ignore[attr-defined]
+    if lock:
+        stmt = stmt.with_for_update(read=True)
+    return session.exec(stmt).first()
 
 
 def list_firmware(session: Session, interface_version: int) -> list[Firmware]:

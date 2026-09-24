@@ -1,10 +1,10 @@
-"""Queue a federated aggregation round by hand, for testing — the same
-``federated_aggregation`` task the daily beat runs, but on demand. Blocks on the task and
-prints its per-model summary. Requires the worker (and its broker/DB) to be up. """
+"""Queue a federated aggregation round by hand, for testing. With a model, runs that
+model's round and prints its result; without one, runs the dispatcher the beat schedule
+fires and prints the models it queued. Requires the worker (and its broker/DB) to be up."""
 
 import argparse
 
-from common.celery_tasks import FED_AGG_TASK
+from common.celery_tasks import FED_DISPATCH_TASK
 from ml.model_list import MODELS
 from worker.celery_app import app
 
@@ -15,15 +15,15 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('model', nargs='?', default=None, choices=sorted(MODELS),
-                        help='Model to aggregate (default: every initialized model)')
+                        help='Model to aggregate (default: dispatch every dense model)')
     args = parser.parse_args()
 
-    result = app.send_task(FED_AGG_TASK, args=[args.model])
     if args.model is not None:
-        print(f"{args.model}: {wait_for_aggregation(result, args.model)}")
+        result = wait_for_aggregation(app, args.model)
+        print(f"{args.model}: {result['outcome']} ({result['detail']})")
     else:
-        for key, summary in result.get(timeout=300.0).items():
-            print(f"{key}: {summary}")
+        keys = app.send_task(FED_DISPATCH_TASK).get(timeout=60.0)
+        print(f"dispatched: {', '.join(keys) or 'nothing'}")
 
 
 if __name__ == "__main__":

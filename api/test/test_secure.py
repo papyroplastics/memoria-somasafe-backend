@@ -7,8 +7,10 @@ harness against the DB — is reproduced directly so the sealed-only endpoints c
 be reached without a full cohort."""
 
 import base64
+import threading
 
 import pytest
+from sqlalchemy import update
 from sqlmodel import select
 
 from common.db import (
@@ -17,9 +19,12 @@ from common.db import (
     SecureRoundStatus,
     Session,
     engine,
+    get_latest_version,
+    get_latest_weights,
     utcnow,
 )
 from common.secure_agg import compute_scale, generate_keypair
+from ..routes.secure import _open_round
 
 OCTET_STREAM = {"Content-Type": "application/octet-stream"}
 
@@ -86,6 +91,40 @@ def test_join_creates_round(client, auth_headers, owned_device):
     assert body["round_id"] > 0
     assert body["base_weights_id"] > 0
     assert body["user_id"] > 0
+
+
+def test_concurrent_first_joins_share_one_round(client, auth_headers):
+    key = _secure_model(client, auth_headers)["key"]
+    with Session(engine) as session:
+        session.execute(update(SecureRound)
+                        .where(SecureRound.model_key == key,
+                               SecureRound.status == SecureRoundStatus.open)
+                        .values(status=SecureRoundStatus.failed, error="test reset"))
+        session.commit()
+        version_id = get_latest_version(session, key).id
+        weights_id = get_latest_weights(session, key).id
+
+    barrier = threading.Barrier(8)
+    round_ids = []
+
+    def join():
+        with Session(engine) as session:
+            barrier.wait()
+            round_ids.append(_open_round(session, key, version_id, weights_id).id)
+            session.commit()
+
+    threads = [threading.Thread(target=join) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert len(round_ids) == 8 and len(set(round_ids)) == 1
+    with Session(engine) as session:
+        open_rounds = session.exec(select(SecureRound).where(
+            SecureRound.model_key == key,
+            SecureRound.status == SecureRoundStatus.open)).all()
+    assert [r.id for r in open_rounds] == round_ids[:1]
 
 
 def test_descriptor_before_seal_409(client, auth_headers, owned_device):

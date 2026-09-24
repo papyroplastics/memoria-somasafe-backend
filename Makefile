@@ -1,6 +1,6 @@
 shared_repo := https://github.com/papyroplastics/memoria-somasafe-shared.git
 
-.PHONY: shared ml-data ml-test db-seed db-reseed db-run db-clean api-run api-test worker-run beat-run worker-monitor
+.PHONY: shared ml-data ml-test db-seed db-reseed db-run db-clean api-run api-test worker-run worker-test beat-run worker-monitor
 shared:
 	@if [ -e shared ] || [ -L shared ]; then \
 		echo "shared already present"; \
@@ -33,7 +33,9 @@ api-test:
 	uv run pytest api/test/
 
 worker-run:
-	uv run -m celery -A worker.celery_app worker --loglevel=info
+	uv run -m celery -A worker.celery_app worker -Q light,heavy --loglevel=info
+worker-test:
+	uv run pytest worker/test/
 beat-run:
 	uv run -m celery -A worker.celery_app beat --loglevel=info
 worker-monitor:

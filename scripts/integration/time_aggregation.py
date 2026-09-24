@@ -3,7 +3,6 @@
 import sys
 import time
 
-from common.celery_tasks import FED_AGG_TASK
 from worker.celery_app import app
 
 from scripts.common.api import wait_for_aggregation
@@ -11,8 +10,10 @@ from scripts.common.api import wait_for_aggregation
 key = sys.argv[1] if len(sys.argv) > 1 else "feature-ae"
 
 start = time.perf_counter()
-summary = wait_for_aggregation(app.send_task(FED_AGG_TASK, args=[key]), key)
+result = wait_for_aggregation(app, key)
 elapsed = time.perf_counter() - start
 
-print(f"{key}: {summary}")
+print(f"{key}: {result['outcome']} ({result['detail']})")
+for phase, seconds in result["timings"].items():
+    print(f"  {phase}: {seconds:.3f}s")
 print(f"AGG_WALL_SECONDS={elapsed:.3f}")
