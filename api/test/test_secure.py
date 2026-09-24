@@ -10,7 +10,7 @@ import base64
 import threading
 
 import pytest
-from sqlalchemy import update
+from sqlalchemy import delete, func, update
 from sqlmodel import select
 
 from common.db import (
@@ -50,6 +50,22 @@ def _join(client, headers, key):
     _, pk = generate_keypair()
     return client.post(f"/model/secure/join/{key}", headers=headers,
                        json={"ka_public_key": base64.b64encode(pk).decode()})
+
+
+@pytest.fixture(autouse=True)
+def _isolate_rounds():
+    with Session(engine) as session:
+        session.execute(update(SecureRound)
+                        .where(SecureRound.status == SecureRoundStatus.open)
+                        .values(status=SecureRoundStatus.failed, error="test reset",
+                                finished_at=utcnow()))
+        floor = session.exec(select(func.max(SecureRound.id))).one() or 0
+        session.commit()
+    yield
+    with Session(engine) as session:
+        session.execute(delete(SecureRoundMember).where(SecureRoundMember.round_id > floor))
+        session.execute(delete(SecureRound).where(SecureRound.id > floor))
+        session.commit()
 
 
 def _seal(round_id: int) -> int:
@@ -96,11 +112,6 @@ def test_join_creates_round(client, auth_headers, owned_device):
 def test_concurrent_first_joins_share_one_round(client, auth_headers):
     key = _secure_model(client, auth_headers)["key"]
     with Session(engine) as session:
-        session.execute(update(SecureRound)
-                        .where(SecureRound.model_key == key,
-                               SecureRound.status == SecureRoundStatus.open)
-                        .values(status=SecureRoundStatus.failed, error="test reset"))
-        session.commit()
         version_id = get_latest_version(session, key).id
         weights_id = get_latest_weights(session, key).id
 
@@ -148,7 +159,6 @@ def test_descriptor_non_member_404(client, auth_headers, deviceless_auth_headers
     model = _secure_model(client, auth_headers)
     round_id = _join(client, auth_headers, model["key"]).json()["round_id"]
     _seal(round_id)
-    # A user who never joined can't even learn the round exists.
     resp = client.get(f"/model/secure/round/{round_id}", headers=deviceless_auth_headers)
     assert resp.status_code == 404
 
@@ -177,7 +187,6 @@ def test_submit_masked_once(client, auth_headers, owned_device):
 
     assert client.post(url, headers=auth_headers | OCTET_STREAM,
                        content=body).status_code == 202
-    # A second masked vector under the same masks would leak a difference — rejected.
     assert client.post(url, headers=auth_headers | OCTET_STREAM,
                        content=body).status_code == 409
 
