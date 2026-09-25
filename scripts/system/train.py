@@ -1,6 +1,6 @@
 """
 Train a SomaSafe model with a chosen loop on its trainer's dataset, holding out whole
-subjects for evaluation. Weights and serving artifacts go to shared/gen/models/<model>;
+subjects for evaluation. Weights and serving artifacts go to shared/gen/models/<artifact_key>;
 the history, plots, run manifest and eval report to results/<model>/<loop>.
 """
 
@@ -104,12 +104,13 @@ if __name__ == "__main__":
 
     data_dir = args.dataset_dir
 
-    result_dir = MODELS_DIR / args.model
+    spec = MODELS[args.model]
+
+    result_dir = MODELS_DIR / spec.artifact_key
     result_dir.mkdir(parents=True, exist_ok=True)
 
     report_dir = get_report_dir(args.model, loop_dir(args.loop, args.tag))
 
-    spec = MODELS[args.model]
     trainer = spec.trainer_cls(spec.model_cls(batch_size=args.batch_size), data_dir)
 
     if args.load_weights:
