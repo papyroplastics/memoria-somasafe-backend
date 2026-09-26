@@ -1,21 +1,3 @@
-"""Redis-backed rate-limit primitives, shared so the worker never imports API code.
-
-The limit is a capped counter over a rolling window, keyed per (action, user,
-resource), split into two phases so a request only spends quota once it has done
-the work it was admitted for:
-- ``over_limit``: peek — is the counter already at ``limit``? (a read, no mutation)
-- ``add_usage``: spend one slot (INCR + EXPIRE on the first hit of the window)
-
-The gateway checks ``over_limit`` up front (turning a breach into an HTTP 429, see
-``api.lib.ratelimit``), runs the request, and calls ``add_usage`` only afterwards,
-so a rejected or no-op request is not counted. Splitting the check from the spend
-makes the limit soft under concurrency (two simultaneous requests can both pass the
-peek), which is fine at this scale. A cooldown is just this with ``limit=1``.
-
-``clear_model_limits`` is used by the worker after a federated round; ``reset`` is a
-test helper.
-"""
-
 from enum import Enum
 
 from common.redis import client
@@ -40,7 +22,7 @@ _MODEL_ACTIONS = (RateLimit.model_download, RateLimit.weights_download,
 
 
 def _key(action: RateLimit, user_id: int, resource: str) -> str:
-    return f"rl:{action.value}:{user_id}:{resource}"
+    return f"rl:{action.value}:{resource}:{user_id}"
 
 
 def over_limit(action: RateLimit, user_id: int, resource: str, limit: int,
@@ -64,10 +46,8 @@ def add_usage(action: RateLimit, user_id: int, resource: str, window: int) -> No
 
 
 def clear_model_limits(model_key: str) -> None:
-    # Trailing "*" also matches resources with a suffix beyond the bare model key
-    # (e.g. model_download's "{model_key}:{artifact}").
     for action in _MODEL_ACTIONS:
-        keys = list(client.scan_iter(match=f"rl:{action.value}:*:{model_key}*"))
+        keys = list(client.scan_iter(match=f"rl:{action.value}:{model_key}:*"))
         if keys:
             client.delete(*keys)
 

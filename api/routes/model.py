@@ -35,8 +35,8 @@ from common.db import (
     list_model_defs,
     utcnow,
 )
-from common.ratelimit import RateLimit
-from api.lib.ratelimit import check_limit, record_usage
+from common.ratelimit import RateLimit, add_usage
+from api.lib.ratelimit import check_limit
 from api.lib.session import get_current_user_id
 from api.lib.challenge import require_device_owner
 
@@ -198,7 +198,7 @@ def quantize_model(key: str, weights_id: int, body: bytes = Body(...),
         celery_app.send_task(QUANTIZE_TASK, args=[str(job.id)], task_id=str(job.id))
         return {"job_id": str(job.id)}
     finally:
-        record_usage(RateLimit.weight_submit, user_id, key, SUBMIT_DAILY_WINDOW_SECONDS)
+        add_usage(RateLimit.weight_submit, user_id, key, SUBMIT_DAILY_WINDOW_SECONDS)
 
 
 @router.post("/submit/raw/{key}/{weights_id}", status_code=202)
@@ -216,7 +216,7 @@ def submit_weights(key: str, weights_id: int, body: bytes = Body(...),
         submission = store_submission(session, base, body, user_id)
         return {"submission_id": submission.id}
     finally:
-        record_usage(RateLimit.weight_submit, user_id, key, SUBMIT_DAILY_WINDOW_SECONDS)
+        add_usage(RateLimit.weight_submit, user_id, key, SUBMIT_DAILY_WINDOW_SECONDS)
 
 
 def _settled_result(session: Session, job_id: uuid.UUID, user_id: int) -> Response | None:
@@ -315,7 +315,7 @@ def download_weights(key: str, version: int | None = None,
         return Response(content=weights.weights,
                         media_type="application/octet-stream", headers=headers)
     finally:
-        record_usage(RateLimit.weights_download, user_id, key, DOWNLOAD_COOLDOWN_SECONDS)
+        add_usage(RateLimit.weights_download, user_id, key, DOWNLOAD_COOLDOWN_SECONDS)
 
 
 @router.get("/download/{artifact}/{key}")
@@ -345,4 +345,4 @@ def download_model(artifact: Artifact, key: str, version: int | None = None,
         return Response(content=baked.data, media_type="application/octet-stream",
                         headers=headers)
     finally:
-        record_usage(RateLimit.model_download, user_id, resource, DOWNLOAD_COOLDOWN_SECONDS)
+        add_usage(RateLimit.model_download, user_id, resource, DOWNLOAD_COOLDOWN_SECONDS)

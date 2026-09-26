@@ -12,9 +12,9 @@ from common.db import (
     get_session,
     list_firmware,
 )
-from common.ratelimit import RateLimit
+from common.ratelimit import RateLimit, add_usage
 from api.lib.challenge import require_device_owner
-from api.lib.ratelimit import check_limit, record_usage
+from api.lib.ratelimit import check_limit
 from api.lib.session import get_current_user_id
 
 router = APIRouter(prefix="/ota")
@@ -67,5 +67,5 @@ def download_firmware(interface: int, version: str,
         return Response(content=firmware.data,
                         media_type="application/octet-stream", headers=headers)
     finally:
-        record_usage(RateLimit.ota_download, user_id, str(interface),
-                     OTA_DOWNLOAD_COOLDOWN_SECONDS)
+        add_usage(RateLimit.ota_download, user_id, str(interface),
+                  OTA_DOWNLOAD_COOLDOWN_SECONDS)

@@ -31,9 +31,9 @@ from common.db import (
     get_session,
     utcnow,
 )
-from common.ratelimit import RateLimit
+from common.ratelimit import RateLimit, add_usage
 from common.secure_agg import RING_MODULUS
-from api.lib.ratelimit import check_limit, record_usage
+from api.lib.ratelimit import check_limit
 from api.lib.session import get_current_user_id
 from api.lib.challenge import require_device_owner
 from .model import require_submission_type, router
@@ -126,7 +126,7 @@ def secure_join(key: str, body: SecureJoinRequest,
         return SecureJoinResponse(round_id=round.id, base_weights_id=active.id,
                                   user_id=user_id)
     finally:
-        record_usage(RateLimit.secure_join, user_id, key, SECURE_JOIN_COOLDOWN_SECONDS)
+        add_usage(RateLimit.secure_join, user_id, key, SECURE_JOIN_COOLDOWN_SECONDS)
 
 
 def _require_member(session: Session, round_id: int,
@@ -198,5 +198,5 @@ def secure_submit(round_id: int, body: bytes = Body(...),
         session.commit()
         return {"round_id": round_id, "submitted": True}
     finally:
-        record_usage(RateLimit.weight_submit, user_id, round.model_key,
-                     SUBMIT_DAILY_WINDOW_SECONDS)
+        add_usage(RateLimit.weight_submit, user_id, round.model_key,
+                  SUBMIT_DAILY_WINDOW_SECONDS)
