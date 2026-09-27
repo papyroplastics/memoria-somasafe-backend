@@ -1,0 +1,13 @@
+{
+	metrics
+}
+
+:80 {
+	reverse_proxy {$API_UPSTREAMS} {
+		lb_policy round_robin
+	}
+}
+
+:9180 {
+	metrics
+}

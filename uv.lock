@@ -1813,16 +1813,10 @@ dependencies = [
 [package.optional-dependencies]
 cuda = [
     { name = "ai-edge-litert" },
-    { name = "matplotlib" },
-    { name = "pandas" },
-    { name = "pyqt6" },
     { name = "tensorflow", extra = ["and-cuda"] },
 ]
 ml = [
     { name = "ai-edge-litert" },
-    { name = "matplotlib" },
-    { name = "pandas" },
-    { name = "pyqt6" },
     { name = "tensorflow" },
 ]
 
@@ -1831,6 +1825,9 @@ dev = [
     { name = "fakeredis" },
     { name = "flower" },
     { name = "ipython" },
+    { name = "matplotlib" },
+    { name = "pandas" },
+    { name = "pyqt6" },
     { name = "types-tensorflow" },
 ]
 
@@ -1841,12 +1838,9 @@ requires-dist = [
     { name = "cryptography", specifier = ">=44.0" },
     { name = "fastapi", extras = ["standard"], specifier = ">=0.136.3" },
     { name = "httpx2", specifier = ">=2.5.0" },
-    { name = "matplotlib", marker = "extra == 'ml'", specifier = ">=3.10.9" },
     { name = "numpy", specifier = ">=2.4.6" },
-    { name = "pandas", marker = "extra == 'ml'", specifier = ">=2.2" },
     { name = "psycopg", extras = ["binary"], specifier = ">=3.2" },
     { name = "pwdlib", extras = ["argon2"], specifier = ">=0.2.1" },
-    { name = "pyqt6", marker = "extra == 'ml'", specifier = ">=6.11.0" },
     { name = "pytest", specifier = ">=9.0.3" },
     { name = "python-dotenv", specifier = ">=1.2.2" },
     { name = "python-multipart", specifier = ">=0.0.18" },
@@ -1866,6 +1860,9 @@ dev = [
     { name = "fakeredis" },
     { name = "flower" },
     { name = "ipython" },
+    { name = "matplotlib", specifier = ">=3.10.9" },
+    { name = "pandas", specifier = ">=2.2" },
+    { name = "pyqt6", specifier = ">=6.11.0" },
     { name = "types-tensorflow" },
 ]
 

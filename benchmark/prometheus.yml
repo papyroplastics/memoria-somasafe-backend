@@ -1,0 +1,43 @@
+global:
+  scrape_interval: 2s
+  scrape_timeout: 2s
+
+scrape_configs:
+  - job_name: api
+    dns_sd_configs:
+      - names: [api-1, api-2]
+        type: A
+        port: 8000
+        refresh_interval: 5s
+    relabel_configs:
+      - source_labels: [__meta_dns_name]
+        target_label: instance
+
+  - job_name: caddy
+    static_configs:
+      - targets: [caddy:9180]
+
+  - job_name: celery
+    static_configs:
+      - targets: [celery-exporter:9808]
+
+  - job_name: postgres
+    static_configs:
+      - targets: [postgres-exporter:9187]
+
+  - job_name: redis
+    static_configs:
+      - targets: [redis-exporter:9121]
+        labels:
+          instance_role: auth
+      - targets: [broker-exporter:9121]
+        labels:
+          instance_role: broker
+
+  - job_name: node
+    static_configs:
+      - targets: [node-exporter:9100]
+
+  - job_name: cadvisor
+    static_configs:
+      - targets: [cadvisor:8080]

@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 from dotenv import load_dotenv
 
@@ -37,15 +38,21 @@ RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results"))
 # and firmware/scripts/gen_factory_nvs.py).
 SERVER_PRIVATE_KEY_FILE = Path(os.environ.get("SERVER_PRIVATE_KEY", "shared/gen/server-private-key.pem"))
 
-# PostgreSQL (SQLModel/SQLAlchemy URL) and Redis instance.
-DATABASE_URL = _require("DATABASE_URL")
-REDIS_URL = _require("REDIS_URL")
+_POSTGRES_USER = quote(_require("POSTGRES_USER"), safe="")
+_POSTGRES_PASSWORD = quote(_require("POSTGRES_PASSWORD"), safe="")
+_POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "localhost")
+_POSTGRES_PORT = int(os.environ.get("POSTGRES_PORT", 5432))
+DATABASE_URL = (f"postgresql+psycopg://{_POSTGRES_USER}:{_POSTGRES_PASSWORD}"
+                f"@{_POSTGRES_HOST}:{_POSTGRES_PORT}/{_require('POSTGRES_DB')}")
 
-# Celery broker/result-backend Redis, separate from REDIS_URL (auth sessions and
-# rate limiting). Defaults to REDIS_URL so a single-instance local setup still
-# works unchanged.
-CELERY_BROKER_URL = os.environ.get("CELERY_BROKER_URL", REDIS_URL)
-CELERY_RESULT_BACKEND = os.environ.get("CELERY_RESULT_BACKEND", REDIS_URL)
+# Auth sessions and rate limiting on db 0, the Celery broker and result backend on
+# db 1, of the same instance unless BROKER_HOST/BROKER_PORT point at another one.
+_REDIS_HOST = os.environ.get("REDIS_HOST", "localhost")
+_REDIS_PORT = int(os.environ.get("REDIS_PORT", 6379))
+_BROKER_HOST = os.environ.get("BROKER_HOST", _REDIS_HOST)
+_BROKER_PORT = int(os.environ.get("BROKER_PORT", _REDIS_PORT))
+REDIS_URL = f"redis://{_REDIS_HOST}:{_REDIS_PORT}/0"
+BROKER_URL = f"redis://{_BROKER_HOST}:{_BROKER_PORT}/1"
 
 # Quantization-result lifetime. A served result is kept for SERVE_GRACE_SECONDS
 # so the client can retry the download; an unclaimed one is kept up to

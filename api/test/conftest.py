@@ -6,14 +6,9 @@ registry and the ``SEED_USER`` account exist. Tests add their own throwaway
 devices (random serial + key) and clear the rate-limit counters between runs, so
 nothing here imports TensorFlow or the ml package — the suite stays fast.
 
-A broker is set to ``memory://`` before the app is imported: the model routes
-enqueue quantization tasks but a worker is never run, so submissions stay
-``pending`` and the tests assert up to the enqueue/poll boundary.
+The Celery broker is swapped for ``memory://``: no worker runs, so submissions
+stay ``pending``.
 """
-
-import os
-
-os.environ.setdefault("REDIS_URL", "memory://")
 
 import secrets
 
@@ -28,6 +23,9 @@ from common import ratelimit
 from ..routes.auth import hash_password
 from common.config import SEED_PASSWORD, SEED_USER
 from common.db import AuthSession, Device, Session, User, engine, utcnow
+from worker.celery_app import app as celery_app
+
+celery_app.conf.broker_url = "memory://"
 
 
 def pub_point(priv: ec.EllipticCurvePrivateKey) -> bytes:

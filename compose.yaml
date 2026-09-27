@@ -1,6 +1,3 @@
-# Only the external services run in containers; the API gateway and the Celery
-# worker run on the host via uv (see the Makefile). These are bound to localhost
-# since only the host-run API needs to reach them — the phone talks to the API.
 services:
   postgres:
     image: docker.io/library/postgres:18-alpine
@@ -9,17 +6,26 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - 127.0.0.1:5432:5432
+      - ${BIND_ADDR:-127.0.0.1}:${POSTGRES_PORT:-5432}:5432
     volumes:
       - postgres_data:/var/lib/postgresql
 
   redis:
     image: docker.io/library/redis:8-alpine
     ports:
-      - 127.0.0.1:6379:6379
+      - ${BIND_ADDR:-127.0.0.1}:${REDIS_PORT:-6379}:6379
     volumes:
       - redis_data:/data
+
+  broker:
+    image: docker.io/library/redis:8-alpine
+    profiles: [broker]
+    ports:
+      - ${BIND_ADDR:-127.0.0.1}:${BROKER_PORT:-6380}:6379
+    volumes:
+      - broker_data:/data
 
 volumes:
   postgres_data:
   redis_data:
+  broker_data:

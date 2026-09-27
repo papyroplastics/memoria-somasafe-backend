@@ -1,0 +1,9 @@
+*
+!pyproject.toml
+!uv.lock
+!api
+!common
+!ml
+!worker
+**/__pycache__
+**/test

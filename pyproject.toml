@@ -26,9 +26,6 @@ dependencies = [
 ml = [
     "tensorflow>=2.21.0",
     "ai-edge-litert>=2.1.6",
-    "pandas>=2.2",
-    "matplotlib>=3.10.9",
-    "pyqt6>=6.11.0",
 ]
 cuda = ["somasafe-backend[ml]", "tensorflow[and-cuda]"]
 
@@ -37,7 +34,10 @@ dev = [
   "ipython",
   "types-tensorflow",
   "fakeredis",
-  "flower"
+  "flower",
+  "pandas>=2.2",
+  "matplotlib>=3.10.9",
+  "pyqt6>=6.11.0",
 ]
 
 [tool.pyrefly]
