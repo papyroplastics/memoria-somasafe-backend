@@ -4,6 +4,8 @@ x-api-template: &api
     context: .
     dockerfile: benchmark/api.Containerfile
   env_file: benchmark/prod.env
+  environment:
+    WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
   depends_on: [postgres, redis, broker]
 
 x-worker-template: &worker

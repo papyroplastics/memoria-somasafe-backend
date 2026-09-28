@@ -9,10 +9,10 @@ RUN /opt/venv/bin/python -c "import importlib.util; assert importlib.util.find_s
 FROM docker.io/library/debian:trixie-slim
 COPY --from=build /opt/python /opt/python
 COPY --from=build /opt/venv /opt/venv
-ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1
+ENV PATH=/opt/venv/bin:$PATH PYTHONUNBUFFERED=1 PROMETHEUS_MULTIPROC_DIR=/tmp/prom-multiproc
 WORKDIR /app
 COPY common common
 COPY api api
 COPY worker/__init__.py worker/celery_app.py worker/
 EXPOSE 8000
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["sh", "-c", "mkdir -p $PROMETHEUS_MULTIPROC_DIR && rm -f $PROMETHEUS_MULTIPROC_DIR/*.db && exec uvicorn api:app --host 0.0.0.0 --port 8000"]
