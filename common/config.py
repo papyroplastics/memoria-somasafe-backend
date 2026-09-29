@@ -53,6 +53,8 @@ _BROKER_HOST = os.environ.get("BROKER_HOST", _REDIS_HOST)
 _BROKER_PORT = int(os.environ.get("BROKER_PORT", _REDIS_PORT))
 REDIS_URL = f"redis://{_REDIS_HOST}:{_REDIS_PORT}/0"
 BROKER_URL = f"redis://{_BROKER_HOST}:{_BROKER_PORT}/1"
+_RESULT_BACKEND_URL = os.environ.get("RESULT_BACKEND_URL", BROKER_URL)
+RESULT_BACKEND_URL = None if _RESULT_BACKEND_URL == "NONE" else _RESULT_BACKEND_URL
 
 # Quantization-result lifetime. A served result is kept for SERVE_GRACE_SECONDS
 # so the client can retry the download; an unclaimed one is kept up to
@@ -69,6 +71,7 @@ WORKER_TASK_TIME_LIMIT = int(os.environ.get("WORKER_TASK_TIME_LIMIT", MINUTE * 6
 CELERY_VISIBILITY_TIMEOUT_SECONDS = int(os.environ.get("CELERY_VISIBILITY_TIMEOUT_SECONDS", HOUR))
 # A claimed row older than this was left by a dead worker and is reaped.
 WORKER_REAP_AFTER_SECONDS = WORKER_TASK_TIME_LIMIT + MINUTE
+WORKER_METRICS_DIR = os.environ.get("WORKER_METRICS_DIR") or None
 
 # RNG seed used globally
 SEED = int(os.environ.get("SEED", 1234))

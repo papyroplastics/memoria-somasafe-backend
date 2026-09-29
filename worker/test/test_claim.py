@@ -27,7 +27,7 @@ def test_claim_once(open_round):
 
 def test_claim_from_any_of(open_round):
     assert SecureRound.claim(open_round, (SecureRoundStatus.sealed, SecureRoundStatus.open),
-                             SecureRoundStatus.failed, error="x")
+                             SecureRoundStatus.failed)
     assert _status(open_round) is SecureRoundStatus.failed
 
 

@@ -13,7 +13,8 @@ start = time.perf_counter()
 result = wait_for_aggregation(app, key)
 elapsed = time.perf_counter() - start
 
-print(f"{key}: {result['outcome']} ({result['detail']})")
-for phase, seconds in result["timings"].items():
-    print(f"  {phase}: {seconds:.3f}s")
+print(f"{key}: {result['outcome']} (cohort {result['cohort']} of {result['users']} users)")
+for name, value in result.items():
+    if isinstance(value, float):
+        print(f"  {name}: {value:.3f}s")
 print(f"AGG_WALL_SECONDS={elapsed:.3f}")

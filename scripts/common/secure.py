@@ -46,6 +46,6 @@ def run_round(app, round_id: int, timeout: float = 300.0) -> str:
             if round.status is SecureRoundStatus.aggregated:
                 return f"aggregated {round.member_count} members into new global weights"
             if round.status is SecureRoundStatus.failed:
-                raise SystemExit(f"secure round produced no new weights: {round.error}")
+                raise SystemExit(f"secure round {round_id} failed, see the worker logs")
         time.sleep(1.0)
     raise SystemExit(f"secure round {round_id} did not settle within {timeout:.0f}s")

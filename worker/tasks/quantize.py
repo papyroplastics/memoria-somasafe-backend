@@ -1,7 +1,9 @@
 import uuid
 from dataclasses import dataclass
+from enum import StrEnum, auto
 
 import numpy as np
+from celery.utils.log import get_task_logger
 from sqlmodel import Session
 
 from common.celery_tasks import QUANTIZE_TASK
@@ -17,9 +19,36 @@ from common.db import (
     utcnow,
 )
 from worker import runtime
-from worker.baking import bake_quantized
+from worker.baking import QuantizedBake, Restore, bake_quantized, restore
 from worker.celery_app import app
-from worker.phases import Phases
+from worker.metrics import Timer, write
+
+log = get_task_logger(__name__)
+
+
+class QuantizeStage(StrEnum):
+    read = auto()
+    runtime = auto()
+    apply_delta = auto()
+    commit = auto()
+
+
+STAGES = (QuantizeStage.read, QuantizeStage.runtime, QuantizeStage.apply_delta,
+          *Restore, *QuantizedBake, QuantizeStage.commit)
+
+
+class QuantizeOutcome(StrEnum):
+    done = auto()
+    skipped_claimed = auto()
+    skipped_not_running = auto()
+    failed = auto()
+
+
+@dataclass
+class QuantizeRecord:
+    job_id: str
+    outcome: QuantizeOutcome | None = None
+    model_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -51,40 +80,52 @@ def _read(job_id: uuid.UUID) -> QuantizePlan:
         )
 
 
-def _fail(job_id: uuid.UUID, error: str) -> None:
+def _fail(job_id: uuid.UUID) -> None:
     with Session(engine) as session:
         QuantizationJob.transition(session, job_id, JobStatus.running, JobStatus.failed,
-                                   error=error, finished_at=utcnow())
+                                   finished_at=utcnow())
         session.commit()
 
 
-@app.task(name=QUANTIZE_TASK)
-def quantize_submission(job_id: str) -> str:
+def _quantize(pk: uuid.UUID, timer: Timer[QuantizeStage | Restore | QuantizedBake],
+              record: QuantizeRecord) -> None:
+    with timer(QuantizeStage.read):
+        plan = _read(pk)
+    record.model_key = plan.model_key
+    with timer(QuantizeStage.runtime):
+        rt = runtime.get(plan.model_key)
+    if rt.fingerprint != plan.fingerprint:
+        raise ValueError(f"stale model version for '{plan.model_key}'")
+
+    with timer(QuantizeStage.apply_delta):
+        local = (plan.reference + plan.delta).astype(np.float32)
+    restore(rt.model, local, timer)
+    quantized = bake_quantized(rt.model, rt.rep_dataset, plan.contract_version, timer)
+
+    with timer(QuantizeStage.commit), Session(engine) as session:
+        session.add(QuantizationResult(job_id=pk, data=quantized.data))
+        if not QuantizationJob.transition(session, pk, JobStatus.running, JobStatus.done,
+                                          signature=quantized.signature, finished_at=utcnow()):
+            session.rollback()
+            record.outcome = QuantizeOutcome.skipped_not_running
+            return
+        session.commit()
+    record.outcome = QuantizeOutcome.done
+
+
+@app.task(name=QUANTIZE_TASK, ignore_result=True)
+def quantize_submission(job_id: str) -> None:
+    timer = Timer(*STAGES)
+    record = QuantizeRecord(job_id)
     pk = uuid.UUID(job_id)
     if not QuantizationJob.claim(pk, JobStatus.pending, JobStatus.running,
                                  started_at=utcnow()):
-        return "skipped: job already claimed"
-
-    phases = Phases(task="quantize", job_id=job_id)
-    try:
-        with phases("read"):
-            plan = _read(pk)
-        with phases("runtime"):
-            rt = runtime.get(plan.model_key)
-        if rt.fingerprint != plan.fingerprint:
-            raise ValueError(f"stale model version for '{plan.model_key}'")
-
-        local = (plan.reference + plan.delta).astype(np.float32)
-        data, signature = bake_quantized(rt, local, plan.contract_version, phases)
-
-        with phases("commit"), Session(engine) as session:
-            session.add(QuantizationResult(job_id=pk, data=data))
-            if not QuantizationJob.transition(session, pk, JobStatus.running, JobStatus.done,
-                                              signature=signature, finished_at=utcnow()):
-                session.rollback()
-                return "skipped: job no longer running"
-            session.commit()
-        return "done"
-    except Exception as exc:
-        _fail(pk, str(exc))
-        return f"failed: {exc}"
+        record.outcome = QuantizeOutcome.skipped_claimed
+    else:
+        try:
+            _quantize(pk, timer, record)
+        except Exception:
+            log.exception("quantization job %s failed", job_id)
+            record.outcome = QuantizeOutcome.failed
+            _fail(pk)
+    write(QUANTIZE_TASK, record, timer)

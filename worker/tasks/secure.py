@@ -1,5 +1,5 @@
-from collections import Counter
 from dataclasses import dataclass
+from enum import StrEnum, auto
 
 import numpy as np
 from celery.utils.log import get_task_logger
@@ -29,10 +29,19 @@ from common.db import (
 from common.ratelimit import clear_model_limits
 from common.secure_round import seal_round
 from worker import runtime
-from worker.baking import bake, store
+from worker.baking import (
+    QuantizedBake,
+    Restore,
+    TrainableBake,
+    bake_quantized,
+    bake_trainable,
+    compress_weights,
+    restore,
+    store,
+)
 from worker.celery_app import app
 from worker.compute import Action, RoundState, SweepPolicy, secure_update, sweep_actions
-from worker.phases import Phases
+from worker.metrics import Timer, write
 
 log = get_task_logger(__name__)
 
@@ -44,8 +53,36 @@ POLICY = SweepPolicy(
     aggregating_timeout=WORKER_REAP_AFTER_SECONDS,
 )
 
-_SWEEP_COUNTERS = ("sealed", "dispatched", "failed_stale_base", "failed_open_timeout",
-                   "failed_seal_timeout", "failed_worker_lost", "members_missing_at_timeout")
+
+class SecureAggregationStage(StrEnum):
+    read = auto()
+    runtime = auto()
+    ring_sum = auto()
+    compress_weights = auto()
+    commit = auto()
+    clear_limits = auto()
+
+
+STAGES = (SecureAggregationStage.read, SecureAggregationStage.runtime,
+          SecureAggregationStage.ring_sum, *Restore, *QuantizedBake, *TrainableBake,
+          SecureAggregationStage.compress_weights, SecureAggregationStage.commit,
+          SecureAggregationStage.clear_limits)
+
+
+class SecureAggregationOutcome(StrEnum):
+    aggregated = auto()
+    skipped_not_sealed = auto()
+    skipped_not_aggregating = auto()
+    failed = auto()
+
+
+@dataclass
+class SecureAggregationRecord:
+    round_id: int
+    outcome: SecureAggregationOutcome | None = None
+    model_key: str | None = None
+    base_weights_id: int | None = None
+    members: int | None = None
 
 
 @dataclass(frozen=True)
@@ -89,70 +126,76 @@ def _read_round(round_id: int) -> SecurePlan:
         )
 
 
-def _fail_round(round_id: int, frm: SecureRoundStatus, reason: str) -> str | None:
+def _fail_round(round_id: int, frm: SecureRoundStatus) -> str | None:
     with Session(engine) as session:
         if not SecureRound.transition(session, round_id, frm, SecureRoundStatus.failed,
-                                      error=reason, finished_at=utcnow()):
+                                      finished_at=utcnow()):
             return None
         model_key = session.get(SecureRound, round_id).model_key
         session.commit()
         return model_key
 
 
-def _result(round_id: int, outcome: str, detail: str, phases: Phases,
-            members: int = 0) -> dict:
-    log.info("round %s: %s (%s)", round_id, outcome, detail)
-    return {"round_id": round_id, "outcome": outcome, "members": members,
-            "detail": detail, "timings": phases.timings}
-
-
-def _aggregate(round_id: int, phases: Phases) -> dict:
-    with phases("read"):
+def _aggregate(round_id: int,
+               timer: Timer[SecureAggregationStage | Restore | QuantizedBake | TrainableBake],
+               record: SecureAggregationRecord) -> None:
+    with timer(SecureAggregationStage.read):
         plan = _read_round(round_id)
-    with phases("runtime"):
+    record.model_key = plan.model_key
+    record.base_weights_id = plan.base_id
+    record.members = plan.member_count
+    with timer(SecureAggregationStage.runtime):
         rt = runtime.get(plan.model_key)
     if rt.fingerprint != plan.fingerprint:
         raise ValueError("round version is no longer current")
 
-    with phases("ring_sum"):
+    with timer(SecureAggregationStage.ring_sum):
         new_weights = secure_update(plan.reference, plan.vectors, plan.scale,
                                     plan.member_count, plan.clip_bound)
+    restore(rt.model, new_weights, timer)
     try:
-        baked = bake(rt, new_weights, plan.contract_version, phases)
+        quantized = bake_quantized(rt.model, rt.rep_dataset, plan.contract_version, timer)
+        trainable = bake_trainable(rt.model, plan.contract_version, timer)
     except Exception as exc:
         raise ValueError(f"artifact export failed: {exc}") from exc
+    with timer(SecureAggregationStage.compress_weights):
+        weights = compress_weights(new_weights)
 
     try:
-        with phases("commit"), Session(engine) as session:
-            store(session, plan.model_key, plan.version_id, plan.base_id, baked)
+        with timer(SecureAggregationStage.commit), Session(engine) as session:
+            store(session, plan.model_key, plan.version_id, plan.base_id, weights,
+                  trainable, quantized)
             if not SecureRound.transition(session, round_id, SecureRoundStatus.aggregating,
                                           SecureRoundStatus.aggregated, finished_at=utcnow()):
                 session.rollback()
-                return _result(round_id, "skipped_claimed", "round no longer aggregating",
-                               phases)
+                record.outcome = SecureAggregationOutcome.skipped_not_aggregating
+                return
             session.commit()
     except IntegrityError:
         raise ValueError(f"base {plan.base_id} already aggregated") from None
 
-    with phases("clear_model_limits"):
+    with timer(SecureAggregationStage.clear_limits):
         clear_model_limits(plan.model_key)
-    return _result(round_id, "aggregated", f"{plan.member_count} members",
-                   phases, plan.member_count)
+    record.outcome = SecureAggregationOutcome.aggregated
 
 
-@app.task(name=SECURE_AGG_TASK)
-def secure_aggregation(round_id: int) -> dict:
-    phases = Phases(task="secure_aggregation", round_id=round_id)
+@app.task(name=SECURE_AGG_TASK, ignore_result=True)
+def secure_aggregation(round_id: int) -> None:
+    timer = Timer(*STAGES)
+    record = SecureAggregationRecord(round_id)
     if not SecureRound.claim(round_id, SecureRoundStatus.sealed, SecureRoundStatus.aggregating,
                              aggregating_at=utcnow()):
-        return _result(round_id, "skipped_claimed", "round is not sealed", phases)
-    try:
-        return _aggregate(round_id, phases)
-    except Exception as exc:
-        model_key = _fail_round(round_id, SecureRoundStatus.aggregating, str(exc))
-        if model_key is not None:
-            clear_model_limits(model_key)
-        return _result(round_id, "failed", str(exc), phases)
+        record.outcome = SecureAggregationOutcome.skipped_not_sealed
+    else:
+        try:
+            _aggregate(round_id, timer, record)
+        except Exception:
+            log.exception("secure round %s failed", round_id)
+            record.outcome = SecureAggregationOutcome.failed
+            model_key = _fail_round(round_id, SecureRoundStatus.aggregating)
+            if model_key is not None:
+                clear_model_limits(model_key)
+    write(SECURE_AGG_TASK, record, timer)
 
 
 def _read_sweep() -> tuple[list[RoundState], dict[str, int | None]]:
@@ -178,11 +221,10 @@ def _read_sweep() -> tuple[list[RoundState], dict[str, int | None]]:
     return rounds, active
 
 
-@app.task(name=SECURE_SWEEP_TASK)
-def secure_round_sweep() -> dict[str, int]:
+@app.task(name=SECURE_SWEEP_TASK, ignore_result=True)
+def secure_round_sweep() -> None:
     now = utcnow()
     rounds, active = _read_sweep()
-    counters = Counter({name: 0 for name in _SWEEP_COUNTERS})
     dispatch: list[int] = []
     failed_models: set[str] = set()
 
@@ -195,21 +237,12 @@ def secure_round_sweep() -> dict[str, int]:
                 done = seal_round(session, action.round_id) is not None
             else:
                 done = SecureRound.transition(session, action.round_id, action.frm,
-                                              SecureRoundStatus.failed, error=action.reason,
-                                              finished_at=now)
+                                              SecureRoundStatus.failed, finished_at=now)
             session.commit()
-        if not done:
-            continue
-        if action.action is Action.seal:
-            counters["sealed"] += 1
-        else:
-            counters[f"failed_{action.reason}"] += 1
-            counters["members_missing_at_timeout"] += action.missing
+        if done and action.action is not Action.seal:
             failed_models.add(action.model_key)
 
     for round_id in dispatch:
         secure_aggregation.delay(round_id)
-        counters["dispatched"] += 1
     for key in failed_models:
         clear_model_limits(key)
-    return dict(counters)

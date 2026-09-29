@@ -57,7 +57,7 @@ def _isolate_rounds():
     with Session(engine) as session:
         session.execute(update(SecureRound)
                         .where(SecureRound.status == SecureRoundStatus.open)
-                        .values(status=SecureRoundStatus.failed, error="test reset",
+                        .values(status=SecureRoundStatus.failed,
                                 finished_at=utcnow()))
         floor = session.exec(select(func.max(SecureRound.id))).one() or 0
         session.commit()

@@ -16,6 +16,7 @@ from common.config import (
     CLEANUP_INTERVAL_SECONDS,
     FED_AGG_INTERVAL_SECONDS,
     FED_LOCK_TTL_SECONDS,
+    RESULT_BACKEND_URL,
     RESULT_TTL_SECONDS,
     SECURE_SWEEP_INTERVAL_SECONDS,
     WORKER_TASK_SOFT_TIME_LIMIT,
@@ -28,7 +29,7 @@ if not (WORKER_TASK_SOFT_TIME_LIMIT < WORKER_TASK_TIME_LIMIT
                        "FED_LOCK_TTL_SECONDS < CELERY_VISIBILITY_TIMEOUT_SECONDS")
 
 app = Celery(
-    "somasafe", broker=BROKER_URL, backend=BROKER_URL,
+    "somasafe", broker=BROKER_URL, backend=RESULT_BACKEND_URL,
     include=[
         "worker.tasks.quantize",
         "worker.tasks.aggregation",

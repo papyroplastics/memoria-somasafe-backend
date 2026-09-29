@@ -214,7 +214,6 @@ class SecureRound(IntPKModel, ClaimableModel, table=True):
     sealed_at: datetime | None = None
     aggregating_at: datetime | None = None
     finished_at: datetime | None = None
-    error: str | None = None
 
     __table_args__ = (Index("uq_secureround_open_per_model", "model_key", unique=True,
                             postgresql_where=text("status = 'open'")),)
@@ -242,7 +241,6 @@ class QuantizationJob(ClaimableModel, table=True):
     model_key: str
     status: JobStatus = Field(default=JobStatus.pending)
     signature: bytes | None = None
-    error: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
     started_at: datetime | None = None
     finished_at: datetime | None = None

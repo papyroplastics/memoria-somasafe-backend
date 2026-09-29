@@ -6,6 +6,7 @@ x-api-template: &api
   env_file: benchmark/prod.env
   environment:
     WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
+    RESULT_BACKEND_URL: NONE
   depends_on: [postgres, redis, broker]
 
 x-worker-template: &worker
@@ -14,8 +15,11 @@ x-worker-template: &worker
     context: .
     dockerfile: benchmark/worker.Containerfile
   env_file: benchmark/prod.env
+  environment:
+    RESULT_BACKEND_URL: NONE
   volumes:
     - ./shared/gen:/app/shared/gen:ro
+    - worker_metrics:/var/lib/worker-metrics
   depends_on: [postgres, redis, broker]
 
 services:
@@ -136,3 +140,4 @@ services:
 
 volumes:
   prometheus_data:
+  worker_metrics:

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from enum import StrEnum, auto
 
 import numpy as np
 from celery.utils.log import get_task_logger
@@ -24,15 +25,61 @@ from common.db import (
 )
 from common.ratelimit import clear_model_limits
 from worker import runtime
-from worker.baking import bake, store
+from worker.baking import (
+    QuantizedBake,
+    Restore,
+    TrainableBake,
+    bake_quantized,
+    bake_trainable,
+    compress_weights,
+    restore,
+    store,
+)
 from worker.celery_app import app
 from worker.compute import cohort_cap, dense_update
 from worker.locking import model_lock
-from worker.phases import Phases
+from worker.metrics import Timer, write
 
 log = get_task_logger(__name__)
 
 DENSE_TYPES = (SubmissionType.raw, SubmissionType.quantize)
+
+
+class AggregationStage(StrEnum):
+    metadata = auto()
+    blob_fetch = auto()
+    runtime = auto()
+    trimmed_mean = auto()
+    compress_weights = auto()
+    commit = auto()
+    clear_limits = auto()
+
+
+STAGES = (AggregationStage.metadata, AggregationStage.blob_fetch, AggregationStage.runtime,
+          AggregationStage.trimmed_mean, *Restore, *QuantizedBake, *TrainableBake,
+          AggregationStage.compress_weights, AggregationStage.commit,
+          AggregationStage.clear_limits)
+
+
+class AggregationOutcome(StrEnum):
+    aggregated = auto()
+    skipped_locked = auto()
+    skipped_unavailable = auto()
+    skipped_min_submissions = auto()
+    export_failed = auto()
+    duplicate_round = auto()
+    failed = auto()
+
+
+@dataclass
+class AggregationRecord:
+    model_key: str
+    outcome: AggregationOutcome | None = None
+    base_weights_id: int | None = None
+    users: int | None = None
+    on_base: int | None = None
+    cap: int | None = None
+    cohort: int | None = None
 
 
 @dataclass(frozen=True)
@@ -43,30 +90,21 @@ class RoundPlan:
     reference_id: int
     reference: np.ndarray
     deltas: np.ndarray
-    on_base: int
-    detail: str
 
 
-@dataclass(frozen=True)
-class Outcome:
-    outcome: str
-    detail: str
-    cohort: int = 0
-    on_base: int = 0
-
-
-def _read_round(key: str, phases: Phases) -> RoundPlan | Outcome:
+def _read_round(key: str, timer: Timer[AggregationStage],
+                record: AggregationRecord) -> RoundPlan | None:
     with Session(engine) as session:
-        with phases("submission_metadata"):
+        with timer(AggregationStage.metadata):
             latest = get_latest_version(session, key)
-            if latest is None:
-                return Outcome("skipped_unavailable", "no seeded version")
-            if latest.submission_type not in DENSE_TYPES:
-                return Outcome("skipped_unavailable",
-                            f"no dense aggregation for '{latest.submission_type.value}'")
+            if latest is None or latest.submission_type not in DENSE_TYPES:
+                record.outcome = AggregationOutcome.skipped_unavailable
+                return None
             reference = get_version_weights(session, latest.id)
             if reference is None:
-                return Outcome("skipped_unavailable", "no active global weights")
+                record.outcome = AggregationOutcome.skipped_unavailable
+                return None
+            record.base_weights_id = reference.id
 
             cap = cohort_cap(latest.weight_count, FED_AGG_MEMORY_BYTES)
             newest_per_user = (
@@ -81,19 +119,19 @@ def _read_round(key: str, phases: Phases) -> RoundPlan | Outcome:
                 select(newest_per_user.c.id)
                 .order_by(newest_per_user.c.created_at.desc())
                 .limit(cap)).scalars())
-            users = session.execute(select(func.count()).select_from(newest_per_user)).scalar_one()
-            on_base = session.execute(
+            record.cap = cap
+            record.cohort = len(ids)
+            record.users = session.execute(
+                select(func.count()).select_from(newest_per_user)).scalar_one()
+            record.on_base = session.execute(
                 select(func.count()).select_from(ClientDeltaSubmission)
                 .where(ClientDeltaSubmission.base_weights_id == reference.id)).scalar_one()
 
-        detail = f"{len(ids)} of {users} users, {on_base} submissions on this base, cap {cap}"
-        if cap < FED_MIN_SUBMISSIONS or (FED_TRIM_RATIO and cap < 1 / FED_TRIM_RATIO):
-            detail += " (memory cap below FED_MIN_SUBMISSIONS or 1/FED_TRIM_RATIO)"
         if len(ids) < FED_MIN_SUBMISSIONS:
-            return Outcome("skipped_min_submissions",
-                        f"{detail}; min {FED_MIN_SUBMISSIONS}", len(ids), on_base)
+            record.outcome = AggregationOutcome.skipped_min_submissions
+            return None
 
-        with phases("blob_fetch"):
+        with timer(AggregationStage.blob_fetch):
             deltas = np.empty((len(ids), latest.weight_count), dtype=np.float32)
             rows = session.execute(
                 select(ClientDeltaSubmission.deltas)
@@ -105,58 +143,65 @@ def _read_round(key: str, phases: Phases) -> RoundPlan | Outcome:
                 filled += 1
             deltas = deltas[:filled]
             weights = np.frombuffer(decompress(reference.weights), dtype=np.float32)
+        record.cohort = filled
 
         return RoundPlan(latest.id, latest.fingerprint, latest.contract_version,
-                         reference.id, weights, deltas, on_base, detail)
+                         reference.id, weights, deltas)
 
 
-def _aggregate(key: str, phases: Phases) -> Outcome:
-    plan = _read_round(key, phases)
-    if isinstance(plan, Outcome):
-        return plan
-    cohort = len(plan.deltas)
+def _aggregate(key: str,
+               timer: Timer[AggregationStage | Restore | QuantizedBake | TrainableBake],
+               record: AggregationRecord) -> None:
+    plan = _read_round(key, timer, record)
+    if plan is None:
+        return
 
-    with phases("runtime"):
+    with timer(AggregationStage.runtime):
         rt = runtime.get(key)
     if rt.fingerprint != plan.fingerprint:
-        return Outcome("skipped_unavailable", "no seeded version matching the running code",
-                    cohort, plan.on_base)
+        record.outcome = AggregationOutcome.skipped_unavailable
+        return
 
-    with phases("trimmed_mean"):
+    with timer(AggregationStage.trimmed_mean):
         new_weights = dense_update(plan.reference, plan.deltas, FED_TRIM_RATIO)
+    restore(rt.model, new_weights, timer)
     try:
-        baked = bake(rt, new_weights, plan.contract_version, phases)
-    except Exception as exc:
-        return Outcome("export_failed", f"{plan.detail}; {exc}", cohort, plan.on_base)
+        quantized = bake_quantized(rt.model, rt.rep_dataset, plan.contract_version, timer)
+        trainable = bake_trainable(rt.model, plan.contract_version, timer)
+    except Exception:
+        log.exception("artifact export for %s failed", key)
+        record.outcome = AggregationOutcome.export_failed
+        return
+    with timer(AggregationStage.compress_weights):
+        weights = compress_weights(new_weights)
 
     try:
-        with phases("commit"), Session(engine) as session:
-            store(session, key, plan.version_id, plan.reference_id, baked)
+        with timer(AggregationStage.commit), Session(engine) as session:
+            store(session, key, plan.version_id, plan.reference_id, weights, trainable, quantized)
             session.commit()
     except IntegrityError:
-        return Outcome("duplicate_round", f"base {plan.reference_id} already aggregated",
-                    cohort, plan.on_base)
+        record.outcome = AggregationOutcome.duplicate_round
+        return
 
-    with phases("clear_model_limits"):
+    with timer(AggregationStage.clear_limits):
         clear_model_limits(key)
-    return Outcome("aggregated", plan.detail, cohort, plan.on_base)
+    record.outcome = AggregationOutcome.aggregated
 
 
 @app.task(name=FED_AGG_TASK)
-def federated_aggregation(model_key: str) -> dict:
-    phases = Phases(task="aggregation", model_key=model_key)
+def federated_aggregation(model_key: str) -> dict[str, object]:
+    timer = Timer(*STAGES)
+    record = AggregationRecord(model_key)
     with model_lock(f"agg:{model_key}", FED_LOCK_TTL_SECONDS) as held:
         if not held:
-            outcome = Outcome("skipped_locked", "another round holds the lock")
+            record.outcome = AggregationOutcome.skipped_locked
         else:
             try:
-                outcome = _aggregate(model_key, phases)
-            except Exception as exc:
-                outcome = Outcome("failed", str(exc))
-    log.info("%s: %s (%s)", model_key, outcome.outcome, outcome.detail)
-    return {"model_key": model_key, "outcome": outcome.outcome, "cohort": outcome.cohort,
-            "on_base": outcome.on_base, "detail": outcome.detail,
-            "timings": phases.timings}
+                _aggregate(model_key, timer, record)
+            except Exception:
+                log.exception("aggregation for %s failed", model_key)
+                record.outcome = AggregationOutcome.failed
+    return write(FED_AGG_TASK, record, timer)
 
 
 @app.task(name=FED_DISPATCH_TASK)

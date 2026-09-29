@@ -36,34 +36,28 @@ def _expire_batch(session: Session, grace_cutoff, ttl_cutoff) -> int:
     return len(ids)
 
 
-@app.task(name=CLEANUP_TASK)
-def cleanup_results() -> dict[str, int]:
+@app.task(name=CLEANUP_TASK, ignore_result=True)
+def cleanup_results() -> None:
     now = utcnow()
     grace_cutoff = now - timedelta(seconds=SERVE_GRACE_SECONDS)
     ttl_cutoff = now - timedelta(seconds=RESULT_TTL_SECONDS)
     reap_cutoff = now - timedelta(seconds=WORKER_REAP_AFTER_SECONDS)
 
-    expired = 0
     while True:
         with Session(engine) as session:
             batch = _expire_batch(session, grace_cutoff, ttl_cutoff)
-        expired += batch
         if batch < CLEANUP_BATCH_SIZE:
             break
 
     with Session(engine) as session:
-        lost = session.execute(
+        session.execute(
             update(QuantizationJob)
             .where(QuantizationJob.status == JobStatus.running,
                    QuantizationJob.started_at < reap_cutoff)  # type: ignore[operator]
-            .values(status=JobStatus.failed, error="worker lost", finished_at=now)
-        ).rowcount  # type: ignore[attr-defined]
-        abandoned = session.execute(
+            .values(status=JobStatus.failed, finished_at=now))
+        session.execute(
             update(QuantizationJob)
             .where(QuantizationJob.status == JobStatus.pending,
                    QuantizationJob.created_at < ttl_cutoff)
-            .values(status=JobStatus.expired)
-        ).rowcount  # type: ignore[attr-defined]
+            .values(status=JobStatus.expired))
         session.commit()
-
-    return {"expired": expired, "lost": lost, "abandoned": abandoned}

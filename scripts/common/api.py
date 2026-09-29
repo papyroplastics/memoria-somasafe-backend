@@ -84,6 +84,5 @@ def wait_for_aggregation(app, key: str, timeout: float = 300.0, attempts: int = 
             break
         time.sleep(5)
     if result["outcome"] != "aggregated":
-        raise SystemExit(f"aggregation for {key} produced no new weights: "
-                         f"{result['outcome']} ({result['detail']})")
+        raise SystemExit(f"aggregation for {key} produced no new weights: {result['outcome']}")
     return result

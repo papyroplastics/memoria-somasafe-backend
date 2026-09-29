@@ -233,7 +233,7 @@ def _settled_result(session: Session, job_id: uuid.UUID, user_id: int) -> Respon
 
     if job.status == JobStatus.failed:
         return JSONResponse(status_code=422,
-                            content={"status": job.status.value, "error": job.error})
+                            content={"status": job.status.value, "error": "Quantization failed"})
 
     # A done job whose result the sweep already reaped reads as expired, not as
     # a server error (the status flips in the same transaction as the delete, so
