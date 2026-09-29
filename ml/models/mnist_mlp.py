@@ -51,6 +51,14 @@ class MnistMLP(BackpropModel):
             softmax_cross_entropy(labels, self._logits(images))))
 
 
+class MnistMLPHeavy(MnistMLP):
+
+    def __init__(self, name: str = 'mnist_mlp_heavy', batch_size: int | None = None,
+                 hidden1: int = 1024, hidden2: int = 512, **kwargs):
+        super().__init__(name=name, batch_size=batch_size, hidden1=hidden1,
+                         hidden2=hidden2, **kwargs)
+
+
 class MnistMLPTrainer(Trainer):
 
     primary_metric = 'accuracy'

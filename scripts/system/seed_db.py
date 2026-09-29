@@ -46,6 +46,8 @@ from ml.saving import load_weights, trainable_path, weights_path
 
 default_nvs = "shared/gen/factory_nvs.csv"
 default_firmware_dir = "shared/gen/firmware"
+TEST_SUBJECTS = 15
+SHARED_TEST_PASSWORD = "test"
 
 def reset_weights(session: Session, key: str) -> None:
     weights = session.exec(
@@ -250,25 +252,34 @@ def seed_test_users(session: Session, test_users: int) -> None:
     if test_users <= 0:
         return
 
-    placeholder_pubkey = b"\x04" + bytes(64)
-    for i in range(1, test_users + 1):
-        name = f"test_{i}"
-        user = session.exec(select(User).where(User.username == name)).first()
-        if user is None:
-            user = User(username=name, hashed_password=hash_password(name))
-            session.add(user)
-            session.commit()
-            session.refresh(user)
+    existing = {user.username: user for user in session.exec(
+        select(User).where(User.username.startswith("test_"))).all()}  # type: ignore[attr-defined]
+    shared_hash = hash_password(SHARED_TEST_PASSWORD)
+    created = [
+        User(username=f"test_{i}",
+             hashed_password=hash_password(f"test_{i}") if i <= TEST_SUBJECTS else shared_hash)
+        for i in range(1, test_users + 1) if f"test_{i}" not in existing
+    ]
+    session.add_all(created)
+    session.flush()
+    users = existing | {user.username: user for user in created}
 
+    devices = {device.serial: device for device in session.exec(
+        select(Device).where(Device.serial.startswith("TEST-DEVICE-"))).all()}  # type: ignore[attr-defined]
+    placeholder_pubkey = b"\x04" + bytes(64)
+    now = utcnow()
+    new_devices = []
+    for i in range(1, test_users + 1):
         serial = f"TEST-DEVICE-{i}"
-        device = session.get(Device, serial)
+        device = devices.get(serial)
         if device is None:
             device = Device(serial=serial, public_key=placeholder_pubkey)
-            session.add(device)
-        device.owner_id = user.id
-        device.last_attested_at = utcnow()
+            new_devices.append(device)
+        device.owner_id = users[f"test_{i}"].id
+        device.last_attested_at = now
+    session.add_all(new_devices)
     session.commit()
-    print(f"  + {test_users} test users with owned devices")
+    print(f"  + {test_users} test users with owned devices ({len(created)} new)")
 
 
 def _parse_factory_nvs(path: Path) -> dict[str, str]:
@@ -313,8 +324,9 @@ def main() -> None:
     parser.add_argument("--assign-device", action="store_true",
                         help="assign the seeded device to the seed user, even if either already existed")
     parser.add_argument("--test-users", type=int, default=0, nargs='?',
-                        help="create a test_N user (owning a placeholder device) per "
-                             "dataset subject, for the headless federated harness")
+                        help="create test_N users owning placeholder devices, one per "
+                             "dataset subject by default; the password is the username up to "
+                             f"test_{TEST_SUBJECTS} and '{SHARED_TEST_PASSWORD}' beyond it")
     parser.add_argument("--reseed", action="store_true",
                         help="re-seed every model from the artifacts now on disk, dropping "
                              "its weight snapshots (and everything anchored to them) and "
@@ -324,7 +336,7 @@ def main() -> None:
 
     test_users = args.test_users
     if args.test_users is None:
-        test_users = 15         # when argument is passed without a value
+        test_users = TEST_SUBJECTS
 
     if not args.factory_nvs.exists():
         parser.error(f"{args.factory_nvs} does not exist.")

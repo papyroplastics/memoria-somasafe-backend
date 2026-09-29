@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from common.db import SubmissionType
 from ml.models import (
@@ -32,7 +32,7 @@ class ModelSpec:
         return self.artifacts_key or self.key
 
 
-MODELS: dict[str, ModelSpec] = {
+BASE_MODELS: dict[str, ModelSpec] = {
     "feature-mlp": ModelSpec(
         key="feature-mlp",
         name="Feature-based MLP",
@@ -66,15 +66,6 @@ MODELS: dict[str, ModelSpec] = {
         trainer_cls=feature_autoencoder.FeatureAutoencoderTrainer,
         submission_type=SubmissionType.raw,
     ),
-    "feature-ae-secure": ModelSpec(
-        key="feature-ae-secure",
-        name="Feature Autoencoder (secure)",
-        min_app_version="1.0.0",
-        model_cls=feature_autoencoder.FeatureAutoencoder,
-        trainer_cls=feature_autoencoder.FeatureAutoencoderTrainer,
-        submission_type=SubmissionType.secure,
-        artifacts_key="feature-ae",
-    ),
     "cnn-ae": ModelSpec(
         key="cnn-ae",
         name="CNN Autoencoder",
@@ -92,6 +83,15 @@ MODELS: dict[str, ModelSpec] = {
         submission_type=SubmissionType.quantize,
         contract_version=1,
     ),
+    "mnist-mlp-heavy": ModelSpec(
+        key="mnist-mlp-heavy",
+        name="MNIST MLP (heavy)",
+        min_app_version="1.0.0",
+        model_cls=mnist_mlp.MnistMLPHeavy,
+        trainer_cls=mnist_mlp.MnistMLPTrainer,
+        submission_type=SubmissionType.quantize,
+        contract_version=1,
+    ),
     "covertype-nb": ModelSpec(
         key="covertype-nb",
         name="Covertype Gaussian Naive Bayes",
@@ -100,4 +100,19 @@ MODELS: dict[str, ModelSpec] = {
         trainer_cls=covertype_nb.CovertypeNBTrainer,
         submission_type=SubmissionType.raw,
     ),
+}
+
+
+def _variants(spec: ModelSpec) -> dict[str, ModelSpec]:
+    variants = {spec.key: spec}
+    for kind in SubmissionType:
+        if kind is not spec.submission_type:
+            key = f"{spec.key}-{kind.value}"
+            variants[key] = replace(spec, key=key, name=f"{spec.name} ({kind.value})",
+                                    submission_type=kind, artifacts_key=spec.artifact_key)
+    return variants
+
+
+MODELS: dict[str, ModelSpec] = {
+    key: variant for spec in BASE_MODELS.values() for key, variant in _variants(spec).items()
 }
