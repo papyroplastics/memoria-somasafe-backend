@@ -14,11 +14,13 @@ x-worker-template: &worker
   build:
     context: .
     dockerfile: benchmark/worker.Containerfile
+    additional_contexts:
+      calibration: ./shared/gen/calibration
   env_file: benchmark/prod.env
   environment:
     RESULT_BACKEND_URL: NONE
   volumes:
-    - ./shared/gen:/app/shared/gen:ro
+    - ./shared/gen/server-private-key.pem:/app/shared/gen/server-private-key.pem:ro
     - worker_metrics:/var/lib/worker-metrics
   depends_on: [postgres, redis, broker]
 

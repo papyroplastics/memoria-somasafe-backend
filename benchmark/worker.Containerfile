@@ -13,4 +13,5 @@ WORKDIR /app
 COPY common common
 COPY ml ml
 COPY worker worker
+COPY --from=calibration . shared/gen/calibration
 CMD ["celery", "--app", "worker.celery_app", "worker", "--loglevel=info"]
