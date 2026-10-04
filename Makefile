@@ -42,15 +42,15 @@ worker-test:
 worker-monitor:
 	uv run -m celery --app worker.celery_app flower
 
-prod_compose := podman compose -f compose.yaml -f compose.prod.yaml --env-file benchmark/prod.env --profile broker
+prod_compose := PODMAN_COMPOSE_PROVIDER=podman-compose podman compose -f compose.yaml -f compose.prod.yaml --env-file benchmark/prod.env --profile broker
 prod_x1_compose := API_UPSTREAMS="api-1:8000" $(prod_compose)
 prod_x2_compose := API_UPSTREAMS="api-1:8000 api-2:8000" $(prod_compose) --profile x2
 
 prod-build:
 	$(prod_compose) build
 prod-run:
-	$(prod_compose) up
-prod-x2-run:
+	$(prod_x1_compose) up
+prod-run-x2:
 	$(prod_x2_compose) up
 prod-clean:
 	$(prod_x2_compose) down -v

@@ -18,6 +18,8 @@ scrape_configs:
       - targets: [caddy:9180]
 
   - job_name: celery
+    scrape_interval: 5s
+    scrape_timeout: 4s
     static_configs:
       - targets: [celery-exporter:9808]
 
