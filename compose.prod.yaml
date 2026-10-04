@@ -89,8 +89,6 @@ services:
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.55.1
     privileged: true
-    devices:
-      - /dev/kmsg
     command:
       - --housekeeping_interval=2s
       - --allow_dynamic_housekeeping=false
@@ -99,9 +97,10 @@ services:
     volumes:
       - /:/rootfs:ro
       - /sys:/sys:ro
+      - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /dev/disk:/dev/disk:ro
-      - /var/lib/containers:/var/lib/containers:ro
-      - /run/podman/podman.sock:/var/run/podman/podman.sock
+      - ${HOME}/.local/share/containers:/var/lib/containers:ro
+      - ${XDG_RUNTIME_DIR}/podman/podman.sock:/var/run/podman/podman.sock
     ports:
       - ${BIND_ADDR:-127.0.0.1}:8080:8080
 
