@@ -5,8 +5,7 @@ x-api-template: &api
     dockerfile: benchmark/api.Containerfile
   env_file: benchmark/prod.env
   environment:
-    WEB_CONCURRENCY: ${WEB_CONCURRENCY:-2}
-    RESULT_BACKEND_URL: NONE
+    WEB_CONCURRENCY: 2
   depends_on: [postgres, redis, broker]
 
 x-worker-template: &worker
@@ -18,7 +17,7 @@ x-worker-template: &worker
       calibration: ./shared/gen/calibration
   env_file: benchmark/prod.env
   environment:
-    RESULT_BACKEND_URL: NONE
+    WORKER_METRICS_DIR: /var/lib/worker-metrics
   volumes:
     - ./shared/gen/server-private-key.pem:/app/shared/gen/server-private-key.pem:ro
     - worker_metrics:/var/lib/worker-metrics
@@ -137,6 +136,7 @@ services:
       CE_BROKER_URL: redis://${BROKER_HOST:-broker}:${BROKER_PORT:-6379}/1
     ports:
       - ${BIND_ADDR:-127.0.0.1}:9808:9808
+    command: --retry-interval=5
     depends_on: [broker]
 
 volumes:
