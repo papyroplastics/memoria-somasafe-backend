@@ -15,6 +15,7 @@ WORKER_DIR = "worker_metrics"
 REQUEST_LOGS = "requests_*.csv"
 SECURE_ROUNDS = "secure_rounds.csv"
 SCHEDULE_LAG = "schedule_lag"
+SECURE_POLL = "secure/round"
 
 STEP_SECONDS = 2
 MAX_POINTS = 10_000
@@ -162,9 +163,10 @@ def plot_client(requests: pd.DataFrame, start: float, duration: float, path: Pat
     plot_lines(latency, pd.DataFrame({f"p{q}": grouped.quantile(q / 100) for q in (50, 95, 99)}))
     latency.set_ylabel("ms")
 
-    throughput.set_title("completed requests by status")
+    throughput.set_title("completed requests by outcome")
     status = real["status"]
-    classes = np.select([(status >= 200) & (status < 300), status == 429], ["2xx", "429"], "error")
+    polling = (real["name"] == SECURE_POLL) & (status == 409)
+    classes = np.select([((status >= 200) & (status < 300)) | polling, status == 429], ["ok", "429"], "error")
     rates = real.assign(cls=classes).groupby(["bin", "cls"]).size().unstack("cls", fill_value=0) / BIN_SECONDS
     plot_lines(throughput, rates)
     throughput.set_ylabel("req/s")

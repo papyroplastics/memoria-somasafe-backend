@@ -31,6 +31,9 @@ ml = [
 cuda = ["somasafe-backend[ml]", "tensorflow[and-cuda]"]
 
 [dependency-groups]
+bench = [
+    "locust>=2.46.7",
+]
 dev = [
   "ipython",
   "types-tensorflow",

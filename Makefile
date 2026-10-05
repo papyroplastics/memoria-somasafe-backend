@@ -50,7 +50,7 @@ prod-build:
 	$(prod_compose) build
 prod-run:
 	$(prod_x1_compose) up
-prod-run-x2:
+prod-x2-run:
 	$(prod_x2_compose) up
 prod-clean:
 	$(prod_x2_compose) down -v
