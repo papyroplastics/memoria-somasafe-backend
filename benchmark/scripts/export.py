@@ -65,6 +65,9 @@ plt.rcParams.update({
 })
 
 
+stage_marks: list[float] = []
+
+
 def utc(value: str) -> pd.Timestamp:
     stamp = pd.Timestamp(value)
     return stamp.tz_localize("UTC") if stamp.tzinfo is None else stamp.tz_convert("UTC")
@@ -116,6 +119,11 @@ def wide(frame: pd.DataFrame, start: float, labels: list[str] | None = None) -> 
     return table
 
 
+def mark_stages(ax) -> None:
+    for minute in stage_marks:
+        ax.axvline(minute, color="#c3c2b7", linewidth=0.8, linestyle="--", zorder=0)
+
+
 def no_data(ax) -> None:
     ax.text(0.5, 0.5, "no data", transform=ax.transAxes, ha="center", va="center", color=MUTED)
 
@@ -141,6 +149,8 @@ def time_axes(rows: int, title: str, duration: float, height: float = 2.2):
     fig, axes = plt.subplots(rows, 1, figsize=(10, height * rows), sharex=True, layout="constrained", squeeze=False)
     fig.suptitle(title, x=0.01, ha="left", fontsize=11)
     axes = axes[:, 0]
+    for ax in axes:
+        mark_stages(ax)
     axes[-1].set_xlim(0, duration)
     axes[-1].set_xlabel("minutes since start")
     return fig, axes
@@ -309,6 +319,7 @@ def plot_overview(prom: dict[str, pd.DataFrame], start: float, duration: float, 
     fig, axes = plt.subplots(rows, columns, figsize=(16, 2.3 * rows), sharex=True, layout="constrained")
     for ax, (name, frame) in zip(axes.flat, prom.items()):
         ax.set_title(name)
+        mark_stages(ax)
         plot_lines(ax, wide(frame, start))
         ax.set_xlim(0, duration)
     for ax in axes.flat[len(prom):]:
@@ -318,29 +329,55 @@ def plot_overview(prom: dict[str, pd.DataFrame], start: float, duration: float, 
     save(fig, path)
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="Export a benchmark run's metrics and plot them")
-    parser.add_argument("run_id")
-    parser.add_argument("--prometheus", default="http://localhost:9090", help="Prometheus base URL")
-    args = parser.parse_args()
+def window(manifest: dict) -> tuple[pd.Timestamp, pd.Timestamp]:
+    return utc(manifest["start"]), utc(manifest["end"])
 
-    run_dir = RESULTS_DIR / args.run_id
-    manifest = json.loads((run_dir / "manifest.json").read_text())
-    start, end = utc(manifest["start"]), utc(manifest["end"])
-    duration = (end - start).total_seconds() / 60
 
-    prom = {}
+def dump(run_dir: Path, prometheus: str) -> None:
+    start, end = window(json.loads((run_dir / "manifest.json").read_text()))
     for name, query in QUERIES.items():
-        frame = query_range(args.prometheus.rstrip("/"), query, start.timestamp(), end.timestamp())
+        frame = query_range(prometheus.rstrip("/"), query, start.timestamp(), end.timestamp())
         frame.assign(timestamp=pd.to_datetime(frame["timestamp"], unit="s", utc=True)).to_csv(
             run_dir / f"prometheus_{name}.csv", index=False)
         series = len(frame.drop(columns=["timestamp", "value"]).drop_duplicates()) if not frame.empty else 0
         print(f"{name}: {series} series, {len(frame)} samples")
-        prom[name] = frame
-
-    workers = cut_worker_metrics(run_dir, start, end)
-    for task, frame in workers.items():
+    for task, frame in cut_worker_metrics(run_dir, start, end).items():
         print(f"worker_{task}: {len(frame)} rows")
+
+
+def load_prometheus(run_dir: Path) -> dict[str, pd.DataFrame]:
+    prom = {}
+    for name in QUERIES:
+        frame = pd.read_csv(run_dir / f"prometheus_{name}.csv")
+        stamps = pd.to_datetime(frame["timestamp"], utc=True, format="ISO8601")
+        prom[name] = frame.assign(timestamp=(stamps - pd.Timestamp(0, tz="UTC")).dt.total_seconds())
+    return prom
+
+
+def load_worker_metrics(run_dir: Path) -> dict[str, pd.DataFrame]:
+    return {path.stem.removeprefix("worker_"): pd.read_csv(path) for path in sorted(run_dir.glob("worker_*.csv"))}
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Export a benchmark run's metrics and plot them")
+    parser.add_argument("run_id")
+    parser.add_argument("--prometheus", default="http://localhost:9090", help="Prometheus base URL")
+    parser.add_argument("--requery", action="store_true",
+                        help="query Prometheus again even if the run already holds its series")
+    args = parser.parse_args()
+
+    run_dir = RESULTS_DIR / args.run_id
+    manifest = json.loads((run_dir / "manifest.json").read_text())
+    start, end = window(manifest)
+    duration = (end - start).total_seconds() / 60
+
+    if args.requery or not all((run_dir / f"prometheus_{name}.csv").exists() for name in QUERIES):
+        dump(run_dir, args.prometheus)
+    prom = load_prometheus(run_dir)
+    workers = load_worker_metrics(run_dir)
+    stage_marks[:] = [(utc(stage["start"]) - start).total_seconds() / 60 for stage in manifest.get("stages", [])[1:]]
+    if "load_end" in manifest:
+        stage_marks.append((utc(manifest["load_end"]) - start).total_seconds() / 60)
 
     figures = run_dir / "figures"
     figures.mkdir(exist_ok=True)

@@ -4,8 +4,6 @@ x-api-template: &api
     context: .
     dockerfile: benchmark/api.Containerfile
   env_file: benchmark/prod.env
-  environment:
-    WEB_CONCURRENCY: 2
   depends_on: [postgres, redis, broker]
 
 x-worker-template: &worker
@@ -24,6 +22,12 @@ x-worker-template: &worker
   depends_on: [postgres, redis, broker]
 
 services:
+  postgres:
+    command: [postgres, -c, config_file=/etc/postgresql/postgresql.conf]
+    shm_size: 1g
+    volumes:
+      - ./benchmark/postgres.conf:/etc/postgresql/postgresql.conf:ro
+
   api-1:
     <<: *api
     hostname: api-1

@@ -30,6 +30,8 @@ worker/    Celery task layer (models built on first use): quantization, dense an
 scripts/   CLI entry points: `system/` (dataset, train, seed, export), `integration/`
            (headless federated/secure runs against the real API), `figures/` (report
            result and figure generators).
+benchmark/ Production-like container stack (gateways behind Caddy, workers, Prometheus)
+           and the load-test tooling around it. See its README.
 ```
 
 Evaluation output goes to `results/<model>/`; served `.tflite` artifacts live in
@@ -91,9 +93,10 @@ the test-user setup used by the headless federated scripts.
 
 Python `==3.13.*`, TensorFlow `2.21.*`, managed with `uv`. GPU is optional (`uv sync
 --extra cuda`). Copy `example.env` to `.env` before running — there are no hardcoded
-defaults for DB/Redis credentials. Only Postgres and Redis run in containers
-(`compose.yaml`, podman); the gateway and worker run on the host with `uv` (`make
-api-run`, `make worker-run`).
+defaults for DB/Redis credentials. For development only Postgres and Redis run in
+containers (`compose.yaml`, podman); the gateway and worker run on the host with `uv`
+(`make api-run`, `make worker-run`). The fully containerized stack is in
+[`benchmark/`](benchmark/README.md).
 
 ## Not yet implemented
 

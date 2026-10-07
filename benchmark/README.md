@@ -2,7 +2,7 @@
 
 A production-like deployment of the backend plus the tooling to load test it. The same
 images and compose files run the local rehearsal and the cloud benchmark (see
-`plans/2-local-stress.md` and `plans/3-cloud-benchmark.md`).
+`plans/cloud-benchmark.md`).
 
 ## Stack
 
@@ -13,6 +13,7 @@ images and compose files run the local rehearsal and the cloud benchmark (see
 - `worker-1` (light + heavy queues, runs beat) and `worker-2` (heavy only), from
   `worker.Containerfile`, with the calibration artifacts baked in. Each writes per-task
   stage timings to the `worker_metrics` volume as `<hostname>-<pid>/<task>.csv`.
+- Postgres configured by `postgres.conf`, sized for the cloud's dedicated data host.
 - Prometheus (port 9090) scraping the gateways, Caddy, celery-exporter, Postgres/Redis/broker
   exporters, node-exporter and cAdvisor.
 
@@ -22,28 +23,37 @@ The second gateway and worker sit behind the `x2` profile:
 make prod-build
 make prod-run        # 1x1
 make prod-x2-run     # 2x2
-make db-seed         # once, against the running stack
+make db-seed         # once, against the running stack (add --test-users N for more users)
 make prod-clean      # tear down, volumes included
 ```
 
 `prod.env` configures every container. Besides credentials, it compresses the round
 cadence so a run of a few minutes sees several rounds: aggregation every 60 s, secure
-rounds sealing after 15 s and failing 20 s after sealing. Containers only pick up changes
-to it when they are recreated.
+rounds sealing after 15 s and failing 20 s after sealing. It also sets
+`WORKER_CONCURRENCY=4` (the cloud value, too much for a local 2x2 on a small machine;
+override it from the shell) and a long access-token TTL so no user re-logs in mid-run.
+Containers only pick up changes to it when they are recreated. Start every service of the
+topology before seeding: bringing up the `x2` services on a running stack recreates the
+data services, and celery-exporter misses events for a while after.
 
 ## Running
 
 ```bash
-uv run --group bench -m benchmark.scripts.run 1x1 --submission secure --users 6 --duration 150
-uv run -m benchmark.scripts.export <run_id>
+uv run --group bench -m benchmark.scripts.run 1x1 --split small --submission secure --stages 60:3,60:6,60:3
+uv run -m benchmark.scripts.export <run_id>    # plots
+uv run -m benchmark.scripts.check <run_id>     # re-run the checks, before the next reset
+uv run -m benchmark.scripts.snapshot           # TSDB snapshot, end of session
 ```
 
 `run.py` takes the topology the stack was brought up with, picks the models for
-`--split`/`--submission`, runs `reset.py`, writes the manifest and drives headless
-Locust. Afterwards it saves the
-`SecureRound` rows and copies the `worker_metrics` volume. Everything for a run ends up in
-`results/benchmark/<run_id>/`. `export.py` then pulls the Prometheus series for the
-manifest window and plots them.
+`--split`/`--submission` (or `--models`), runs `reset.py`, writes the manifest and drives
+headless Locust through `--stages`. Afterwards it waits for the stack to settle (at least
+one aggregation interval, then empty queues and no unfinished quantize job or secure
+round), saves the `SecureRound` rows, copies the `worker_metrics` volume, dumps the
+Prometheus series for the manifest window to CSV and runs `check.py`, which writes the
+pass/fail results to `checks.json`. Everything for a run ends up in
+`results/benchmark/<run_id>/`, and `export.py` plots from that directory alone, querying
+Prometheus only if the series are missing or with `--requery`.
 
 ## Details worth knowing
 
@@ -56,13 +66,20 @@ manifest window and plots them.
   reset. The export cuts its rows to the manifest window instead.
 - **Users.** Each Locust user is a seeded `test_N` account that owns a device. With
   several Locust processes, user numbers are interleaved by process index
-  (`--user-stride`), so the run needs `test_1` up to roughly `users + processes`. Seed more
+  (`--user-stride`), so the run needs `test_1` up to roughly the highest stage count
+  plus `processes`. Seed more
   with `seed_db --test-users N`. Users past `test_15` share a password but still pay a
   full argon2 verify, so keep `--spawn-rate` low.
-- **Iterations.** Each user logs in once. It then repeats one iteration per aggregation
-  interval (`constant_pacing`): for every model it downloads the weights and both
-  artifacts, then submits through the model's submission type, polling quantize results
-until they are ready. Rate limits keep their
+- **Stages.** `--stages` is a list of `<seconds>:<active users>`. Every user spawns and
+  logs in during the first stage, which is therefore the login burst and must last at
+  least `users / spawn-rate`; afterwards a user is active only while its `test_N` number
+  is within the current stage's count, and parks otherwise. The Locust processes never
+  talk to each other: they all receive the same `--schedule-start`, so they switch stages
+  at the same moment. The export marks the stage boundaries on every plot.
+- **Iterations.** An active user repeats one iteration per aggregation interval, starting
+  at a fixed per-user offset so iterations spread over the interval: for every model it
+  downloads the weights and both artifacts, then submits through the model's submission
+  type, polling quantize results until they are ready. Rate limits keep their
   real values, and each finished round clears them. A user whose iteration starts
   before the previous round has finished therefore gets 429s on that model, which is
   expected around round boundaries.

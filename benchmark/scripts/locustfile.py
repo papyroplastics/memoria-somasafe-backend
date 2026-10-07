@@ -1,6 +1,7 @@
 import base64
 import csv
 import logging
+import math
 import os
 import random
 import time
@@ -9,7 +10,7 @@ from functools import cache
 from pathlib import Path
 from urllib.parse import urlencode
 
-from locust import FastHttpUser, constant_pacing, events, task
+from locust import FastHttpUser, events, task
 from locust.runners import MasterRunner
 
 SCHEDULE_LAG = "schedule_lag"
@@ -22,6 +23,8 @@ POLL_WINDOW = 0.8
 ARTIFACTS = ("trainable", "quantized")
 FORM = {"Content-Type": "application/x-www-form-urlencoded"}
 OCTET = {"Content-Type": "application/octet-stream"}
+PARK_SECONDS = 1.0
+GOLDEN = 0.6180339887
 
 log = logging.getLogger(__name__)
 served: list[dict] | None = None
@@ -40,6 +43,10 @@ def add_arguments(parser) -> None:
                        help="Locust worker processes across all hosts, so test_N users never collide")
     group.add_argument("--round-failure", type=float, default=0.1,
                        help="probability of a secure round failing, its lowest user id never submits")
+    group.add_argument("--stages", default="",
+                       help="comma-separated <seconds>:<active users> stages, every user active when empty")
+    group.add_argument("--schedule-start", type=float, default=0.0,
+                       help="unix time the stages count from, shared by every Locust process")
 
 
 class RequestLog:
@@ -92,6 +99,28 @@ events.quitting.add_listener(RequestLog.close)
 
 
 @cache
+def stage_ends(spec: str) -> list[tuple[float, int]]:
+    ends, elapsed = [], 0.0
+    for stage in filter(None, spec.split(",")):
+        seconds, active = stage.split(":")
+        elapsed += float(seconds)
+        ends.append((elapsed, int(active)))
+    return ends
+
+
+def active_users(options, now: float) -> float:
+    if not options.stages:
+        return math.inf
+    elapsed = now - options.schedule_start
+    if elapsed < 0:
+        return 0
+    for end, active in stage_ends(options.stages):
+        if elapsed < end:
+            return active
+    return 0
+
+
+@cache
 def dense_body(weight_count: int) -> bytes:
     return (array("f", [DELTA]) * weight_count).tobytes()
 
@@ -105,17 +134,20 @@ class Client(FastHttpUser):
     spawned = 0
 
     def wait_time(self) -> float:
-        return constant_pacing(self.options.interval)(self)
+        if self.next_start is None:
+            return PARK_SECONDS
+        return max(0.0, self.next_start - time.time())
 
     def on_start(self) -> None:
         self.options = self.environment.parsed_options
         index = Client.spawned
         Client.spawned += 1
-        number = 1 + max(self.environment.runner.worker_index, 0) + index * self.options.user_stride
-        self.username = f"test_{number}"
-        self.password = self.username if number <= TEST_SUBJECTS else SHARED_PASSWORD
+        self.number = 1 + max(self.environment.runner.worker_index, 0) + index * self.options.user_stride
+        self.username = f"test_{self.number}"
+        self.password = self.username if self.number <= TEST_SUBJECTS else SHARED_PASSWORD
+        self.offset = (self.number * GOLDEN) % 1 * self.options.interval
         self.headers: dict[str, str] | None = None
-        self.last_start: float | None = None
+        self.next_start: float | None = None
         self.login()
 
     def login(self) -> bool:
@@ -150,8 +182,16 @@ class Client(FastHttpUser):
     @task
     def iteration(self) -> None:
         started = time.time()
-        lag = 0.0 if self.last_start is None else max(0.0, started - self.last_start - self.options.interval)
-        self.last_start = started
+        if self.number > active_users(self.options, started):
+            self.next_start = None
+            return
+        if self.next_start is None:
+            self.next_start = started + self.offset
+            return
+        if started < self.next_start:
+            return
+        lag = started - self.next_start
+        self.next_start = started + self.options.interval
         events.request.fire(request_type="LAG", name=SCHEDULE_LAG, response_time=lag * 1000,
                             response_length=0, response=None, context={}, exception=None,
                             start_time=started, url="")
