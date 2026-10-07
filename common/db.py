@@ -191,11 +191,13 @@ class ClientDeltaSubmission(IntPKModel, table=True):
     same-base deltas mix; ``valid`` is a revocation switch."""
 
     user_id: int = Field(foreign_key="user.id", index=True)
-    base_weights_id: int = Field(foreign_key="globalweights.id", index=True)
+    base_weights_id: int = Field(foreign_key="globalweights.id")
     deltas: bytes              # packed float32 delta (np.float32 .tobytes())
     weight_count: int
     valid: bool = True
     created_at: datetime = Field(default_factory=utcnow)
+
+    __table_args__ = (UniqueConstraint("base_weights_id", "user_id"),)
 
 
 class SecureRound(IntPKModel, ClaimableModel, table=True):

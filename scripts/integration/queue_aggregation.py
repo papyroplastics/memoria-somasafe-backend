@@ -20,8 +20,8 @@ def main() -> None:
 
     if args.model is not None:
         result = wait_for_aggregation(app, args.model)
-        print(f"{args.model}: {result['outcome']} (cohort {result['cohort']} "
-              f"of {result['users']} users)")
+        print(f"{args.model}: {result['outcome']} (cohort {result['cohort']}, "
+              f"cap {result['cap']})")
     else:
         keys = app.send_task(FED_DISPATCH_TASK).get(timeout=60.0)
         print(f"dispatched: {', '.join(keys) or 'nothing'}")

@@ -3,7 +3,7 @@ from enum import StrEnum, auto
 
 import numpy as np
 from celery.utils.log import get_task_logger
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
@@ -76,8 +76,6 @@ class AggregationRecord:
     model_key: str
     outcome: AggregationOutcome | None = None
     base_weights_id: int | None = None
-    users: int | None = None
-    on_base: int | None = None
     cap: int | None = None
     cohort: int | None = None
 
@@ -107,25 +105,14 @@ def _read_round(key: str, timer: Timer[AggregationStage],
             record.base_weights_id = reference.id
 
             cap = cohort_cap(latest.weight_count, FED_AGG_MEMORY_BYTES)
-            newest_per_user = (
-                select(ClientDeltaSubmission.id, ClientDeltaSubmission.created_at)
-                .where(ClientDeltaSubmission.base_weights_id == reference.id,
-                       ClientDeltaSubmission.valid == True)  # noqa: E712
-                .distinct(ClientDeltaSubmission.user_id)
-                .order_by(ClientDeltaSubmission.user_id,
-                          ClientDeltaSubmission.created_at.desc())  # type: ignore[attr-defined]
-                .subquery())
             ids = list(session.execute(
-                select(newest_per_user.c.id)
-                .order_by(newest_per_user.c.created_at.desc())
+                select(ClientDeltaSubmission.id)  # type: ignore
+                .where(ClientDeltaSubmission.base_weights_id == reference.id,
+                       ClientDeltaSubmission.valid == True)
+                .order_by(ClientDeltaSubmission.created_at.desc())  # type: ignore
                 .limit(cap)).scalars())
             record.cap = cap
             record.cohort = len(ids)
-            record.users = session.execute(
-                select(func.count()).select_from(newest_per_user)).scalar_one()
-            record.on_base = session.execute(
-                select(func.count()).select_from(ClientDeltaSubmission)
-                .where(ClientDeltaSubmission.base_weights_id == reference.id)).scalar_one()
 
         if len(ids) < FED_MIN_SUBMISSIONS:
             record.outcome = AggregationOutcome.skipped_min_submissions
@@ -134,7 +121,7 @@ def _read_round(key: str, timer: Timer[AggregationStage],
         with timer(AggregationStage.blob_fetch):
             deltas = np.empty((len(ids), latest.weight_count), dtype=np.float32)
             rows = session.execute(
-                select(ClientDeltaSubmission.deltas)
+                select(ClientDeltaSubmission.deltas)  # type: ignore
                 .where(ClientDeltaSubmission.id.in_(ids))  # type: ignore[attr-defined]
                 .execution_options(yield_per=64)).scalars()
             filled = 0

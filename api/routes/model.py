@@ -6,6 +6,7 @@ import numpy as np
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import Session, select
 
 from worker.celery_app import app as celery_app
@@ -117,18 +118,23 @@ def check_submission(session: Session, key: str, weights_id: int,
 
 
 def store_submission(session: Session, base: GlobalWeights, body: bytes,
-                     user_id: int) -> ClientDeltaSubmission:
-    submission = ClientDeltaSubmission(
+                     user_id: int) -> int:
+    stmt = pg_insert(ClientDeltaSubmission).values(
         user_id=user_id,
         base_weights_id=base.id,
         deltas=bytes(body),
         weight_count=session.get(ModelVersion, base.version_id).weight_count,
         valid=True,
+        created_at=utcnow(),
     )
-    session.add(submission)
+    submission_id = session.execute(
+        stmt.on_conflict_do_update(
+            index_elements=["base_weights_id", "user_id"],
+            set_={"deltas": stmt.excluded.deltas, "valid": True,
+                  "created_at": stmt.excluded.created_at})
+        .returning(ClientDeltaSubmission.id)).scalar_one()  # type: ignore[arg-type]
     session.commit()
-    session.refresh(submission)
-    return submission
+    return submission_id
 
 
 def _version_info(session: Session, version: ModelVersion) -> ModelVersionInfo:
@@ -189,8 +195,8 @@ def quantize_model(key: str, weights_id: int, body: bytes = Body(...),
     base = check_submission(session, key, weights_id, body)
 
     try:
-        submission = store_submission(session, base, body, user_id)
-        job = QuantizationJob(submission_id=submission.id, model_key=key)
+        submission_id = store_submission(session, base, body, user_id)
+        job = QuantizationJob(submission_id=submission_id, model_key=key)
         session.add(job)
         session.commit()
         session.refresh(job)
@@ -213,8 +219,7 @@ def submit_weights(key: str, weights_id: int, body: bytes = Body(...),
     base = check_submission(session, key, weights_id, body)
 
     try:
-        submission = store_submission(session, base, body, user_id)
-        return {"submission_id": submission.id}
+        return {"submission_id": store_submission(session, base, body, user_id)}
     finally:
         add_usage(RateLimit.weight_submit, user_id, key, SUBMIT_DAILY_WINDOW_SECONDS)
 
