@@ -109,6 +109,7 @@ SECURE_SWEEP_INTERVAL_SECONDS = int(os.environ.get("SECURE_SWEEP_INTERVAL_SECOND
 # api.lib.session and api.routes.auth) ---
 ACCESS_TOKEN_TTL_SECONDS = int(os.environ.get("ACCESS_TOKEN_TTL_SECONDS", MINUTE * 30))
 REFRESH_TOKEN_TTL_SECONDS = int(os.environ.get("REFRESH_TOKEN_TTL_SECONDS", DAY * 30))
+PASSWORD_MAX_LENGTH = int(os.environ.get("PASSWORD_MAX_LENGTH", 128))
 
 # Default account created by scripts.seed (no public registration).
 SEED_USER = _require("SEED_USER")

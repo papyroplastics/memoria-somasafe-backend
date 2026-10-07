@@ -17,7 +17,7 @@ from api.lib.session import (
     lookup_access,
     token_hash,
 )
-from common.config import ACCESS_TOKEN_TTL_SECONDS, REFRESH_TOKEN_TTL_SECONDS
+from common.config import ACCESS_TOKEN_TTL_SECONDS, PASSWORD_MAX_LENGTH, REFRESH_TOKEN_TTL_SECONDS
 from common.db import AuthSession, User, get_session, utcnow
 
 router = APIRouter(prefix="/auth")
@@ -35,6 +35,8 @@ class RefreshRequest(BaseModel):
 
 
 def hash_password(password: str) -> str:
+    if len(password) > PASSWORD_MAX_LENGTH:
+        raise ValueError(f"Password exceeds {PASSWORD_MAX_LENGTH} characters")
     return password_hash.hash(password)
 
 
@@ -55,11 +57,14 @@ def _new_session(session: Session, user_id: int) -> TokenPair:
 @router.post("/token")
 def login(form_data: OAuth2PasswordRequestForm = Depends(),
           session: Session = Depends(get_session)) -> TokenPair:
+    if len(form_data.password) > PASSWORD_MAX_LENGTH:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
+
     user = session.exec(select(User).where(User.username == form_data.username)).first()
 
     if user is None:
-        # equalize timing to protect agains user enumeration
-        password_hash.verify(form_data.password, "dummypassword") 
+        # equalize timing against user enumeration
+        password_hash.verify(form_data.password, "dummypassword")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
 
     if not password_hash.verify(form_data.password, user.hashed_password):
