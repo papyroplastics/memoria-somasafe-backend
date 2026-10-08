@@ -238,7 +238,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the pass/fail checks against a finished benchmark run")
     parser.add_argument("run_id")
     parser.add_argument("--prometheus", default="http://localhost:9090")
-    parser.add_argument("--env-file", type=Path, default=Path("benchmark/prod.env"))
+    parser.add_argument("--env-file", type=Path, default=Path("prod/prod.env"))
     args = parser.parse_args()
     raise SystemExit(0 if run(RESULTS_DIR / "benchmark" / args.run_id, args.prometheus, args.env_file) else 1)
 

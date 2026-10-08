@@ -24,9 +24,9 @@ db-seed: shared
 db-reseed: shared
 	uv run -m scripts.system.seed_db --assign-device --test-users --reseed
 db-run:
-	podman compose $(if $(BROKER_PORT),--profile broker) up
+	podman compose $(if $(BROKER_PORT),--profile redis-broker) up
 db-clean:
-	podman compose --profile broker down -v
+	podman compose --profile redis-broker down -v
 
 api-run:
 	uv run fastapi dev api --host 0.0.0.0
@@ -42,16 +42,17 @@ worker-test:
 worker-monitor:
 	uv run -m celery --app worker.celery_app flower
 
-prod_compose := PODMAN_COMPOSE_PROVIDER=podman-compose podman compose -f compose.yaml -f compose.prod.yaml --env-file benchmark/prod.env --profile broker
-prod_x1_compose := API_UPSTREAMS="api-1:8000" $(prod_compose)
-prod_x2_compose := API_UPSTREAMS="api-1:8000 api-2:8000" $(prod_compose) --profile x2
+prod_compose := PODMAN_COMPOSE_PROVIDER=podman-compose podman compose -f compose.yaml -f compose.prod.yaml --env-file prod/prod.env
+prod_x1_profiles := edge fastapi-1 celery-1 postgres redis-auth redis-broker
+prod_x2_profiles := $(prod_x1_profiles) fastapi-2 celery-2
+prod_x1_compose := API_UPSTREAMS="fastapi-1:8000" $(prod_compose) $(addprefix --profile ,$(prod_x1_profiles))
+prod_x2_compose := API_UPSTREAMS="fastapi-1:8000 fastapi-2:8000" $(prod_compose) $(addprefix --profile ,$(prod_x2_profiles))
 
 prod-build:
-	$(prod_compose) build
+	$(prod_x1_compose) build
 prod-run:
 	$(prod_x1_compose) up
 prod-x2-run:
 	$(prod_x2_compose) up
 prod-clean:
 	$(prod_x2_compose) down -v
-

@@ -10,22 +10,22 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql
 
-  redis:
+  redis-auth:
     image: docker.io/library/redis:8-alpine
     ports:
       - ${BIND_ADDR:-127.0.0.1}:${REDIS_PORT:-6379}:6379
     volumes:
-      - redis_data:/data
+      - redis_auth_data:/data
 
-  broker:
+  redis-broker:
     image: docker.io/library/redis:8-alpine
-    profiles: [broker]
+    profiles: [redis-broker]
     ports:
       - ${BIND_ADDR:-127.0.0.1}:${BROKER_PORT:-6380}:6379
     volumes:
-      - broker_data:/data
+      - redis_broker_data:/data
 
 volumes:
   postgres_data:
-  redis_data:
-  broker_data:
+  redis_auth_data:
+  redis_broker_data:

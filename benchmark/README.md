@@ -1,48 +1,17 @@
 # Benchmark
 
-A production-like deployment of the backend plus the tooling to load test it. The same
-images and compose files run the local rehearsal and the cloud benchmark (see
-`plans/cloud-benchmark.md`).
-
-## Stack
-
-`compose.prod.yaml` sits on top of `compose.yaml` and adds:
-
-- `api-1`/`api-2` gateways (`api.Containerfile`, no TensorFlow) behind Caddy, which
-  round-robins across `API_UPSTREAMS` on port 8000.
-- `worker-1` (light + heavy queues, runs beat) and `worker-2` (heavy only), from
-  `worker.Containerfile`, with the calibration artifacts baked in. Each writes per-task
-  stage timings to the `worker_metrics` volume as `<hostname>-<pid>/<task>.csv`.
-- Postgres configured by `postgres.conf`, sized for the cloud's dedicated data host.
-- Prometheus (port 9090) scraping the gateways, Caddy, celery-exporter, Postgres/Redis/broker
-  exporters, node-exporter and cAdvisor.
-
-The second gateway and worker sit behind the `x2` profile:
-
-```bash
-make prod-build
-make prod-run        # 1x1
-make prod-x2-run     # 2x2
-make db-seed         # once, against the running stack (add --test-users N for more users)
-make prod-clean      # tear down, volumes included
-```
-
-`prod.env` configures every container. Besides credentials, it compresses the round
-cadence so a run of a few minutes sees several rounds: aggregation every 60 s, secure
-rounds sealing after 15 s and failing 20 s after sealing. It also sets
-`WORKER_CONCURRENCY=4` (the cloud value, too much for a local 2x2 on a small machine;
-override it from the shell) and a long access-token TTL so no user re-logs in mid-run.
-Containers only pick up changes to it when they are recreated. Start every service of the
-topology before seeding: bringing up the `x2` services on a running stack recreates the
-data services, and celery-exporter misses events for a while after.
+Load-test tooling for the production-like deployment in [`../prod/`](../prod/README.md),
+used for the local rehearsal and the cloud benchmark (see `plans/cloud-benchmark.md`). The
+scripts run on the host against a stack brought up with `make prod-run` or
+`make prod-x2-run` and seeded with enough test users.
 
 ## Running
 
 ```bash
-uv run --group bench -m benchmark.scripts.run 1x1 --split small --submission secure --stages 60:3,60:6,60:3
-uv run -m benchmark.scripts.export <run_id>    # plots
-uv run -m benchmark.scripts.check <run_id>     # re-run the checks, before the next reset
-uv run -m benchmark.scripts.snapshot           # TSDB snapshot, end of session
+uv run --group bench -m benchmark.run 1x1 --split small --submission secure --stages 60:3,60:6,60:3
+uv run -m benchmark.export <run_id>          # plots
+uv run -m benchmark.check <run_id>           # re-run the checks, before the next reset
+uv run -m benchmark.snapshot                 # TSDB snapshot, end of session
 ```
 
 `run.py` takes the topology the stack was brought up with, picks the models for

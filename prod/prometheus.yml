@@ -3,9 +3,9 @@ global:
   scrape_timeout: 2s
 
 scrape_configs:
-  - job_name: api
+  - job_name: fastapi
     dns_sd_configs:
-      - names: [api-1, api-2]
+      - names: [fastapi-1, fastapi-2]
         type: A
         port: 8000
         refresh_interval: 5s
@@ -29,10 +29,10 @@ scrape_configs:
 
   - job_name: redis
     static_configs:
-      - targets: [redis-exporter:9121]
+      - targets: [redis-auth-exporter:9121]
         labels:
           instance_role: auth
-      - targets: [broker-exporter:9121]
+      - targets: [redis-broker-exporter:9121]
         labels:
           instance_role: broker
 

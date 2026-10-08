@@ -1,87 +1,137 @@
-x-api-template: &api
+x-fastapi-template: &fastapi
   image: ${REGISTRY:-localhost}/somasafe-api:${TAG:-latest}
   build:
     context: .
-    dockerfile: benchmark/api.Containerfile
-  env_file: benchmark/prod.env
-  depends_on: [postgres, redis, broker]
+    dockerfile: prod/api.Containerfile
+  env_file: prod/prod.env
 
-x-worker-template: &worker
+x-celery-template: &celery
   image: ${REGISTRY:-localhost}/somasafe-worker:${TAG:-latest}
   build:
     context: .
-    dockerfile: benchmark/worker.Containerfile
+    dockerfile: prod/worker.Containerfile
     additional_contexts:
       calibration: ./shared/gen/calibration
-  env_file: benchmark/prod.env
+  env_file: prod/prod.env
   environment:
     WORKER_METRICS_DIR: /var/lib/worker-metrics
   volumes:
     - ./shared/gen/server-private-key.pem:/app/shared/gen/server-private-key.pem:ro
     - worker_metrics:/var/lib/worker-metrics
-  depends_on: [postgres, redis, broker]
+
+x-every-host: &every-host [edge, fastapi-1, fastapi-2, celery-1, celery-2, postgres, redis-auth, redis-broker, client]
 
 services:
   postgres:
-    command: [postgres, -c, config_file=/etc/postgresql/postgresql.conf]
+    profiles: [postgres]
+    command: [postgres, -c, "config_file=${POSTGRES_CONFIG_FILE:-/etc/postgresql/postgresql.conf}"]
     shm_size: 1g
     volumes:
-      - ./benchmark/postgres.conf:/etc/postgresql/postgresql.conf:ro
+      - ./prod/postgres.conf:/etc/postgresql/postgresql.conf:ro
 
-  api-1:
-    <<: *api
-    hostname: api-1
+  redis-auth:
+    profiles: [redis-auth]
+
+  redis-broker:
+    profiles: [redis-broker]
+
+  fastapi-1:
+    <<: *fastapi
+    profiles: [fastapi-1]
+    hostname: fastapi-1
     ports:
       - ${BIND_ADDR:-127.0.0.1}:8001:8000
 
-  api-2:
-    <<: *api
-    hostname: api-2
-    profiles: [x2]
+  fastapi-2:
+    <<: *fastapi
+    profiles: [fastapi-2]
+    hostname: fastapi-2
     ports:
       - ${BIND_ADDR:-127.0.0.1}:8002:8000
 
-  worker-1:
-    <<: *worker
-    hostname: worker-1
+  celery-1:
+    <<: *celery
+    profiles: [celery-1]
+    hostname: celery-1
     command: >-
       celery --app worker.celery_app worker --queues light,heavy --beat -E
       --concurrency ${WORKER_CONCURRENCY:-2} --loglevel=info
 
-  worker-2:
-    <<: *worker
-    hostname: worker-2
-    profiles: [x2]
+  celery-2:
+    <<: *celery
+    profiles: [celery-2]
+    hostname: celery-2
     command: >-
       celery --app worker.celery_app worker --queues heavy -E
       --concurrency ${WORKER_CONCURRENCY:-2} --loglevel=info
 
   caddy:
     image: docker.io/library/caddy:2.11.4-alpine
+    profiles: [edge]
     environment:
-      API_UPSTREAMS: ${API_UPSTREAMS:-api-1:8000}
+      API_UPSTREAMS: ${API_UPSTREAMS:-fastapi-1:8000}
     volumes:
-      - ./benchmark/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./prod/Caddyfile:/etc/caddy/Caddyfile:ro
     ports:
       - ${BIND_ADDR:-127.0.0.1}:8000:80
       - ${BIND_ADDR:-127.0.0.1}:9180:9180
-    depends_on: [api-1]
 
   prometheus:
     image: docker.io/prom/prometheus:v3.15.0
+    profiles: [edge]
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=30d
       - --web.enable-admin-api
     volumes:
-      - ./benchmark/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prod/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus_data:/prometheus
     ports:
       - ${BIND_ADDR:-127.0.0.1}:9090:9090
 
+  celery-exporter:
+    image: docker.io/danihodovic/celery-exporter:0.12.2
+    profiles: [edge]
+    environment:
+      CE_BROKER_URL: redis://${BROKER_HOST:-redis-broker}:${BROKER_PORT:-6379}/1
+    ports:
+      - ${BIND_ADDR:-127.0.0.1}:9808:9808
+    command: --retry-interval=5
+
+  postgres-exporter:
+    image: docker.io/prometheuscommunity/postgres-exporter:v0.20.1
+    profiles: [postgres]
+    environment:
+      DATA_SOURCE_URI: postgres:5432/${POSTGRES_DB}?sslmode=disable
+      DATA_SOURCE_USER: ${POSTGRES_USER}
+      DATA_SOURCE_PASS: ${POSTGRES_PASSWORD}
+    ports:
+      - ${BIND_ADDR:-127.0.0.1}:9187:9187
+    depends_on: [postgres]
+
+  redis-auth-exporter:
+    image: docker.io/oliver006/redis_exporter:v1.92.0-alpine
+    profiles: [redis-auth]
+    environment:
+      REDIS_ADDR: redis://redis-auth:6379
+    ports:
+      - ${BIND_ADDR:-127.0.0.1}:9121:9121
+    depends_on: [redis-auth]
+
+  redis-broker-exporter:
+    image: docker.io/oliver006/redis_exporter:v1.92.0-alpine
+    profiles: [redis-broker]
+    environment:
+      REDIS_ADDR: redis://redis-broker:6379
+      REDIS_EXPORTER_CHECK_SINGLE_KEYS: db1=light,db1=heavy
+    ports:
+      - ${BIND_ADDR:-127.0.0.1}:9122:9121
+    depends_on: [redis-broker]
+
   node-exporter:
     image: docker.io/prom/node-exporter:v1.12.1
+    profiles: *every-host
     command: --path.rootfs=/host
     pid: host
     volumes:
@@ -91,6 +141,7 @@ services:
 
   cadvisor:
     image: gcr.io/cadvisor/cadvisor:v0.55.1
+    profiles: *every-host
     privileged: true
     command:
       - --housekeeping_interval=2s
@@ -106,42 +157,6 @@ services:
       - ${XDG_RUNTIME_DIR}/podman/podman.sock:/var/run/podman/podman.sock
     ports:
       - ${BIND_ADDR:-127.0.0.1}:8080:8080
-
-  postgres-exporter:
-    image: docker.io/prometheuscommunity/postgres-exporter:v0.20.1
-    environment:
-      DATA_SOURCE_URI: ${POSTGRES_HOST:-postgres}:${POSTGRES_PORT:-5432}/${POSTGRES_DB}?sslmode=disable
-      DATA_SOURCE_USER: ${POSTGRES_USER}
-      DATA_SOURCE_PASS: ${POSTGRES_PASSWORD}
-    ports:
-      - ${BIND_ADDR:-127.0.0.1}:9187:9187
-    depends_on: [postgres]
-
-  redis-exporter:
-    image: docker.io/oliver006/redis_exporter:v1.92.0-alpine
-    environment:
-      REDIS_ADDR: redis://${REDIS_HOST:-redis}:${REDIS_PORT:-6379}
-    ports:
-      - ${BIND_ADDR:-127.0.0.1}:9121:9121
-    depends_on: [redis]
-
-  broker-exporter:
-    image: docker.io/oliver006/redis_exporter:v1.92.0-alpine
-    environment:
-      REDIS_ADDR: redis://${BROKER_HOST:-broker}:${BROKER_PORT:-6379}
-      REDIS_EXPORTER_CHECK_SINGLE_KEYS: db1=light,db1=heavy
-    ports:
-      - ${BIND_ADDR:-127.0.0.1}:9122:9121
-    depends_on: [broker]
-
-  celery-exporter:
-    image: docker.io/danihodovic/celery-exporter:0.12.2
-    environment:
-      CE_BROKER_URL: redis://${BROKER_HOST:-broker}:${BROKER_PORT:-6379}/1
-    ports:
-      - ${BIND_ADDR:-127.0.0.1}:9808:9808
-    command: --retry-interval=5
-    depends_on: [broker]
 
 volumes:
   prometheus_data:

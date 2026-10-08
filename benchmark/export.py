@@ -49,7 +49,7 @@ AGGREGATION_TASKS = {"federated_aggregation": "cohort", "secure_aggregation": "m
 PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 MUTED = "#898781"
 SURFACE = "#fcfcfb"
-SERVICES = ("caddy", "api-1", "api-2", "worker-1", "worker-2", "postgres", "redis", "broker")
+SERVICES = ("caddy", "fastapi-1", "fastapi-2", "celery-1", "celery-2", "postgres", "redis-auth", "redis-broker")
 SERVICE_COLORS = dict(zip(SERVICES, PALETTE))
 STATUS_COLORS = {"aggregated": "#0ca30c", "failed": "#d03b3b", "in flight": MUTED}
 

@@ -14,7 +14,7 @@ from dotenv import dotenv_values
 from sqlalchemy import func, select
 from sqlmodel import Session
 
-from benchmark.scripts import check, export, reset
+from benchmark import check, export, reset
 from common.celery_tasks import HEAVY_QUEUE, LIGHT_QUEUE
 from common.config import BROKER_URL, RESULTS_DIR
 from common.db import (
@@ -163,7 +163,7 @@ def main() -> None:
     parser.add_argument("--settle-timeout", type=float, help="seconds, defaults to three aggregation intervals")
     parser.add_argument("--host", default="http://localhost:8000")
     parser.add_argument("--prometheus", default="http://localhost:9090")
-    parser.add_argument("--env-file", type=Path, default=Path("benchmark/prod.env"))
+    parser.add_argument("--env-file", type=Path, default=Path("prod/prod.env"))
     parser.add_argument("--metrics-volume", default="backend_worker_metrics",
                         help="podman volume holding the worker metrics, empty to skip copying it")
     args = parser.parse_args()
@@ -236,7 +236,7 @@ def main() -> None:
         copy_worker_metrics(args.metrics_volume, run_dir / "worker_metrics")
     export.dump(run_dir, args.prometheus)
     check.run(run_dir, args.prometheus, args.env_file)
-    print(f"run artifacts in {run_dir}, plot with `uv run -m benchmark.scripts.export {run_id}`")
+    print(f"run artifacts in {run_dir}, plot with `uv run -m benchmark.export {run_id}`")
 
 
 if __name__ == "__main__":
