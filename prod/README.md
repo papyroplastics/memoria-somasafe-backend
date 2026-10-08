@@ -6,15 +6,16 @@ and `plans/cloud-benchmark.md`).
 
 ## Stack
 
-`compose.prod.yaml` sits on top of `compose.yaml` (which provides `postgres`, `redis-auth`
-and `redis-broker`) and adds:
+`compose.prod.yaml` sits on top of `compose.yaml` (which provides `postgres` and
+`redis-auth`) and adds:
 
+- A separate `redis-broker` instance for the Celery broker.
 - `fastapi-1`/`fastapi-2` gateways (`api.Containerfile`, no TensorFlow) behind Caddy, which
   round-robins across `API_UPSTREAMS` on port 8000.
 - `celery-1` (light + heavy queues, runs beat) and `celery-2` (heavy only), from
   `worker.Containerfile`, with the calibration artifacts baked in. Each writes per-task
   stage timings to the `worker_metrics` volume as `<hostname>-<pid>/<task>.csv`.
-- Postgres configured by `postgres.conf`, sized for the cloud's dedicated data host.
+- Postgres configured by `postgres.conf` in the cloud, sized for its dedicated data host.
 - Prometheus (port 9090, `prometheus.yml`) scraping the gateways, Caddy, celery-exporter,
   the Postgres and Redis exporters, node-exporter and cAdvisor.
 
@@ -42,26 +43,38 @@ broker. The Makefile enables every profile of a topology on one machine:
 make prod-build
 make prod-run        # 1x1
 make prod-x2-run     # 2x2 (adds fastapi-2 and celery-2)
-make db-seed         # once, against the running stack (add --test-users N for more users)
+make prod-db-seed    # once, against the running stack (add --test-users N for more users)
 make prod-clean      # tear down, volumes included
 ```
 
 ## Configuration
 
-`prod.env` configures every container. Besides credentials, it compresses the round
-cadence so a run of a few minutes sees several rounds: aggregation every 60 s, secure
-sessions sealing after 15 s and failing 20 s after sealing. It also sets
-`WORKER_CONCURRENCY=4` (the cloud value, too much for a local 2x2 on a small machine;
-override it from the shell) and a long access-token TTL so no user re-logs in mid-run.
-Containers only pick up changes to it when they are recreated.
+Every container reads one env file, which is also the compose `--env-file`, so it sets the
+compose variables too (ports, `BIND_ADDR`, `WORKER_CONCURRENCY`, `POSTGRES_CONFIG_FILE`).
+`compose.prod.yaml` takes its path from `PROD_ENV_FILE`, and both the variable and the flag
+must point at the same file:
 
-`postgres.conf` assumes a dedicated 16 GB host (4 GB of shared buffers). To run the
-image's stock config instead, for example on a small local machine, point
-`POSTGRES_CONFIG_FILE` at it:
+- `local.env`, used by the Makefile, runs the whole stack on one small machine: services
+  reach each other by their compose names, every process runs a single worker, and
+  Postgres uses the image's stock config instead of `postgres.conf`.
+- `cloud.env` is for the cloud hosts: services reach each other by the `-inst` host names,
+  ports are published on every interface, the broker listens on 6379 on its own host,
+  and Postgres uses `postgres.conf`, sized for a dedicated 16 GB host. Each host starts
+  only its own profile:
 
-```bash
-POSTGRES_CONFIG_FILE=/var/lib/postgresql/18/docker/postgresql.conf WORKER_CONCURRENCY=1 make prod-x2-run
-```
+  ```bash
+  PROD_ENV_FILE=prod/cloud.env podman compose -f compose.yaml -f compose.prod.yaml \
+    --env-file prod/cloud.env --profile fastapi-1 up
+  ```
+
+Compose only reads the first `--env-file`, so the shared values are duplicated in both
+files. Besides credentials, they compress the round cadence so a run of a few minutes sees
+several rounds (aggregation every 60 s, secure sessions sealing after 15 s and failing
+20 s after sealing) and set a long access-token TTL so no user re-logs in mid-run.
+Containers only pick up changes to the env file when they are recreated.
+
+`make prod-db-seed` runs the seed script on the host with `local.env` loaded, so the seeded
+credentials match the stack's, connecting to Postgres through its published port.
 
 Start every service of the topology before seeding: bringing up `fastapi-2`/`celery-2` on a
 running stack recreates the data services, and celery-exporter misses events for a while

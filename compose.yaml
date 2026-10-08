@@ -17,15 +17,6 @@ services:
     volumes:
       - redis_auth_data:/data
 
-  redis-broker:
-    image: docker.io/library/redis:8-alpine
-    profiles: [redis-broker]
-    ports:
-      - ${BIND_ADDR:-127.0.0.1}:${BROKER_PORT:-6380}:6379
-    volumes:
-      - redis_broker_data:/data
-
 volumes:
   postgres_data:
   redis_auth_data:
-  redis_broker_data:

@@ -163,7 +163,7 @@ def main() -> None:
     parser.add_argument("--settle-timeout", type=float, help="seconds, defaults to three aggregation intervals")
     parser.add_argument("--host", default="http://localhost:8000")
     parser.add_argument("--prometheus", default="http://localhost:9090")
-    parser.add_argument("--env-file", type=Path, default=Path("prod/prod.env"))
+    parser.add_argument("--env-file", type=Path, default=Path("prod/local.env"))
     parser.add_argument("--metrics-volume", default="backend_worker_metrics",
                         help="podman volume holding the worker metrics, empty to skip copying it")
     args = parser.parse_args()
