@@ -25,8 +25,8 @@ api/       FastAPI gateway (no TensorFlow): auth/device/model routers, rate limi
 ml/        TensorFlow models + training, imported by worker + scripts, never by api.
            See [`shared/docs/ml-pipeline.md`](../shared/docs/ml-pipeline.md) for how it's
            structured.
-worker/    Celery task layer (models built on first use): quantization, dense and
-           secure aggregation, the secure-round sweep, result cleanup.
+worker/    Celery task layer (models built on first use): quantization, aggregation
+           rounds, secure-session sums and their sweep, result cleanup.
 scripts/   CLI entry points: `system/` (dataset, train, seed, export), `integration/`
            (headless federated/secure runs against the real API), `figures/` (report
            result and figure generators).
@@ -64,7 +64,7 @@ how to export a subject for the app/firmware test harnesses.
 A FastAPI gateway in front of a Celery worker, backed by PostgreSQL (accounts, models,
 submissions, and every served blob) and Redis (Celery broker + rate limiting). The
 gateway never runs ML work; the worker quantizes/signs uploads, runs the federated
-aggregation rounds and drives the secure-round lifecycle. See
+aggregation rounds and drives the secure-session lifecycle. See
 [`shared/docs/server-internals.md`](../shared/docs/server-internals.md) for the
 gateway/worker split, storage decisions, the aggregation algorithm, and the rate-limiting
 table.

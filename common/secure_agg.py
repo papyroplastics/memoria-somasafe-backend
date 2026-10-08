@@ -4,7 +4,7 @@ masking is client-side and platform-independent, the summation is integer work.
 
 The scheme (shared/docs/secure-aggregation.md): every client holds a long-term
 ECDH keypair; for each pair (u, v) both sides independently derive the same PRG
-seed from their shared secret and the round id, expand it to a mask, and the
+seed from their shared secret and the session id, expand it to a mask, and the
 lower-indexed member adds the mask while the higher subtracts it. Summed over the
 whole cohort every pairwise mask cancels, leaving the plain sum of the quantized
 updates and nothing else.
@@ -36,11 +36,11 @@ def generate_keypair() -> tuple[ec.EllipticCurvePrivateKey, bytes]:
 
 
 def derive_seed(sk: ec.EllipticCurvePrivateKey, pk_other: bytes,
-                round_id: int) -> bytes:
+                session_id: int) -> bytes:
     peer = ec.EllipticCurvePublicKey.from_encoded_point(ec.SECP256R1(), pk_other)
     shared = sk.exchange(ec.ECDH(), peer)
     return HKDF(algorithm=hashes.SHA256(), length=32,
-                salt=round_id.to_bytes(8, "big"), info=_INFO).derive(shared)
+                salt=session_id.to_bytes(8, "big"), info=_INFO).derive(shared)
 
 
 def prg(seed: bytes, m: int) -> np.ndarray:
@@ -54,12 +54,12 @@ def compute_scale(n: int, clip_bound: float) -> int:
 
 
 def mask_vector(q: np.ndarray, self_id: int, roster: Roster,
-                sk: ec.EllipticCurvePrivateKey, round_id: int) -> np.ndarray:
+                sk: ec.EllipticCurvePrivateKey, session_id: int) -> np.ndarray:
     y = q.astype(np.uint64)
     for uid, pk_other in roster:
         if uid == self_id:
             continue
-        mask = prg(derive_seed(sk, pk_other, round_id), q.size)
+        mask = prg(derive_seed(sk, pk_other, session_id), q.size)
         # Modular add only (uint64 subtraction underflows), keeping y < 2^32.
         signed = mask if self_id < uid else (RING_MODULUS - mask)
         y = (y + signed) % RING_MODULUS

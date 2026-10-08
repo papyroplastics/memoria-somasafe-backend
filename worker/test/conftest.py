@@ -3,8 +3,8 @@ from sqlmodel import Session, select
 
 from common.db import (
     ModelVersion,
-    SecureRound,
-    SecureRoundMember,
+    SecureSession,
+    SecureSessionMember,
     User,
     engine,
     get_version_weights,
@@ -32,21 +32,21 @@ def test_user_ids() -> list[int]:
 
 
 @pytest.fixture
-def open_round(seeded):
+def open_session(seeded):
     model_key, version_id, weights_id = seeded
     with Session(engine) as session:
-        round = SecureRound(model_key=model_key, version_id=version_id,
+        row = SecureSession(model_key=model_key, version_id=version_id,
                             base_weights_id=weights_id, clip_bound=1.0)
-        session.add(round)
+        session.add(row)
         session.commit()
-        round_id = round.id
-    yield round_id
+        session_id = row.id
+    yield session_id
     with Session(engine) as session:
-        for member in session.exec(select(SecureRoundMember)
-                                   .where(SecureRoundMember.round_id == round_id)):
+        for member in session.exec(select(SecureSessionMember)
+                                   .where(SecureSessionMember.session_id == session_id)):
             session.delete(member)
         session.flush()
-        round = session.get(SecureRound, round_id)
-        if round is not None:
-            session.delete(round)
+        row = session.get(SecureSession, session_id)
+        if row is not None:
+            session.delete(row)
         session.commit()

@@ -1,11 +1,12 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import Enum
 
 import numpy as np
 
-from common.db import SecureRoundStatus
-from common.secure_agg import dequantize, ring_sum
+from common.db import SecureSessionStatus
+from common.secure_agg import RING_MODULUS, dequantize
 from ml.aggregation import trimmed_mean_inplace
 
 
@@ -17,89 +18,91 @@ def dense_update(reference: np.ndarray, deltas: np.ndarray, trim: float) -> np.n
     return (reference + trimmed_mean_inplace(deltas, trim)).astype(np.float32)
 
 
-def secure_update(reference: np.ndarray, vectors: dict[int, np.ndarray], scale: int,
-                  member_count: int, clip_bound: float) -> np.ndarray:
-    for user_id, vector in vectors.items():
-        if vector.size != reference.size:
-            raise ValueError(f"member {user_id} vector length mismatch")
-    mean_delta = dequantize(ring_sum(list(vectors.values())), scale, member_count)
-    new_weights = (reference + mean_delta).astype(np.float32)
-    if not np.all(np.isfinite(new_weights)) \
-            or float(np.max(np.abs(mean_delta))) > clip_bound * 1.001:
-        raise ValueError("aggregate failed sanity check (implausible mean delta)")
-    return new_weights
+def secure_session_mean(vectors: Iterable[np.ndarray], weight_count: int, scale: int,
+                        member_count: int, clip_bound: float) -> np.ndarray:
+    acc = np.zeros(weight_count, dtype=np.uint64)
+    summed = 0
+    for vector in vectors:
+        if vector.size != weight_count:
+            raise ValueError("member vector length mismatch")
+        acc += vector
+        summed += 1
+    if summed != member_count:
+        raise ValueError(f"{summed}/{member_count} vectors (masks only cancel with the full roster)")
+    mean = dequantize((acc % RING_MODULUS).astype(np.uint32), scale, member_count)
+    if not np.all(np.isfinite(mean)) or float(np.max(np.abs(mean))) > clip_bound * 1.001:
+        raise ValueError("session sum failed sanity check (implausible mean delta)")
+    return mean
 
 
 @dataclass(frozen=True)
-class RoundState:
+class SessionState:
     id: int
     model_key: str
-    status: SecureRoundStatus
+    status: SecureSessionStatus
     base_weights_id: int
     members: int
     submitted: int
     member_count: int | None
     created_at: datetime
     sealed_at: datetime | None
-    aggregating_at: datetime | None
+    summing_at: datetime | None
 
 
 @dataclass(frozen=True)
 class SweepPolicy:
     min_members: int
-    target_members: int
     open_timeout: int
     seal_timeout: int
-    aggregating_timeout: int
+    summing_timeout: int
 
 
 class Action(str, Enum):
     seal = "seal"
     dispatch = "dispatch"
     fail = "fail"
+    retry = "retry"
 
 
 @dataclass(frozen=True)
 class SweepAction:
-    round_id: int
+    session_id: int
     model_key: str
     action: Action
-    frm: SecureRoundStatus
+    frm: SecureSessionStatus
     reason: str = ""
-    missing: int = 0
 
 
 def _elapsed(since: datetime | None, now: datetime, seconds: int) -> bool:
     return since is not None and now - since >= timedelta(seconds=seconds)
 
 
-def sweep_actions(rounds: list[RoundState], active: dict[str, int | None],
+def sweep_actions(sessions: list[SessionState], active: dict[str, int | None],
                   now: datetime, policy: SweepPolicy) -> list[SweepAction]:
     actions = []
-    for r in rounds:
-        stale = active.get(r.model_key) != r.base_weights_id
+    for s in sessions:
+        stale = active.get(s.model_key) != s.base_weights_id
 
-        def act(action: Action, reason: str = "", missing: int = 0) -> None:
-            actions.append(SweepAction(r.id, r.model_key, action, r.status, reason, missing))
+        def act(action: Action, reason: str = "") -> None:
+            actions.append(SweepAction(s.id, s.model_key, action, s.status, reason))
 
-        if r.status is SecureRoundStatus.open:
-            timed_out = _elapsed(r.created_at, now, policy.open_timeout)
+        if s.status is SecureSessionStatus.open:
             if stale:
                 act(Action.fail, "stale_base")
-            elif r.members >= policy.min_members \
-                    and (r.members >= policy.target_members or timed_out):
-                act(Action.seal)
-            elif timed_out:
-                act(Action.fail, "open_timeout")
-        elif r.status is SecureRoundStatus.sealed:
-            expected = r.member_count or 0
+            elif _elapsed(s.created_at, now, policy.open_timeout):
+                if s.members >= policy.min_members:
+                    act(Action.seal)
+                else:
+                    act(Action.fail, "open_timeout")
+        elif s.status is SecureSessionStatus.sealed:
+            expected = s.member_count or 0
             if stale:
                 act(Action.fail, "stale_base")
-            elif r.submitted >= expected:
+            elif s.submitted >= expected:
                 act(Action.dispatch)
-            elif _elapsed(r.sealed_at, now, policy.seal_timeout):
-                act(Action.fail, "seal_timeout", expected - r.submitted)
-        elif r.status is SecureRoundStatus.aggregating:
-            if _elapsed(r.aggregating_at, now, policy.aggregating_timeout):
-                act(Action.fail, "worker_lost")
+            elif _elapsed(s.sealed_at, now, policy.seal_timeout):
+                act(Action.fail, "seal_timeout")
+        elif s.status is SecureSessionStatus.summing:
+            if _elapsed(s.summing_at, now, policy.summing_timeout):
+                act(Action.retry, "worker_lost")
     return actions

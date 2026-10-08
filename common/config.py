@@ -77,33 +77,34 @@ WORKER_METRICS_DIR = os.environ.get("WORKER_METRICS_DIR") or None
 SEED = int(os.environ.get("SEED", 1234))
 
 # --- Federated aggregation (see worker.tasks.aggregation) ---
+# Shared by dense and secure models; a secure round's "submissions" are the members
+# of its summed sessions, and its rows are the sessions' partial means.
 FED_AGG_INTERVAL_SECONDS = int(os.environ.get("FED_AGG_INTERVAL_SECONDS", DAY))
 FED_LOCK_TTL_SECONDS = int(os.environ.get("FED_LOCK_TTL_SECONDS", MINUTE * 7))
-# Memory budget for a round's stacked deltas; caps the cohort at the newest
-# FED_AGG_MEMORY_BYTES // (weight_count * 4) submissions.
+# Memory budget for a round's stacked rows; caps the cohort at the newest
+# FED_AGG_MEMORY_BYTES // (weight_count * 4) rows.
 FED_AGG_MEMORY_BYTES = int(os.environ.get("FED_AGG_MEMORY_BYTES", 500 * 1024 * 1024))
-# Minimum valid submissions a model needs in the window for a round to run.
+# Minimum submissions a model needs on its active weights for a round to run.
 FED_MIN_SUBMISSIONS = int(os.environ.get("FED_MIN_SUBMISSIONS", 1))
-# Fraction of values the trimmed-mean aggregator drops from each side of every
-# coordinate. Must be in [0, 0.5); below 1/n it trims nothing and is a plain mean.
+# Fraction of rows the trimmed mean drops from each side of every coordinate.
+# Must be in [0, 0.5); below 1/n it trims nothing and is a plain mean.
 FED_TRIM_RATIO = float(os.environ.get("FED_TRIM_RATIO", 0.2))
 
-# --- Secure aggregation (see worker.tasks.secure) ---
+# --- Secure aggregation sessions (see worker.tasks.secure) ---
 # Per-coordinate clipping bound B: each client clips its delta to +/-B before
-# masking, capping its influence on the mean to B/n. Also fixes the fixed-point
-# range, so it must comfortably exceed real delta magnitudes (a generous default
-# — with ~15 clients there is ample headroom before the ring can wrap).
+# masking; also fixes the fixed-point range.
 SECURE_CLIP_BOUND = float(os.environ.get("SECURE_CLIP_BOUND", 1.0))
-# A round must have at least this many members to seal (n >= 3: the sum of two
+# A session needs at least this many members to seal (n >= 3: the sum of two
 # updates plus one own value reveals the third).
-SECURE_MIN_MEMBERS = int(os.environ.get("SECURE_MIN_MEMBERS", 3))
-# The sweep seals an open round at SECURE_TARGET_MEMBERS, or once it has been open
-# for SECURE_ROUND_OPEN_TIMEOUT_SECONDS with at least SECURE_MIN_MEMBERS; a sealed
-# round missing submissions after SECURE_ROUND_SEAL_TIMEOUT_SECONDS fails.
-SECURE_TARGET_MEMBERS = int(os.environ.get("SECURE_TARGET_MEMBERS", 10))
-SECURE_ROUND_OPEN_TIMEOUT_SECONDS = int(os.environ.get("SECURE_ROUND_OPEN_TIMEOUT_SECONDS", MINUTE * 30))
-SECURE_ROUND_SEAL_TIMEOUT_SECONDS = int(os.environ.get("SECURE_ROUND_SEAL_TIMEOUT_SECONDS", MINUTE * 30))
-SECURE_SWEEP_INTERVAL_SECONDS = int(os.environ.get("SECURE_SWEEP_INTERVAL_SECONDS", 30))
+SECURE_SESSION_MIN_MEMBERS = int(os.environ.get("SECURE_SESSION_MIN_MEMBERS", 3))
+# The join that fills a session to this size seals it.
+SECURE_SESSION_MAX_MEMBERS = int(os.environ.get("SECURE_SESSION_MAX_MEMBERS", 10))
+# The sweep seals an open session after the open timeout if it has the minimum
+# (fails it otherwise), and fails a sealed one still missing submissions after the
+# seal timeout.
+SECURE_SESSION_OPEN_TIMEOUT_SECONDS = int(os.environ.get("SECURE_SESSION_OPEN_TIMEOUT_SECONDS", MINUTE * 10))
+SECURE_SESSION_SEAL_TIMEOUT_SECONDS = int(os.environ.get("SECURE_SESSION_SEAL_TIMEOUT_SECONDS", MINUTE * 5))
+SECURE_SESSION_SWEEP_INTERVAL_SECONDS = int(os.environ.get("SECURE_SESSION_SWEEP_INTERVAL_SECONDS", 30))
 
 # --- Auth (stateful opaque tokens: access in Redis, refresh in Postgres — see
 # api.lib.session and api.routes.auth) ---
@@ -125,7 +126,7 @@ OTA_DOWNLOAD_COOLDOWN_SECONDS = int(os.environ.get("OTA_DOWNLOAD_COOLDOWN_SECOND
 # and secure submit paths (they all cost the same budget).
 SUBMIT_DAILY_LIMIT = int(os.environ.get("SUBMIT_DAILY_LIMIT", 2))
 SUBMIT_DAILY_WINDOW_SECONDS = int(os.environ.get("SUBMIT_DAILY_WINDOW_SECONDS", DAY))
-# Per-user, per-model cooldown between secure-round joins.
+# Per-user, per-model cooldown between secure-session joins.
 SECURE_JOIN_COOLDOWN_SECONDS = int(os.environ.get("SECURE_JOIN_COOLDOWN_SECONDS", MINUTE * 5))
 
 # --- Device attestation (see api.routes.device) ---

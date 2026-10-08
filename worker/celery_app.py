@@ -7,7 +7,7 @@ from common.celery_tasks import (
     HEAVY_QUEUE,
     LIGHT_QUEUE,
     QUANTIZE_TASK,
-    SECURE_AGG_TASK,
+    SECURE_SUM_TASK,
     SECURE_SWEEP_TASK,
 )
 from common.config import (
@@ -18,7 +18,7 @@ from common.config import (
     FED_LOCK_TTL_SECONDS,
     RESULT_BACKEND_URL,
     RESULT_TTL_SECONDS,
-    SECURE_SWEEP_INTERVAL_SECONDS,
+    SECURE_SESSION_SWEEP_INTERVAL_SECONDS,
     WORKER_TASK_SOFT_TIME_LIMIT,
     WORKER_TASK_TIME_LIMIT,
 )
@@ -47,9 +47,9 @@ app.conf.update(
     task_routes={
         QUANTIZE_TASK: {"queue": HEAVY_QUEUE},
         FED_AGG_TASK: {"queue": HEAVY_QUEUE},
-        SECURE_AGG_TASK: {"queue": HEAVY_QUEUE},
         FED_DISPATCH_TASK: {"queue": LIGHT_QUEUE},
         SECURE_SWEEP_TASK: {"queue": LIGHT_QUEUE},
+        SECURE_SUM_TASK: {"queue": LIGHT_QUEUE},
         CLEANUP_TASK: {"queue": LIGHT_QUEUE},
     },
     worker_prefetch_multiplier=1,
@@ -67,9 +67,9 @@ app.conf.update(
             "task": FED_DISPATCH_TASK,
             "schedule": float(FED_AGG_INTERVAL_SECONDS),
         },
-        "secure-round-sweep": {
+        "secure-session-sweep": {
             "task": SECURE_SWEEP_TASK,
-            "schedule": float(SECURE_SWEEP_INTERVAL_SECONDS),
+            "schedule": float(SECURE_SESSION_SWEEP_INTERVAL_SECONDS),
         },
     },
 )

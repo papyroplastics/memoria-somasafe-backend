@@ -1,51 +1,100 @@
-"""DB-side helpers for the secure-aggregation harnesses (no HTTP). The worker's sweep
-seals and dispatches rounds on its own; the harnesses do both by hand for determinism,
-tolerating the sweep having got there first.
-"""
+"""Secure-session helpers for the harnesses. Sessions are sealed and summed by hand
+for determinism, tolerating the worker's sweep having got there first."""
 
+import base64
 import time
+from dataclasses import dataclass
 
-from sqlalchemy import func
-from sqlmodel import Session, select
+import numpy as np
+from cryptography.hazmat.primitives.asymmetric import ec
+from sqlmodel import Session
 
-from common.celery_tasks import SECURE_AGG_TASK
-from common.db import (
-    SecureRound,
-    SecureRoundMember,
-    SecureRoundStatus,
-    engine,
-)
-from common.secure_round import seal_round as seal
+from common.celery_tasks import SECURE_SUM_TASK
+from common.db import SecureSession, SecureSessionStatus, engine
+from common.secure_agg import dequantize, mask_vector, quantize, ring_sum
+from common.secure_session import seal_session as seal
+
+from scripts.common.api import get_descriptor, join, submit_masked
 
 
-def seal_round(round_id: int, min_members: int) -> int:
+@dataclass(frozen=True)
+class Seat:
+    user: str
+    token: str
+    sk: ec.EllipticCurvePrivateKey
+    pk: bytes
+    delta: np.ndarray
+
+
+@dataclass(frozen=True)
+class SessionResult:
+    session_id: int
+    members: int
+    scale: int
+    mean: np.ndarray
+    residual: float
+
+
+def split_sessions(seats: list[Seat], size: int, min_members: int) -> list[list[Seat]]:
+    if len(seats) < min_members:
+        raise SystemExit(f"{len(seats)} clients < {min_members}, the minimum session size")
+    count = min(-(-len(seats) // size), len(seats) // min_members)
+    return [list(group) for group in np.array_split(np.array(seats, dtype=object), count)]
+
+
+def seal_session(session_id: int, min_members: int) -> int:
     with Session(engine) as session:
-        n = session.exec(select(func.count()).select_from(SecureRoundMember)
-                         .where(SecureRoundMember.round_id == round_id)).one()
-        if n < min_members:
-            raise SystemExit(f"only {n} members joined, need >= {min_members} to seal")
-        sealed = seal(session, round_id)
+        sealed = seal(session, session_id)
+        if sealed is not None and sealed < min_members:
+            raise SystemExit(f"only {sealed} members joined, need >= {min_members} to seal")
         session.commit()
         if sealed is not None:
             return sealed
-        round = session.get(SecureRound, round_id, populate_existing=True)
-        if round is None or round.status is not SecureRoundStatus.sealed:
-            raise SystemExit(f"round {round_id} could not be sealed "
-                             f"({round.status.value if round else 'missing'})")
-        return round.member_count
+        current = session.get(SecureSession, session_id, populate_existing=True)
+        if current is None or current.status is not SecureSessionStatus.sealed:
+            raise SystemExit(f"session {session_id} could not be sealed "
+                             f"({current.status.value if current else 'missing'})")
+        return current.member_count
 
 
-def run_round(app, round_id: int, timeout: float = 300.0) -> str:
-    """Dispatch the round's aggregation and wait for the round row to settle; the
-    sweep may have dispatched it already, so the task's own result is not used."""
-    app.send_task(SECURE_AGG_TASK, args=[round_id])
+def sum_session(app, session_id: int, timeout: float = 120.0) -> None:
+    app.send_task(SECURE_SUM_TASK, args=[session_id])
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         with Session(engine) as session:
-            round = session.get(SecureRound, round_id)
-            if round.status is SecureRoundStatus.aggregated:
-                return f"aggregated {round.member_count} members into new global weights"
-            if round.status is SecureRoundStatus.failed:
-                raise SystemExit(f"secure round {round_id} failed, see the worker logs")
-        time.sleep(1.0)
-    raise SystemExit(f"secure round {round_id} did not settle within {timeout:.0f}s")
+            status = session.get(SecureSession, session_id).status
+        if status is SecureSessionStatus.summed:
+            return
+        if status is SecureSessionStatus.failed:
+            raise SystemExit(f"secure session {session_id} failed, see the worker logs")
+        time.sleep(0.5)
+    raise SystemExit(f"secure session {session_id} was not summed within {timeout:.0f}s")
+
+
+def run_session(app, base: str, key: str, weights_id: int, seats: list[Seat],
+                min_members: int) -> SessionResult:
+    session_id = None
+    user_ids = {}
+    for seat in seats:
+        resp = join(base, seat.token, key, weights_id, seat.pk)
+        if session_id is not None and resp["session_id"] != session_id:
+            raise SystemExit("joins were split across sessions; lower the session size")
+        session_id = resp["session_id"]
+        user_ids[seat.user] = resp["user_id"]
+    n = seal_session(session_id, min_members)
+
+    desc = get_descriptor(base, seats[0].token, session_id)
+    scale, clip = desc["scale"], desc["clip_bound"]
+    roster = [(e["user_id"], base64.b64decode(e["ka_public_key"])) for e in desc["roster"]]
+    masked, plain = [], []
+    for seat in seats:
+        q = quantize(seat.delta, clip, scale)
+        y = mask_vector(q, user_ids[seat.user], roster, seat.sk, session_id)
+        submit_masked(base, seat.token, session_id, y.astype("<u4").tobytes())
+        masked.append(y)
+        plain.append(q)
+
+    mean = dequantize(ring_sum(plain), scale, n)
+    residual = float(np.max(np.abs(dequantize(ring_sum(masked), scale, n) - mean)))
+    sum_session(app, session_id)
+    return SessionResult(session_id, n, scale, mean, residual)

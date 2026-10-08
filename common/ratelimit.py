@@ -52,6 +52,13 @@ def clear_model_limits(model_key: str) -> None:
             client.delete(*keys)
 
 
+def clear_user_limits(model_key: str, user_ids: list[int]) -> None:
+    keys = [_key(action, user_id, model_key) for user_id in user_ids
+            for action in (RateLimit.secure_join, RateLimit.weight_submit)]
+    if keys:
+        client.delete(*keys)
+
+
 def reset() -> None:
     """Drop every ``rl:`` counter. Test helper: lets the rate-limited endpoints
     be exercised repeatedly against a shared Redis without waiting out windows."""

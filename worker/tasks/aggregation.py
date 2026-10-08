@@ -3,7 +3,7 @@ from enum import StrEnum, auto
 
 import numpy as np
 from celery.utils.log import get_task_logger
-from sqlalchemy import select
+from sqlalchemy import Select, delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
@@ -18,6 +18,9 @@ from common.config import (
 from common.db import (
     ClientDeltaSubmission,
     ModelVersion,
+    SecurePartial,
+    SecureSession,
+    SecureSessionStatus,
     SubmissionType,
     engine,
     get_latest_version,
@@ -41,8 +44,6 @@ from worker.locking import model_lock
 from worker.metrics import Timer, write
 
 log = get_task_logger(__name__)
-
-DENSE_TYPES = (SubmissionType.raw, SubmissionType.quantize)
 
 
 class AggregationStage(StrEnum):
@@ -78,6 +79,7 @@ class AggregationRecord:
     base_weights_id: int | None = None
     cap: int | None = None
     cohort: int | None = None
+    submissions: int | None = None
 
 
 @dataclass(frozen=True)
@@ -88,6 +90,31 @@ class RoundPlan:
     reference_id: int
     reference: np.ndarray
     deltas: np.ndarray
+    secure: bool
+
+
+def _dense_rows(session: Session, reference_id: int, cap: int) -> tuple[int, int, Select]:
+    ids = list(session.execute(
+        select(ClientDeltaSubmission.id)  # type: ignore
+        .where(ClientDeltaSubmission.base_weights_id == reference_id,
+               ClientDeltaSubmission.valid == True)
+        .order_by(ClientDeltaSubmission.created_at.desc())  # type: ignore
+        .limit(cap)).scalars())
+    return len(ids), len(ids), (select(ClientDeltaSubmission.deltas)  # type: ignore
+                                .where(ClientDeltaSubmission.id.in_(ids)))  # type: ignore
+
+
+def _secure_rows(session: Session, reference_id: int, cap: int) -> tuple[int, int, Select]:
+    rows = session.execute(
+        select(SecureSession.id, SecureSession.member_count)
+        .where(SecureSession.base_weights_id == reference_id,
+               SecureSession.status == SecureSessionStatus.summed)
+        .order_by(SecureSession.finished_at.desc())  # type: ignore
+        .limit(cap)).all()
+    ids = [session_id for session_id, _ in rows]
+    return len(ids), sum(members for _, members in rows), (
+        select(SecurePartial.mean)  # type: ignore
+        .where(SecurePartial.session_id.in_(ids)))  # type: ignore
 
 
 def _read_round(key: str, timer: Timer[AggregationStage],
@@ -95,7 +122,7 @@ def _read_round(key: str, timer: Timer[AggregationStage],
     with Session(engine) as session:
         with timer(AggregationStage.metadata):
             latest = get_latest_version(session, key)
-            if latest is None or latest.submission_type not in DENSE_TYPES:
+            if latest is None:
                 record.outcome = AggregationOutcome.skipped_unavailable
                 return None
             reference = get_version_weights(session, latest.id)
@@ -104,26 +131,21 @@ def _read_round(key: str, timer: Timer[AggregationStage],
                 return None
             record.base_weights_id = reference.id
 
+            secure = latest.submission_type is SubmissionType.secure
             cap = cohort_cap(latest.weight_count, FED_AGG_MEMORY_BYTES)
-            ids = list(session.execute(
-                select(ClientDeltaSubmission.id)  # type: ignore
-                .where(ClientDeltaSubmission.base_weights_id == reference.id,
-                       ClientDeltaSubmission.valid == True)
-                .order_by(ClientDeltaSubmission.created_at.desc())  # type: ignore
-                .limit(cap)).scalars())
+            cohort, submissions, blobs = (_secure_rows if secure else _dense_rows)(
+                session, reference.id, cap)
             record.cap = cap
-            record.cohort = len(ids)
+            record.cohort = cohort
+            record.submissions = submissions
 
-        if len(ids) < FED_MIN_SUBMISSIONS:
+        if submissions < FED_MIN_SUBMISSIONS:
             record.outcome = AggregationOutcome.skipped_min_submissions
             return None
 
         with timer(AggregationStage.blob_fetch):
-            deltas = np.empty((len(ids), latest.weight_count), dtype=np.float32)
-            rows = session.execute(
-                select(ClientDeltaSubmission.deltas)  # type: ignore
-                .where(ClientDeltaSubmission.id.in_(ids))  # type: ignore[attr-defined]
-                .execution_options(yield_per=64)).scalars()
+            deltas = np.empty((cohort, latest.weight_count), dtype=np.float32)
+            rows = session.execute(blobs.execution_options(yield_per=64)).scalars()
             filled = 0
             for blob in rows:
                 deltas[filled] = np.frombuffer(blob, dtype=np.float32)
@@ -133,7 +155,7 @@ def _read_round(key: str, timer: Timer[AggregationStage],
         record.cohort = filled
 
         return RoundPlan(latest.id, latest.fingerprint, latest.contract_version,
-                         reference.id, weights, deltas)
+                         reference.id, weights, deltas, secure)
 
 
 def _aggregate(key: str,
@@ -165,6 +187,11 @@ def _aggregate(key: str,
     try:
         with timer(AggregationStage.commit), Session(engine) as session:
             store(session, key, plan.version_id, plan.reference_id, weights, trainable, quantized)
+            if plan.secure:
+                session.execute(delete(SecurePartial).where(
+                    SecurePartial.session_id.in_(  # type: ignore[attr-defined]
+                        select(SecureSession.id)
+                        .where(SecureSession.base_weights_id == plan.reference_id))))
             session.commit()
     except IntegrityError:
         record.outcome = AggregationOutcome.duplicate_round
@@ -194,14 +221,8 @@ def federated_aggregation(model_key: str) -> dict[str, object]:
 @app.task(name=FED_DISPATCH_TASK)
 def dispatch_aggregation() -> list[str]:
     with Session(engine) as session:
-        latest = (select(ModelVersion.model_key, ModelVersion.submission_type)
-                  .distinct(ModelVersion.model_key)
-                  .order_by(ModelVersion.model_key,
-                            ModelVersion.version.desc())  # type: ignore[attr-defined]
-                  .subquery())
         keys = list(session.execute(
-            select(latest.c.model_key)
-            .where(latest.c.submission_type.in_(DENSE_TYPES))).scalars())
+            select(ModelVersion.model_key).distinct()).scalars())
     for key in keys:
         federated_aggregation.delay(key)
     return keys

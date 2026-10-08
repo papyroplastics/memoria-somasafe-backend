@@ -29,8 +29,9 @@ from common.db import (
     ModelDefinition,
     ModelVersion,
     QuantizationJob,
-    SecureRound,
-    SecureRoundMember,
+    SecurePartial,
+    SecureSession,
+    SecureSessionMember,
     User,
     WeightsArtifact,
     engine,
@@ -64,14 +65,19 @@ def reset_weights(session: Session, key: str) -> None:
         select(QuantizationJob)
         .where(QuantizationJob.submission_id.in_([s.id for s in submissions]))  # type: ignore[attr-defined]
     ).all() if submissions else []
-    rounds = session.exec(
-        select(SecureRound)
-        .where(SecureRound.base_weights_id.in_(weights_ids))  # type: ignore[attr-defined]
+    sessions = session.exec(
+        select(SecureSession)
+        .where(SecureSession.base_weights_id.in_(weights_ids))  # type: ignore[attr-defined]
     ).all()
+    session_ids = [s.id for s in sessions]
     members = session.exec(
-        select(SecureRoundMember)
-        .where(SecureRoundMember.round_id.in_([r.id for r in rounds]))  # type: ignore[attr-defined]
-    ).all() if rounds else []
+        select(SecureSessionMember)
+        .where(SecureSessionMember.session_id.in_(session_ids))  # type: ignore[attr-defined]
+    ).all() if sessions else []
+    partials = session.exec(
+        select(SecurePartial)
+        .where(SecurePartial.session_id.in_(session_ids))  # type: ignore[attr-defined]
+    ).all() if sessions else []
 
     # Children first: each level is a foreign key into the next. Their blob rows
     # (QuantizationResult, WeightsArtifact) cascade at the DB level.
@@ -81,15 +87,18 @@ def reset_weights(session: Session, key: str) -> None:
         session.delete(submission)
     for member in members:
         session.delete(member)
-    for round_ in rounds:
-        session.delete(round_)
+    for partial in partials:
+        session.delete(partial)
+    session.flush()
+    for secure_session in sessions:
+        session.delete(secure_session)
     for w in weights:
         session.delete(w)
     session.flush()
 
     print(f"  - reset '{key}': dropped {len(weights)} weight snapshot(s), "
           f"{len(submissions)} submission(s), {len(jobs)} quantization job(s), "
-          f"{len(rounds)} secure round(s)")
+          f"{len(sessions)} secure session(s)")
 
 
 def seed_models(session: Session, reseed: bool = False) -> None:
@@ -130,7 +139,7 @@ def seed_models(session: Session, reseed: bool = False) -> None:
                         f"bump ModelSpec.version, or re-seed it with --reseed")
             else:
                 # Update rather than delete + recreate: ModelVersion.id is referenced by
-                # GlobalWeights, ClientDeltaSubmission and SecureRound, and (model_key,
+                # GlobalWeights, ClientDeltaSubmission and SecureSession, and (model_key,
                 # version) is unique — so replacing the row in place is the only way to
                 # re-seed a moved fingerprint under an unchanged version.
                 if latest.fingerprint != fingerprint:

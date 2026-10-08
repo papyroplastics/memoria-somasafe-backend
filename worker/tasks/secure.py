@@ -1,248 +1,196 @@
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum, auto
 
 import numpy as np
 from celery.utils.log import get_task_logger
-from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import delete, func, select, update
 from sqlmodel import Session
 
-from common.celery_tasks import SECURE_AGG_TASK, SECURE_SWEEP_TASK
-from common.compression import decompress
+from common.celery_tasks import SECURE_SUM_TASK, SECURE_SWEEP_TASK
 from common.config import (
-    SECURE_MIN_MEMBERS,
-    SECURE_ROUND_OPEN_TIMEOUT_SECONDS,
-    SECURE_ROUND_SEAL_TIMEOUT_SECONDS,
-    SECURE_TARGET_MEMBERS,
+    SECURE_SESSION_MIN_MEMBERS,
+    SECURE_SESSION_OPEN_TIMEOUT_SECONDS,
+    SECURE_SESSION_SEAL_TIMEOUT_SECONDS,
     WORKER_REAP_AFTER_SECONDS,
 )
 from common.db import (
-    GlobalWeights,
-    SecureRound,
-    SecureRoundMember,
-    SecureRoundStatus,
+    ModelVersion,
+    SecurePartial,
+    SecureSession,
+    SecureSessionMember,
+    SecureSessionStatus,
     engine,
-    get_latest_version,
     get_latest_weights,
     utcnow,
 )
-from common.ratelimit import clear_model_limits
-from common.secure_round import seal_round
-from worker import runtime
-from worker.baking import (
-    QuantizedBake,
-    Restore,
-    TrainableBake,
-    bake_quantized,
-    bake_trainable,
-    compress_weights,
-    restore,
-    store,
-)
+from common.ratelimit import clear_user_limits
+from common.secure_session import seal_session
 from worker.celery_app import app
-from worker.compute import Action, RoundState, SweepPolicy, secure_update, sweep_actions
+from worker.compute import (
+    Action,
+    SessionState,
+    SweepAction,
+    SweepPolicy,
+    secure_session_mean,
+    sweep_actions,
+)
 from worker.metrics import Timer, write
 
 log = get_task_logger(__name__)
 
 POLICY = SweepPolicy(
-    min_members=SECURE_MIN_MEMBERS,
-    target_members=SECURE_TARGET_MEMBERS,
-    open_timeout=SECURE_ROUND_OPEN_TIMEOUT_SECONDS,
-    seal_timeout=SECURE_ROUND_SEAL_TIMEOUT_SECONDS,
-    aggregating_timeout=WORKER_REAP_AFTER_SECONDS,
+    min_members=SECURE_SESSION_MIN_MEMBERS,
+    open_timeout=SECURE_SESSION_OPEN_TIMEOUT_SECONDS,
+    seal_timeout=SECURE_SESSION_SEAL_TIMEOUT_SECONDS,
+    summing_timeout=WORKER_REAP_AFTER_SECONDS,
 )
 
 
-class SecureAggregationStage(StrEnum):
+class SecureSumStage(StrEnum):
     read = auto()
-    runtime = auto()
     ring_sum = auto()
-    compress_weights = auto()
     commit = auto()
-    clear_limits = auto()
 
 
-STAGES = (SecureAggregationStage.read, SecureAggregationStage.runtime,
-          SecureAggregationStage.ring_sum, *Restore, *QuantizedBake, *TrainableBake,
-          SecureAggregationStage.compress_weights, SecureAggregationStage.commit,
-          SecureAggregationStage.clear_limits)
-
-
-class SecureAggregationOutcome(StrEnum):
-    aggregated = auto()
+class SecureSumOutcome(StrEnum):
+    summed = auto()
     skipped_not_sealed = auto()
-    skipped_not_aggregating = auto()
+    skipped_not_summing = auto()
+    stale_base = auto()
     failed = auto()
 
 
 @dataclass
-class SecureAggregationRecord:
-    round_id: int
-    outcome: SecureAggregationOutcome | None = None
+class SecureSumRecord:
+    session_id: int
+    outcome: SecureSumOutcome | None = None
     model_key: str | None = None
     base_weights_id: int | None = None
     members: int | None = None
 
 
-@dataclass(frozen=True)
-class SecurePlan:
-    model_key: str
-    version_id: int
-    fingerprint: str
-    contract_version: int
-    base_id: int
-    reference: np.ndarray
-    vectors: dict[int, np.ndarray]
-    scale: int
-    member_count: int
-    clip_bound: float
+def _vector(masked: bytes | None) -> np.ndarray:
+    if masked is None:
+        raise ValueError("a member has not submitted")
+    return np.frombuffer(masked, dtype="<u4")
 
 
-def _read_round(round_id: int) -> SecurePlan:
+def _sum(session_id: int, timer: Timer[SecureSumStage], record: SecureSumRecord) -> None:
     with Session(engine) as session:
-        round = session.get(SecureRound, round_id)
-        latest = get_latest_version(session, round.model_key)
-        if latest is None or latest.id != round.version_id:
-            raise ValueError("round version is no longer current")
-        members = session.execute(
-            select(SecureRoundMember).where(SecureRoundMember.round_id == round_id)
-        ).scalars().all()
-        vectors = {m.user_id: np.frombuffer(m.masked, dtype="<u4").astype(np.uint32)
-                   for m in members if m.masked is not None}
-        if len(vectors) != len(members) or len(members) != round.member_count:
-            raise ValueError(f"{len(vectors)}/{round.member_count} members submitted "
-                             f"(masks only cancel with the full roster)")
-        base = session.get(GlobalWeights, round.base_weights_id)
-        if base is None:
-            raise ValueError("base weights missing")
-        return SecurePlan(
-            model_key=round.model_key, version_id=latest.id,
-            fingerprint=latest.fingerprint, contract_version=latest.contract_version,
-            base_id=base.id,
-            reference=np.frombuffer(decompress(base.weights), dtype=np.float32),
-            vectors=vectors, scale=round.scale, member_count=round.member_count,
-            clip_bound=round.clip_bound,
-        )
+        with timer(SecureSumStage.read):
+            current = session.get(SecureSession, session_id)
+            record.model_key = current.model_key
+            record.base_weights_id = current.base_weights_id
+            record.members = current.member_count
+            active = get_latest_weights(session, current.model_key)
+            if active is None or active.id != current.base_weights_id:
+                SecureSession.transition(session, session_id, SecureSessionStatus.summing,
+                                         SecureSessionStatus.failed, finished_at=utcnow())
+                session.commit()
+                record.outcome = SecureSumOutcome.stale_base
+                return
+            weight_count = session.get(ModelVersion, current.version_id).weight_count
 
+        with timer(SecureSumStage.ring_sum):
+            rows = session.execute(
+                select(SecureSessionMember.masked)  # type: ignore
+                .where(SecureSessionMember.session_id == session_id)
+                .execution_options(yield_per=8)).scalars()
+            mean = secure_session_mean((_vector(blob) for blob in rows), weight_count,
+                                       current.scale, current.member_count,
+                                       current.clip_bound)
 
-def _fail_round(round_id: int, frm: SecureRoundStatus) -> str | None:
-    with Session(engine) as session:
-        if not SecureRound.transition(session, round_id, frm, SecureRoundStatus.failed,
-                                      finished_at=utcnow()):
-            return None
-        model_key = session.get(SecureRound, round_id).model_key
-        session.commit()
-        return model_key
-
-
-def _aggregate(round_id: int,
-               timer: Timer[SecureAggregationStage | Restore | QuantizedBake | TrainableBake],
-               record: SecureAggregationRecord) -> None:
-    with timer(SecureAggregationStage.read):
-        plan = _read_round(round_id)
-    record.model_key = plan.model_key
-    record.base_weights_id = plan.base_id
-    record.members = plan.member_count
-    with timer(SecureAggregationStage.runtime):
-        rt = runtime.get(plan.model_key)
-    if rt.fingerprint != plan.fingerprint:
-        raise ValueError("round version is no longer current")
-
-    with timer(SecureAggregationStage.ring_sum):
-        new_weights = secure_update(plan.reference, plan.vectors, plan.scale,
-                                    plan.member_count, plan.clip_bound)
-    restore(rt.model, new_weights, timer)
-    try:
-        quantized = bake_quantized(rt.model, rt.rep_dataset, plan.contract_version, timer)
-        trainable = bake_trainable(rt.model, plan.contract_version, timer)
-    except Exception as exc:
-        raise ValueError(f"artifact export failed: {exc}") from exc
-    with timer(SecureAggregationStage.compress_weights):
-        weights = compress_weights(new_weights)
-
-    try:
-        with timer(SecureAggregationStage.commit), Session(engine) as session:
-            store(session, plan.model_key, plan.version_id, plan.base_id, weights,
-                  trainable, quantized)
-            if not SecureRound.transition(session, round_id, SecureRoundStatus.aggregating,
-                                          SecureRoundStatus.aggregated, finished_at=utcnow()):
+        with timer(SecureSumStage.commit):
+            session.add(SecurePartial(session_id=session_id,
+                                      mean=mean.astype(np.float32).tobytes()))
+            session.execute(update(SecureSessionMember)
+                            .where(SecureSessionMember.session_id == session_id)  # type: ignore
+                            .values(masked=None))
+            if not SecureSession.transition(session, session_id, SecureSessionStatus.summing,
+                                            SecureSessionStatus.summed, finished_at=utcnow()):
                 session.rollback()
-                record.outcome = SecureAggregationOutcome.skipped_not_aggregating
+                record.outcome = SecureSumOutcome.skipped_not_summing
                 return
             session.commit()
-    except IntegrityError:
-        raise ValueError(f"base {plan.base_id} already aggregated") from None
-
-    with timer(SecureAggregationStage.clear_limits):
-        clear_model_limits(plan.model_key)
-    record.outcome = SecureAggregationOutcome.aggregated
+    record.outcome = SecureSumOutcome.summed
 
 
-@app.task(name=SECURE_AGG_TASK, ignore_result=True)
-def secure_aggregation(round_id: int) -> None:
-    timer = Timer(*STAGES)
-    record = SecureAggregationRecord(round_id)
-    if not SecureRound.claim(round_id, SecureRoundStatus.sealed, SecureRoundStatus.aggregating,
-                             aggregating_at=utcnow()):
-        record.outcome = SecureAggregationOutcome.skipped_not_sealed
+@app.task(name=SECURE_SUM_TASK, ignore_result=True)
+def secure_session_sum(session_id: int) -> None:
+    timer = Timer(*SecureSumStage)
+    record = SecureSumRecord(session_id)
+    if not SecureSession.claim(session_id, SecureSessionStatus.sealed,
+                               SecureSessionStatus.summing, summing_at=utcnow()):
+        record.outcome = SecureSumOutcome.skipped_not_sealed
     else:
         try:
-            _aggregate(round_id, timer, record)
+            _sum(session_id, timer, record)
         except Exception:
-            log.exception("secure round %s failed", round_id)
-            record.outcome = SecureAggregationOutcome.failed
-            model_key = _fail_round(round_id, SecureRoundStatus.aggregating)
-            if model_key is not None:
-                clear_model_limits(model_key)
-    write(SECURE_AGG_TASK, record, timer)
+            log.exception("secure session %s failed", session_id)
+            record.outcome = SecureSumOutcome.failed
+            SecureSession.claim(session_id, SecureSessionStatus.summing,
+                                SecureSessionStatus.failed, finished_at=utcnow())
+    write(SECURE_SUM_TASK, record, timer)
 
 
-def _read_sweep() -> tuple[list[RoundState], dict[str, int | None]]:
+def _read_sweep() -> tuple[list[SessionState], dict[str, int | None]]:
     with Session(engine) as session:
         rows = session.execute(
-            select(SecureRound.id, SecureRound.model_key, SecureRound.status,
-                   SecureRound.base_weights_id,
-                   func.count(SecureRoundMember.user_id),
-                   func.count(SecureRoundMember.masked),
-                   SecureRound.member_count, SecureRound.created_at,
-                   SecureRound.sealed_at, SecureRound.aggregating_at)
-            .outerjoin(SecureRoundMember,
-                       SecureRoundMember.round_id == SecureRound.id)  # type: ignore[arg-type]
-            .where(SecureRound.status.in_((SecureRoundStatus.open,  # type: ignore[attr-defined]
-                                           SecureRoundStatus.sealed,
-                                           SecureRoundStatus.aggregating)))
-            .group_by(SecureRound.id)).all()
-        rounds = [RoundState(*row) for row in rows]
+            select(SecureSession.id, SecureSession.model_key, SecureSession.status,
+                   SecureSession.base_weights_id,
+                   func.count(SecureSessionMember.user_id),
+                   func.count(SecureSessionMember.masked),
+                   SecureSession.member_count, SecureSession.created_at,
+                   SecureSession.sealed_at, SecureSession.summing_at)
+            .outerjoin(SecureSessionMember,
+                       SecureSessionMember.session_id == SecureSession.id)  # type: ignore[arg-type]
+            .where(SecureSession.status.in_((SecureSessionStatus.open,  # type: ignore[attr-defined]
+                                             SecureSessionStatus.sealed,
+                                             SecureSessionStatus.summing)))
+            .group_by(SecureSession.id)).all()
+        sessions = [SessionState(*row) for row in rows]
         active = {}
-        for key in {r.model_key for r in rounds}:
+        for key in {s.model_key for s in sessions}:
             weights = get_latest_weights(session, key)
             active[key] = weights.id if weights is not None else None
-    return rounds, active
+    return sessions, active
+
+
+def _fail(session: Session, action: SweepAction, now: datetime) -> list[int]:
+    if not SecureSession.transition(session, action.session_id, action.frm,
+                                    SecureSessionStatus.failed, finished_at=now):
+        return []
+    released = session.execute(
+        delete(SecureSessionMember)
+        .where(SecureSessionMember.session_id == action.session_id)  # type: ignore
+        .returning(SecureSessionMember.user_id, SecureSessionMember.submitted_at)).all()
+    return [user_id for user_id, submitted_at in released
+            if action.frm is SecureSessionStatus.open or submitted_at is not None]
 
 
 @app.task(name=SECURE_SWEEP_TASK, ignore_result=True)
-def secure_round_sweep() -> None:
+def secure_session_sweep() -> None:
     now = utcnow()
-    rounds, active = _read_sweep()
+    sessions, active = _read_sweep()
     dispatch: list[int] = []
-    failed_models: set[str] = set()
 
-    for action in sweep_actions(rounds, active, now, POLICY):
+    for action in sweep_actions(sessions, active, now, POLICY):
         if action.action is Action.dispatch:
-            dispatch.append(action.round_id)
+            dispatch.append(action.session_id)
             continue
+        cleared: list[int] = []
         with Session(engine) as session:
             if action.action is Action.seal:
-                done = seal_round(session, action.round_id) is not None
+                seal_session(session, action.session_id)
+            elif action.action is Action.retry:
+                SecureSession.transition(session, action.session_id, action.frm,
+                                         SecureSessionStatus.sealed)
             else:
-                done = SecureRound.transition(session, action.round_id, action.frm,
-                                              SecureRoundStatus.failed, finished_at=now)
+                cleared = _fail(session, action, now)
             session.commit()
-        if done and action.action is not Action.seal:
-            failed_models.add(action.model_key)
+        if cleared:
+            clear_user_limits(action.model_key, cleared)
 
-    for round_id in dispatch:
-        secure_aggregation.delay(round_id)
-    for key in failed_models:
-        clear_model_limits(key)
+    for session_id in dispatch:
+        secure_session_sum.delay(session_id)

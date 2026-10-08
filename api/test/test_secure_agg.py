@@ -3,7 +3,7 @@
 They pin the two properties the whole scheme rests on: the pairwise masks cancel
 exactly across the full cohort, and what survives is the plaintext average up
 to quantization error. The dropout case documents *why* a missing member fails the
-round rather than degrading gracefully.
+session rather than degrading gracefully.
 """
 
 import numpy as np
@@ -37,7 +37,7 @@ def test_masks_cancel_and_recover_mean():
     for uid, (sk, _) in enumerate(keys):
         q = quantize(deltas[uid], B, scale)
         quantized.append(q)
-        masked.append(mask_vector(q, uid, roster, sk, round_id=7))
+        masked.append(mask_vector(q, uid, roster, sk, session_id=7))
 
     assert np.array_equal(ring_sum(masked), ring_sum(quantized))
 
@@ -47,18 +47,18 @@ def test_masks_cancel_and_recover_mean():
     assert np.max(np.abs(recovered - plaintext_mean)) < 2.0 / scale + 1e-6
 
 
-def test_fresh_round_gives_independent_masks():
+def test_fresh_session_gives_independent_masks():
     n, m, B = 3, 64, 1.0
     keys, roster, deltas, scale = _cohort(n, m, B, seed=2)
-    y_a = mask_vector(quantize(deltas[0], B, scale), 0, roster, keys[0][0], round_id=1)
-    y_b = mask_vector(quantize(deltas[0], B, scale), 0, roster, keys[0][0], round_id=2)
+    y_a = mask_vector(quantize(deltas[0], B, scale), 0, roster, keys[0][0], session_id=1)
+    y_b = mask_vector(quantize(deltas[0], B, scale), 0, roster, keys[0][0], session_id=2)
     assert not np.array_equal(y_a, y_b)
 
 
 def test_missing_member_corrupts_the_sum():
     n, m, B = 4, 64, 1.0
     keys, roster, deltas, scale = _cohort(n, m, B, seed=3)
-    masked = [mask_vector(quantize(deltas[uid], B, scale), uid, roster, sk, round_id=9)
+    masked = [mask_vector(quantize(deltas[uid], B, scale), uid, roster, sk, session_id=9)
               for uid, (sk, _) in enumerate(keys)]
 
     partial = dequantize(ring_sum(masked[:-1]), scale, n - 1)

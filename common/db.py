@@ -33,8 +33,8 @@ class JobStatus(str, Enum):
 class SubmissionType(str, Enum):
     """How a version's weight updates are uploaded and aggregated. ``raw`` and
     ``quantize`` share a dense LE-float32 body (``quantize`` also accepts the raw
-    path); ``secure`` carries masked ring elements aggregated only inside a sealed
-    ``SecureRound`` (see shared/docs/secure-aggregation.md)."""
+    path); ``secure`` carries masked ring elements summed per ``SecureSession``
+    (see shared/docs/secure-aggregation.md)."""
 
     raw = "raw"
     quantize = "quantize"
@@ -50,16 +50,15 @@ class Artifact(str, Enum):
     quantized = "quantized"
 
 
-class SecureRoundStatus(str, Enum):
-    """Lifecycle of one secure-aggregation round. A round is a first-class object
-    (unlike the implicit window the dense paths aggregate over) because masking
-    requires the cohort and its public keys to be frozen before anyone masks."""
+class SecureSessionStatus(str, Enum):
+    """Lifecycle of one secure-aggregation session: masking needs the cohort and
+    its public keys frozen before anyone masks."""
 
     open = "open"              # accepting members (roster still mutable)
     sealed = "sealed"          # roster + keys frozen; accepting masked vectors
-    aggregating = "aggregating"  # claimed by the aggregation task
-    aggregated = "aggregated"  # summed, dequantized, baked into new weights
-    failed = "failed"          # timed out, went stale, or failed to aggregate
+    summing = "summing"        # claimed by the summing task
+    summed = "summed"          # partial result stored
+    failed = "failed"
 
 
 class IntPKModel(SQLModel):
@@ -200,37 +199,47 @@ class ClientDeltaSubmission(IntPKModel, table=True):
     __table_args__ = (UniqueConstraint("base_weights_id", "user_id"),)
 
 
-class SecureRound(IntPKModel, ClaimableModel, table=True):
-    """One secure-aggregation round, pinned to the ``base_weights`` every member
-    trains against. ``member_count`` and ``scale`` are null until seal; ``clip_bound``
-    bounds per-coordinate influence (see shared/docs/secure-aggregation.md)."""
+class SecureSession(IntPKModel, ClaimableModel, table=True):
+    """One masked-sum cohort on ``base_weights``; the round is implicit, as on the
+    dense paths. ``member_count`` and ``scale`` are null until seal."""
 
     model_key: str = Field(foreign_key="modeldefinition.key", index=True)
     version_id: int = Field(foreign_key="modelversion.id", index=True)
-    base_weights_id: int = Field(foreign_key="globalweights.id")
-    status: SecureRoundStatus = Field(default=SecureRoundStatus.open, index=True)
+    base_weights_id: int = Field(foreign_key="globalweights.id", index=True)
+    status: SecureSessionStatus = Field(default=SecureSessionStatus.open, index=True)
     clip_bound: float
     member_count: int | None = None
     scale: int | None = Field(default=None, sa_column=Column(BigInteger))
     created_at: datetime = Field(default_factory=utcnow)
     sealed_at: datetime | None = None
-    aggregating_at: datetime | None = None
+    summing_at: datetime | None = None
     finished_at: datetime | None = None
 
-    __table_args__ = (Index("uq_secureround_open_per_model", "model_key", unique=True,
+    __table_args__ = (Index("uq_securesession_open_per_base", "base_weights_id", unique=True,
                             postgresql_where=text("status = 'open'")),)
 
 
-class SecureRoundMember(SQLModel, table=True):
-    """A client's seat in a round; the (round_id, user_id) PK enforces one
-    submission per client (a second masked vector would leak a difference of two).
-    ``masked`` is the submitted vector (m LE uint32 ring elements), set once."""
+class SecureSessionMember(SQLModel, table=True):
+    """A client's seat in a session; one seat per user per base weights, so no
+    delta lands in two sums. ``masked`` is the submitted vector, set once and
+    dropped once the session is summed."""
 
-    round_id: int = Field(foreign_key="secureround.id", primary_key=True)
+    session_id: int = Field(foreign_key="securesession.id", primary_key=True)
     user_id: int = Field(foreign_key="user.id", primary_key=True)
+    base_weights_id: int = Field(foreign_key="globalweights.id")
     ka_public_key: bytes       # 65-byte uncompressed P-256 point, snapshot at join
     masked: bytes | None = None
     submitted_at: datetime | None = None
+
+    __table_args__ = (UniqueConstraint("base_weights_id", "user_id"),)
+
+
+class SecurePartial(SQLModel, table=True):
+    """A summed session's mean delta (packed float32), a row of its round."""
+
+    session_id: int = Field(foreign_key="securesession.id", primary_key=True,
+                            ondelete="CASCADE")
+    mean: bytes
 
 
 class QuantizationJob(ClaimableModel, table=True):
@@ -277,7 +286,7 @@ class Firmware(IntPKModel, table=True):
 for _blob_model, _column in ((WeightsArtifact, "data"), (QuantizationResult, "data"),
                              (Firmware, "data"), (GlobalWeights, "weights"),
                              (ClientDeltaSubmission, "deltas"),
-                             (SecureRoundMember, "masked")):
+                             (SecureSessionMember, "masked"), (SecurePartial, "mean")):
     event.listen(
         _blob_model.__table__, "after_create",  # type: ignore[attr-defined]
         DDL(f"ALTER TABLE {_blob_model.__tablename__} "
@@ -339,15 +348,14 @@ def get_latest_weights(session: Session, key: str) -> GlobalWeights | None:
     return get_version_weights(session, latest.id)
 
 
-def get_open_round(session: Session, key: str, lock: bool = False) -> "SecureRound | None":
-    """The model's current ``open`` secure round, if any. ``lock`` holds a share
-    lock on it until commit, so a concurrent seal waits for the join."""
-    stmt = (select(SecureRound)
-            .where(SecureRound.model_key == key,
-                   SecureRound.status == SecureRoundStatus.open)
-            .order_by(SecureRound.created_at.desc()))  # type: ignore[attr-defined]
+def get_open_session(session: Session, base_weights_id: int,
+                     lock: bool = False) -> SecureSession | None:
+    """The base's ``open`` secure session, if any. ``lock`` holds it exclusively
+    until commit, so joins serialize and a concurrent seal waits for them."""
+    stmt = select(SecureSession).where(SecureSession.base_weights_id == base_weights_id,
+                                       SecureSession.status == SecureSessionStatus.open)
     if lock:
-        stmt = stmt.with_for_update(read=True)
+        stmt = stmt.with_for_update()
     return session.exec(stmt).first()
 
 

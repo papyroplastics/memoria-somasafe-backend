@@ -54,24 +54,24 @@ def submit_delta(base: str, token: str, key: str, weights_id: int, body: bytes,
     resp.raise_for_status()
 
 
-def join(base: str, token: str, key: str, ka_public_key: bytes) -> dict:
+def join(base: str, token: str, key: str, weights_id: int, ka_public_key: bytes) -> dict:
     resp = requests.post(
-        f"{base}/model/secure/join/{key}", headers=auth(token),
+        f"{base}/model/secure/join/{key}/{weights_id}", headers=auth(token),
         json={"ka_public_key": base64.b64encode(ka_public_key).decode()},
     )
     resp.raise_for_status()
     return resp.json()
 
 
-def get_descriptor(base: str, token: str, round_id: int) -> dict:
-    resp = requests.get(f"{base}/model/secure/round/{round_id}", headers=auth(token))
+def get_descriptor(base: str, token: str, session_id: int) -> dict:
+    resp = requests.get(f"{base}/model/secure/session/{session_id}", headers=auth(token))
     resp.raise_for_status()
     return resp.json()
 
 
-def submit_masked(base: str, token: str, round_id: int, body: bytes) -> None:
+def submit_masked(base: str, token: str, session_id: int, body: bytes) -> None:
     resp = requests.post(
-        f"{base}/model/secure/submit/{round_id}",
+        f"{base}/model/secure/submit/{session_id}",
         headers=auth(token) | OCTET_STREAM, data=body,
     )
     resp.raise_for_status()

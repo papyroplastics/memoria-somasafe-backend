@@ -1,37 +1,36 @@
 """Headless secure-aggregation correctness harness — drives the real HTTP API end to end"""
 
 import argparse
-import base64
 
 import numpy as np
+import requests
 from sqlmodel import Session
 
+from ml.aggregation import trimmed_mean
 from ml.model_list import MODELS
-from common.config import SECURE_MIN_MEMBERS, SEED
+from common.config import (
+    FED_TRIM_RATIO,
+    SECURE_CLIP_BOUND,
+    SECURE_SESSION_MIN_MEMBERS,
+    SEED,
+)
 from common.db import SubmissionType, engine, get_latest_version
 from common.ratelimit import clear_model_limits
-from common.secure_agg import (
-    dequantize,
-    generate_keypair,
-    mask_vector,
-    quantize,
-    ring_sum,
-)
+from common.secure_agg import generate_keypair
 from worker.celery_app import app
 
 from scripts.common.api import (
     DEFAULT_BASE_URL,
     download_weights,
-    get_descriptor,
     join,
     login,
     logout,
-    submit_masked,
+    wait_for_aggregation,
 )
-from scripts.common.secure import run_round, seal_round
+from scripts.common.secure import Seat, run_session, split_sessions
 
 
-def run(base: str, key: str, clients: int, rounds: int) -> None:
+def run(base: str, key: str, clients: int, session_size: int, rounds: int) -> None:
     with Session(engine) as session:
         version = get_latest_version(session, key)
         if version is None:
@@ -39,72 +38,58 @@ def run(base: str, key: str, clients: int, rounds: int) -> None:
         if version.submission_type is not SubmissionType.secure:
             raise SystemExit(f"model '{key}' is '{version.submission_type.value}', not secure")
 
-    if clients < SECURE_MIN_MEMBERS:
-        raise SystemExit(f"--clients {clients} < SECURE_MIN_MEMBERS ({SECURE_MIN_MEMBERS})")
-
-    keypairs = {f"test_{i}": generate_keypair() for i in range(1, clients + 1)}
+    users = [f"test_{i}" for i in range(1, clients + 1)]
+    keypairs = {user: generate_keypair() for user in users}
     rng = np.random.default_rng(SEED)
 
-    print(f"model={key} type=secure clients={clients} rounds={rounds} (no training)")
+    print(f"model={key} type=secure clients={clients} session_size={session_size} "
+          f"rounds={rounds} (no training)")
 
     for r in range(1, rounds + 1):
         prefix = f"round={r}/{rounds}"
-
-        round_id = None
-        seats = []
-        for i in range(1, clients + 1):
-            user = f"test_{i}"
-            token = login(base, user, user)
-            sk, pk = keypairs[user]
-            resp = join(base, token, key, pk)
-            round_id = resp["round_id"]
-            seats.append((user, token, sk, resp["user_id"]))
-
-        n = seal_round(round_id, SECURE_MIN_MEMBERS)
-        print(f"{prefix} sealed round {round_id} with {n} members")
-
-        desc = get_descriptor(base, seats[0][1], round_id)
-        m, B, scale = desc["weight_count"], desc["clip_bound"], desc["scale"]
         clear_model_limits(key)
-        raw, weights_id = download_weights(base, seats[0][1], key)
-        if weights_id != desc["base_weights_id"]:
-            raise SystemExit("served weights id != round base; client out of sync")
+        tokens = {user: login(base, user, user) for user in users}
+        raw, weights_id = download_weights(base, tokens[users[0]], key)
         base_weights = np.frombuffer(raw, dtype=np.float32)
-        roster = [(e["user_id"], base64.b64decode(e["ka_public_key"]))
-                  for e in desc["roster"]]
+        seats = [Seat(user, tokens[user], *keypairs[user],
+                      rng.uniform(-SECURE_CLIP_BOUND, SECURE_CLIP_BOUND,
+                                  base_weights.size).astype(np.float32))
+                 for user in users]
 
-        masked_vecs, deltas = [], []
-        for user, token, sk, my_id in seats:
-            delta = rng.uniform(-B, B, m).astype(np.float32)
-            q = quantize(delta, B, scale)
-            y = mask_vector(q, my_id, roster, sk, round_id)
-            submit_masked(base, token, round_id, y.astype("<u4").tobytes())
-            logout(base, token)
-            masked_vecs.append(y)
-            deltas.append(delta)
-
-        residual = float(np.max(np.abs(
-            dequantize(ring_sum(masked_vecs), scale, n)
-            - dequantize(ring_sum([quantize(d, B, scale) for d in deltas]), scale, n))))
-        print(f"{prefix} mask-cancellation residual: {residual:.3e}")
-
-        summary = run_round(app, round_id)
-        print(f"{prefix} aggregated: {summary}")
+        results = []
+        for group in split_sessions(seats, session_size, SECURE_SESSION_MIN_MEMBERS):
+            result = run_session(app, base, key, weights_id, group, SECURE_SESSION_MIN_MEMBERS)
+            print(f"{prefix} session {result.session_id}: {result.members} members, "
+                  f"mask-cancellation residual {result.residual:.3e}")
+            results.append(result)
 
         clear_model_limits(key)
-        token = login(base, "test_1", "test_1")
-        raw, _ = download_weights(base, token, key)
-        logout(base, token)
+        try:
+            join(base, tokens[users[0]], key, weights_id, keypairs[users[0]][1])
+            raise SystemExit(f"{prefix} a second join on the same weights was accepted")
+        except requests.HTTPError as exc:
+            if exc.response.status_code != 409:
+                raise
+        print(f"{prefix} second join on the same weights rejected (409)")
+
+        summary = wait_for_aggregation(app, key)
+        print(f"{prefix} aggregated: {summary['cohort']} sessions, "
+              f"{summary['submissions']} submissions")
+
+        clear_model_limits(key)
+        raw, _ = download_weights(base, tokens[users[0]], key)
+        for token in tokens.values():
+            logout(base, token)
         new_weights = np.frombuffer(raw, dtype=np.float32)
 
-        expected = base_weights + np.mean(np.stack(deltas), axis=0).astype(np.float32)
+        expected = base_weights + trimmed_mean([res.mean for res in results], FED_TRIM_RATIO)
         max_err = float(np.max(np.abs(new_weights - expected)))
-        tol = 2.0 / scale + 1e-4
+        tol = 2.0 / min(res.scale for res in results) + 1e-4
         verdict = "OK" if max_err < tol else "MISMATCH"
-        print(f"{prefix} aggregate vs plaintext mean: max_err={max_err:.3e} "
+        print(f"{prefix} aggregate vs plaintext trimmed mean: max_err={max_err:.3e} "
               f"tol={tol:.3e} [{verdict}]")
         if max_err >= tol:
-            raise SystemExit(f"{prefix} aggregation does not match the plaintext mean")
+            raise SystemExit(f"{prefix} aggregation does not match the plaintext trimmed mean")
 
 
 def main() -> None:
@@ -113,13 +98,15 @@ def main() -> None:
     parser.add_argument('model', nargs='?', default="feature-ae-secure",
                         choices=sorted(MODELS),
                         help="secure-typed model to aggregate for")
-    parser.add_argument("--clients", type=int, default=SECURE_MIN_MEMBERS,
-                        help="cohort size, one test_N user each")
+    parser.add_argument("--clients", type=int, default=9,
+                        help="clients per round, one test_N user each")
+    parser.add_argument("--session-size", type=int, default=SECURE_SESSION_MIN_MEMBERS,
+                        help="target members per session")
     parser.add_argument("--rounds", type=int, default=1, help="rounds to run")
     parser.add_argument("--base-url", default=DEFAULT_BASE_URL, help="gateway base URL")
     args = parser.parse_args()
 
-    run(args.base_url, args.model, args.clients, args.rounds)
+    run(args.base_url, args.model, args.clients, args.session_size, args.rounds)
 
 
 if __name__ == "__main__":
