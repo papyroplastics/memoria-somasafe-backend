@@ -13,7 +13,7 @@ from ml.sources.common import pool
 from ml.models.common import Trainer
 from ml.saving import load_weights, save_artifacts, weights_path
 from ml.training import normal_loop, federated_loop, History
-from ml.model_list import MODELS
+from ml.model_list import BASE_MODELS, MODELS
 from common.config import MODELS_DIR, DATASETS_DIR, SEED
 from ..common.plots import plot_history
 from ..common.reports import RUN_MANIFEST, get_report_dir, loop_dir, write_history_csv, write_yaml
@@ -75,9 +75,67 @@ def run_loop(trainer: Trainer, loop: str, eval_ids: list[str],
     return history, eval_dataset, train_ids, [sid for sid in sids if sid in held]
 
 
+def train(model: str, args: argparse.Namespace) -> None:
+    data_dir = args.dataset_dir
+    spec = MODELS[model]
+
+    result_dir = MODELS_DIR / spec.artifact_key
+    result_dir.mkdir(parents=True, exist_ok=True)
+
+    report_dir = get_report_dir(model, loop_dir(args.loop, args.tag))
+
+    trainer = spec.trainer_cls(spec.model_cls(batch_size=args.batch_size), data_dir)
+
+    if args.load_weights:
+        source = weights_path(result_dir, args.tag)
+        if not source.exists():
+            raise SystemExit(f"no weights to continue from at {source}")
+        trainer.model.restore(load_weights(source))
+        print(f"Loaded weights from {source}")
+
+    selection = args.eval_subjects if args.eval_subjects is not None else trainer.default_holdout
+    eval_ids = parse_eval_selection(selection, trainer.subject_ids())
+    history, eval_dataset, train_ids, held_ids = run_loop(
+        trainer, args.loop, eval_ids, args.epochs, args.local_epochs)
+
+    batch_size = trainer.model.batch_size
+
+    postfix = f'_{args.tag}' if args.tag else ''
+    save_artifacts(trainer, result_dir, postfix, tflite=not args.no_tflite)
+
+    if args.epochs == 0:
+        return
+
+    write_history_csv(history, report_dir)
+    if eval_dataset is not None:
+        plot_history(history, trainer.primary_metric, report_dir)
+        trainer.report(report_dir, eval_dataset)
+
+    _, final_loss, final_metrics = history[-1]
+    write_yaml(report_dir / RUN_MANIFEST, {
+        'model': model,
+        'loop': args.loop,
+        'tag': args.tag,
+        'metric': trainer.primary_metric,
+        'epochs': args.epochs,
+        'step_unit': 'round' if args.loop == 'federated' else 'epoch',
+        'local_epochs': args.local_epochs if args.loop == 'federated' else None,
+        'clients': len(train_ids) if args.loop == 'federated' else None,
+        'train_subjects': train_ids,
+        'eval_subjects': held_ids,
+        'batch_size': batch_size,
+        'dataset': trainer.training_key,
+        'dataset_dir': args.dataset_dir,
+        'seed': SEED,
+        'history': 'training.csv',
+        'final': {'loss': final_loss, **final_metrics},
+    })
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('model', choices=sorted(MODELS), help='Model to train')
+    parser.add_argument('model', choices=['all', *sorted(MODELS)],
+                        help="Model to train, or 'all' for every base model")
     parser.add_argument('--loop', choices=LOOP_OPTIONS, default='normal', help='Training loop')
     parser.add_argument('--eval-subjects', default=None,
                         help="Subjects held out whole for evaluation, by index into the "
@@ -102,58 +160,7 @@ if __name__ == "__main__":
                              "teacher's distilled labels")
     args = parser.parse_args()
 
-    data_dir = args.dataset_dir
-
-    spec = MODELS[args.model]
-
-    result_dir = MODELS_DIR / spec.artifact_key
-    result_dir.mkdir(parents=True, exist_ok=True)
-
-    report_dir = get_report_dir(args.model, loop_dir(args.loop, args.tag))
-
-    trainer = spec.trainer_cls(spec.model_cls(batch_size=args.batch_size), data_dir)
-
-    if args.load_weights:
-        source = weights_path(result_dir, args.tag)
-        if not source.exists():
-            raise SystemExit(f"no weights to continue from at {source}")
-        trainer.model.restore(load_weights(source))
-        print(f"Loaded weights from {source}")
-
-    selection = args.eval_subjects if args.eval_subjects is not None else trainer.default_holdout
-    eval_ids = parse_eval_selection(selection, trainer.subject_ids())
-    history, eval_dataset, train_ids, held_ids = run_loop(
-        trainer, args.loop, eval_ids, args.epochs, args.local_epochs)
-
-    batch_size = trainer.model.batch_size
-
-    postfix = f'_{args.tag}' if args.tag else ''
-    save_artifacts(trainer, result_dir, postfix, tflite=not args.no_tflite)
-
-    if args.epochs == 0:
-        exit()
-
-    write_history_csv(history, report_dir)
-    if eval_dataset is not None:
-        plot_history(history, trainer.primary_metric, report_dir)
-        trainer.report(report_dir, eval_dataset)
-
-    _, final_loss, final_metrics = history[-1]
-    write_yaml(report_dir / RUN_MANIFEST, {
-        'model': args.model,
-        'loop': args.loop,
-        'tag': args.tag,
-        'metric': trainer.primary_metric,
-        'epochs': args.epochs,
-        'step_unit': 'round' if args.loop == 'federated' else 'epoch',
-        'local_epochs': args.local_epochs if args.loop == 'federated' else None,
-        'clients': len(train_ids) if args.loop == 'federated' else None,
-        'train_subjects': train_ids,
-        'eval_subjects': held_ids,
-        'batch_size': batch_size,
-        'dataset': trainer.training_key,
-        'dataset_dir': args.dataset_dir,
-        'seed': SEED,
-        'history': 'training.csv',
-        'final': {'loss': final_loss, **final_metrics},
-    })
+    models = list(BASE_MODELS) if args.model == 'all' else [args.model]
+    for model in models:
+        print(f"Training {model}")
+        train(model, args)
