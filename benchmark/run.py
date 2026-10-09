@@ -2,27 +2,29 @@ import argparse
 import csv
 import json
 import math
+import os
+import shutil
 import subprocess
 import sys
-import tarfile
 import time
 from datetime import UTC, datetime
 from pathlib import Path
 
 import redis
-from dotenv import dotenv_values
 from sqlalchemy import func, select
 from sqlmodel import Session
 
 from benchmark import check, export, reset
 from common.celery_tasks import HEAVY_QUEUE, LIGHT_QUEUE
-from common.config import BROKER_URL, RESULTS_DIR
+from common.config import BROKER_URL, FED_AGG_INTERVAL_SECONDS, RESULTS_DIR, WORKER_METRICS_DIR
 from common.db import (
+    GlobalWeights,
     JobStatus,
     ModelVersion,
     QuantizationJob,
-    SecureRound,
-    SecureRoundStatus,
+    SecurePartial,
+    SecureSession,
+    SecureSessionStatus,
     SubmissionType,
     User,
     engine,
@@ -40,10 +42,10 @@ SPLITS = {
 }
 NATIVE = "native"
 TOPOLOGIES = ("1x1", "2x2")
-SECURE_ROUND_COLUMNS = ("id", "model_key", "status", "member_count", "created_at",
-                        "sealed_at", "aggregating_at", "finished_at")
+SECURE_SESSION_COLUMNS = ("id", "model_key", "status", "base_weights_id", "member_count",
+                          "created_at", "sealed_at", "summing_at", "finished_at")
 UNFINISHED_JOBS = (JobStatus.pending, JobStatus.running)
-UNFINISHED_ROUNDS = (SecureRoundStatus.open, SecureRoundStatus.sealed, SecureRoundStatus.aggregating)
+UNFINISHED_SESSIONS = (SecureSessionStatus.sealed, SecureSessionStatus.summing)
 SETTLE_POLL_SECONDS = 5
 
 
@@ -106,9 +108,16 @@ def idle(broker: redis.Redis) -> bool:
     with Session(engine) as session:
         jobs = session.execute(select(func.count()).select_from(QuantizationJob)
                                .where(QuantizationJob.status.in_(UNFINISHED_JOBS))).scalar_one()  # type: ignore[attr-defined]
-        rounds = session.execute(select(func.count()).select_from(SecureRound)
-                                 .where(SecureRound.status.in_(UNFINISHED_ROUNDS))).scalar_one()  # type: ignore[attr-defined]
-    return jobs == 0 and rounds == 0
+        sessions = session.execute(select(func.count()).select_from(SecureSession)
+                                   .where(SecureSession.status.in_(UNFINISHED_SESSIONS))).scalar_one()  # type: ignore[attr-defined]
+        partials = session.execute(
+            select(func.count()).select_from(SecurePartial)
+            .join(SecureSession, SecureSession.id == SecurePartial.session_id)  # type: ignore[arg-type]
+            .where(~select(GlobalWeights.id)
+                   .where(GlobalWeights.parent_weights_id == SecureSession.base_weights_id,
+                          GlobalWeights.valid == True)
+                   .exists())).scalar_one()
+    return jobs == 0 and sessions == 0 and partials == 0
 
 
 def settle(load_end: float, interval: float, timeout: float) -> bool:
@@ -120,26 +129,17 @@ def settle(load_end: float, interval: float, timeout: float) -> bool:
     return False
 
 
-def save_secure_rounds(path: Path) -> int:
-    columns = [getattr(SecureRound, column) for column in SECURE_ROUND_COLUMNS]
+def save_secure_sessions(path: Path) -> int:
+    columns = [getattr(SecureSession, column) for column in SECURE_SESSION_COLUMNS]
     with Session(engine) as session:
-        rows = session.execute(select(*columns).order_by(SecureRound.id)).all()  # type: ignore[arg-type]
+        rows = session.execute(select(*columns).order_by(SecureSession.id)).all()  # type: ignore[arg-type]
     with path.open("w", newline="") as file:
         writer = csv.writer(file)
-        writer.writerow(SECURE_ROUND_COLUMNS)
+        writer.writerow(SECURE_SESSION_COLUMNS)
         for row in rows:
             writer.writerow([value.isoformat() if isinstance(value, datetime)
                              else getattr(value, "value", value) for value in row])
     return len(rows)
-
-
-def copy_worker_metrics(volume: str, destination: Path) -> None:
-    destination.mkdir(parents=True, exist_ok=True)
-    export_volume = subprocess.Popen(["podman", "volume", "export", volume], stdout=subprocess.PIPE)
-    with tarfile.open(fileobj=export_volume.stdout, mode="r|") as archive:
-        archive.extractall(destination, filter="data")
-    if export_volume.wait() != 0:
-        raise SystemExit(f"could not export volume {volume}")
 
 
 def write_manifest(path: Path, manifest: dict) -> None:
@@ -158,14 +158,13 @@ def main() -> None:
                         help="<seconds>:<active users> stages; every user logs in during the first one")
     parser.add_argument("--spawn-rate", type=float, default=2.0, help="users (logins) per second")
     parser.add_argument("--processes", type=int, default=2, help="Locust worker processes")
-    parser.add_argument("--round-failure", type=float, default=0.1,
-                        help="probability of a secure round failing on the seal timeout")
+    parser.add_argument("--session-failure", type=float, default=0.1,
+                        help="probability of a secure session failing on the seal timeout")
     parser.add_argument("--settle-timeout", type=float, help="seconds, defaults to three aggregation intervals")
-    parser.add_argument("--host", default="http://localhost:8000")
-    parser.add_argument("--prometheus", default="http://localhost:9090")
-    parser.add_argument("--env-file", type=Path, default=Path("prod/local.env"))
-    parser.add_argument("--metrics-volume", default="backend_worker_metrics",
-                        help="podman volume holding the worker metrics, empty to skip copying it")
+    parser.add_argument("--host", default=os.environ.get("BENCH_API_URL", "http://localhost:8000"))
+    parser.add_argument("--prometheus", default=os.environ.get("BENCH_PROMETHEUS_URL", "http://localhost:9090"))
+    parser.add_argument("--metrics-dir", default=WORKER_METRICS_DIR,
+                        help="directory holding the worker metrics, empty to skip copying it")
     args = parser.parse_args()
 
     topology = args.topology
@@ -177,7 +176,7 @@ def main() -> None:
                          f"{args.spawn_rate:g}/s take {login_seconds:g}s")
     models = select_models(args.split, args.submission, args.models)
     check_users(users, args.processes)
-    interval = float(dotenv_values(args.env_file).get("FED_AGG_INTERVAL_SECONDS") or 86400)
+    interval = float(FED_AGG_INTERVAL_SECONDS)
 
     label = "custom" if args.models else args.split
     run_id = args.run_id or f"{datetime.now():%Y%m%d-%H%M%S}-{topology}-{label}-{args.submission}"
@@ -201,7 +200,7 @@ def main() -> None:
         "models": models,
         "load": {"users": users, "spawn_rate": args.spawn_rate, "stages": args.stages,
                  "processes": args.processes, "interval": interval,
-                 "round_failure": args.round_failure, "host": args.host},
+                 "session_failure": args.session_failure, "host": args.host},
         "stages": [{"start": iso(begin), "end": iso(end), "active": active}
                    for (_, active), begin, end in zip(stages, boundaries, boundaries[1:])],
         "start": iso(schedule_start),
@@ -216,7 +215,7 @@ def main() -> None:
         "--host", args.host, "--users", str(users), "--spawn-rate", str(args.spawn_rate),
         "--run-time", f"{math.ceil(boundaries[-1] - schedule_start)}s", "--processes", str(args.processes),
         "--run-dir", str(run_dir), "--models", ",".join(models), "--interval", str(interval),
-        "--user-stride", str(args.processes), "--round-failure", str(args.round_failure),
+        "--user-stride", str(args.processes), "--session-failure", str(args.session_failure),
         "--stages", args.stages, "--schedule-start", str(schedule_start),
     ])
     load_end = time.time()
@@ -224,18 +223,18 @@ def main() -> None:
     manifest["locust_exit_code"] = locust.returncode
     write_manifest(manifest_path, manifest)
 
-    print("waiting for the queues and rounds to settle")
+    print("waiting for the queues and secure sessions to settle")
     manifest["settled"] = settle(load_end, interval, args.settle_timeout or 3 * interval)
     manifest["end"] = iso(time.time())
     write_manifest(manifest_path, manifest)
     if not manifest["settled"]:
         print("the stack did not settle before the timeout")
 
-    print(f"saved {save_secure_rounds(run_dir / 'secure_rounds.csv')} secure round(s)")
-    if args.metrics_volume:
-        copy_worker_metrics(args.metrics_volume, run_dir / "worker_metrics")
+    print(f"saved {save_secure_sessions(run_dir / 'secure_sessions.csv')} secure session(s)")
+    if args.metrics_dir:
+        shutil.copytree(args.metrics_dir, run_dir / "worker_metrics", dirs_exist_ok=True)
     export.dump(run_dir, args.prometheus)
-    check.run(run_dir, args.prometheus, args.env_file)
+    check.run(run_dir, args.prometheus)
     print(f"run artifacts in {run_dir}, plot with `uv run -m benchmark.export {run_id}`")
 
 

@@ -70,6 +70,19 @@ services:
       celery --app worker.celery_app worker --queues heavy -E
       --concurrency ${WORKER_CONCURRENCY:-2} --loglevel=info
 
+  bench:
+    image: ${REGISTRY:-localhost}/somasafe-bench:${TAG:-latest}
+    profiles: [bench]
+    build:
+      context: .
+      dockerfile: benchmark/bench.Containerfile
+    env_file: ${PROD_ENV_FILE:?}
+    environment:
+      WORKER_METRICS_DIR: /var/lib/worker-metrics
+    volumes:
+      - ./results:/app/results
+      - worker_metrics:/var/lib/worker-metrics:ro
+
   caddy:
     image: docker.io/library/caddy:2.11.4-alpine
     profiles: [edge]

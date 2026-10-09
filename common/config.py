@@ -99,11 +99,12 @@ SECURE_CLIP_BOUND = float(os.environ.get("SECURE_CLIP_BOUND", 1.0))
 SECURE_SESSION_MIN_MEMBERS = int(os.environ.get("SECURE_SESSION_MIN_MEMBERS", 3))
 # The join that fills a session to this size seals it.
 SECURE_SESSION_MAX_MEMBERS = int(os.environ.get("SECURE_SESSION_MAX_MEMBERS", 10))
-# The sweep seals an open session after the open timeout if it has the minimum
-# (fails it otherwise), and fails a sealed one still missing submissions after the
-# seal timeout.
-SECURE_SESSION_OPEN_TIMEOUT_SECONDS = int(os.environ.get("SECURE_SESSION_OPEN_TIMEOUT_SECONDS", MINUTE * 10))
-SECURE_SESSION_SEAL_TIMEOUT_SECONDS = int(os.environ.get("SECURE_SESSION_SEAL_TIMEOUT_SECONDS", MINUTE * 5))
+# The sweep seals an open session with the minimum members after the open seal timeout,
+# fails one below the minimum after the open fail timeout, and fails a sealed one still
+# missing submissions after the sealed fail timeout.
+SECURE_SESSION_OPEN_SEAL_TIMEOUT_SECONDS = int(os.environ.get("SECURE_SESSION_OPEN_SEAL_TIMEOUT_SECONDS", MINUTE * 10))
+SECURE_SESSION_OPEN_FAIL_TIMEOUT_SECONDS = int(os.environ.get("SECURE_SESSION_OPEN_FAIL_TIMEOUT_SECONDS", MINUTE * 12))
+SECURE_SESSION_SEALED_FAIL_TIMEOUT_SECONDS = int(os.environ.get("SECURE_SESSION_SEALED_FAIL_TIMEOUT_SECONDS", MINUTE * 5))
 SECURE_SESSION_SWEEP_INTERVAL_SECONDS = int(os.environ.get("SECURE_SESSION_SWEEP_INTERVAL_SECONDS", 30))
 
 # --- Auth (stateful opaque tokens: access in Redis, refresh in Postgres — see

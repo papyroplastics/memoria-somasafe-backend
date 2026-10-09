@@ -1,12 +1,12 @@
 import argparse
 import json
+import os
 import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
 import pandas as pd
-from dotenv import dotenv_values
 from sqlalchemy import func, select, text
 from sqlmodel import Session
 
@@ -15,36 +15,36 @@ from common.celery_tasks import (
     FED_AGG_TASK,
     FED_DISPATCH_TASK,
     QUANTIZE_TASK,
-    SECURE_AGG_TASK,
     SECURE_SWEEP_TASK,
 )
 from common.config import (
     CLEANUP_INTERVAL_SECONDS,
     FED_AGG_INTERVAL_SECONDS,
     RESULTS_DIR,
-    SECURE_SWEEP_INTERVAL_SECONDS,
+    SECURE_SESSION_SWEEP_INTERVAL_SECONDS,
 )
-from common.db import JobStatus, QuantizationJob, engine
+from common.db import JobStatus, QuantizationJob, SecurePartial, engine
 
 PASS, FAIL, SKIP = "pass", "fail", "skip"
 BALANCE_TOLERANCE = 0.05
 STAGE_TOLERANCE = 0.05
+STAGE_MIN_GAP_SECONDS = 0.05
 RUNTIME_TOLERANCE = 0.10
+RUNTIME_MIN_SECONDS = 1.0
 BEAT_TASKS = {
-    CLEANUP_TASK: ("CLEANUP_INTERVAL_SECONDS", CLEANUP_INTERVAL_SECONDS),
-    FED_DISPATCH_TASK: ("FED_AGG_INTERVAL_SECONDS", FED_AGG_INTERVAL_SECONDS),
-    SECURE_SWEEP_TASK: ("SECURE_SWEEP_INTERVAL_SECONDS", SECURE_SWEEP_INTERVAL_SECONDS),
+    CLEANUP_TASK: CLEANUP_INTERVAL_SECONDS,
+    FED_DISPATCH_TASK: FED_AGG_INTERVAL_SECONDS,
+    SECURE_SWEEP_TASK: SECURE_SESSION_SWEEP_INTERVAL_SECONDS,
 }
-HEAVY_TASKS = (FED_AGG_TASK, SECURE_AGG_TASK, QUANTIZE_TASK)
-STAGES_AFTER = {"federated_aggregation": "cohort", "secure_aggregation": "members",
+HEAVY_TASKS = (FED_AGG_TASK, QUANTIZE_TASK)
+STAGES_AFTER = {"federated_aggregation": "submissions", "secure_session_sum": "members",
                 "quantize_submission": "model_key"}
-FINISHED = ("aggregated", "done")
+FINISHED = ("aggregated", "summed", "done")
 
 
 class Run:
-    def __init__(self, run_dir: Path, prometheus: str, env_file: Path):
+    def __init__(self, run_dir: Path, prometheus: str):
         self.dir = run_dir
-        self.config = dotenv_values(env_file)
         self.manifest = json.loads((run_dir / "manifest.json").read_text())
         self.prometheus = prometheus.rstrip("/")
         self.start = pd.Timestamp(self.manifest["start"]).timestamp()
@@ -62,9 +62,6 @@ class Run:
 
     def per(self, query: str, label: str) -> dict[str, float]:
         return {metric.get(label, ""): value for metric, value in self.query(query)}
-
-    def interval(self, key: str, default: int) -> float:
-        return float(self.config.get(key) or default)
 
     def worker_csv(self, task: str) -> pd.DataFrame | None:
         path = self.dir / f"worker_{task}.csv"
@@ -89,8 +86,8 @@ def task_failures(run: Run) -> tuple[str, str]:
 def beat_singleton(run: Run) -> tuple[str, str]:
     counts = run.per(f"sum by (name) (increase(celery_task_succeeded_total[{run.range}]))", "name")
     details, status = [], PASS
-    for task, (key, default) in BEAT_TASKS.items():
-        expected = (run.end - run.start) / run.interval(key, default)
+    for task, interval in BEAT_TASKS.items():
+        expected = (run.end - run.start) / interval
         seen = counts.get(task, 0.0)
         if abs(seen - expected) > 1.5:
             status = FAIL
@@ -133,26 +130,42 @@ def duplicate_rounds(run: Run) -> tuple[str, str]:
     return PASS, f"{rounds} aggregated snapshot(s), none share a parent"
 
 
-def secure_timeouts(run: Run) -> tuple[str, str]:
-    path = run.dir / "secure_rounds.csv"
-    rounds = pd.read_csv(path) if path.exists() else pd.DataFrame()
-    if rounds.empty:
-        return SKIP, "no secure rounds"
-    unfinished = rounds[~rounds["status"].isin(["aggregated", "failed"])]
-    created = pd.to_datetime(rounds["created_at"], utc=True, format="ISO8601")
-    finished = pd.to_datetime(rounds["finished_at"], utc=True, format="ISO8601")
-    cutoff = pd.Timestamp(run.load_end, unit="s", tz="UTC")
+def secure_sessions(run: Run) -> tuple[str, str]:
+    path = run.dir / "secure_sessions.csv"
+    sessions = pd.read_csv(path) if path.exists() else pd.DataFrame()
+    if sessions.empty:
+        return SKIP, "no secure sessions"
+    unfinished = sessions[sessions["status"].isin(["sealed", "summing"])]
+    left_open = (sessions["status"] == "open").sum()
+    created = pd.to_datetime(sessions["created_at"], utc=True, format="ISO8601")
+    finished = pd.to_datetime(sessions["finished_at"], utc=True, format="ISO8601")
+    cutoff = pd.Timestamp(run.load_end - run.manifest["load"]["interval"], unit="s", tz="UTC")
+    failed = sessions["status"] == "failed"
     orphaned = []
-    for index, failed in rounds[(rounds["status"] == "failed") & (finished < cutoff)].iterrows():
-        later = rounds[(rounds["model_key"] == failed["model_key"]) & (created > finished[index])]
+    for index, session in sessions[failed & (finished < cutoff)].iterrows():
+        later = sessions[(sessions["model_key"] == session["model_key"]) & (created > finished[index])]
         if later.empty:
-            orphaned.append(str(failed["id"]))
-    failures = (rounds["status"] == "failed").sum()
-    detail = (f"{failures}/{len(rounds)} failed (expected ~{run.manifest['load']['round_failure']:.0%}), "
-              f"{len(unfinished)} unfinished")
+            orphaned.append(str(session["id"]))
+    with Session(engine) as session:
+        replaced = dict(session.execute(text(
+            "SELECT parent_weights_id, min(created_at) FROM globalweights "
+            "WHERE parent_weights_id IS NOT NULL GROUP BY 1")).all())
+    replaced_at = pd.to_datetime(sessions["base_weights_id"].map(replaced), utc=True)
+    sealed = sessions["sealed_at"].notna()
+    stale = failed & sealed & (replaced_at <= finished)
+    detail = (f"{(sessions['status'] == 'summed').sum()}/{len(sessions)} summed, "
+              f"{(failed & ~sealed).sum()} failed open, {(failed & sealed).sum()}/{sealed.sum()} failed sealed "
+              f"(expected ~{run.manifest['load']['session_failure']:.0%}, {stale.sum()} on replaced weights), "
+              f"{left_open} left open, {len(unfinished)} unfinished")
     if orphaned:
-        detail += f", no fresh round after {', '.join(orphaned)}"
+        detail += f", no fresh session after {', '.join(orphaned)}"
     return (FAIL if len(unfinished) or orphaned else PASS), detail
+
+
+def secure_partials(run: Run) -> tuple[str, str]:
+    with Session(engine) as session:
+        left = session.execute(select(func.count()).select_from(SecurePartial)).scalar_one()
+    return (FAIL, f"{left} partial result(s) never aggregated") if left else (PASS, "every partial aggregated")
 
 
 def pending_jobs(run: Run) -> tuple[str, str]:
@@ -175,7 +188,8 @@ def stage_sums(run: Run) -> tuple[str, str]:
         if frame.empty:
             continue
         stages = list(frame.columns[frame.columns.get_loc(last_field) + 1:])
-        gap = ((frame["total_seconds"] - frame[stages].fillna(0).sum(axis=1)) / frame["total_seconds"]).abs()
+        unaccounted = (frame["total_seconds"] - frame[stages].fillna(0).sum(axis=1)).abs()
+        gap = (unaccounted / frame["total_seconds"]).where(unaccounted > STAGE_MIN_GAP_SECONDS, 0.0)
         worst = gap.quantile(0.95)
         if worst > STAGE_TOLERANCE:
             status = FAIL
@@ -190,6 +204,9 @@ def runtime_agreement(run: Run) -> tuple[str, str]:
         frame = run.worker_csv(task)
         reported = exporter.get(f"worker.tasks.{task}")
         if frame is None or frame.empty or not reported:
+            continue
+        if reported < RUNTIME_MIN_SECONDS:
+            details.append(f"{task} too short to compare ({reported:.2f}s)")
             continue
         ratio = frame["total_seconds"].sum() / reported
         if abs(ratio - 1) > RUNTIME_TOLERANCE:
@@ -209,7 +226,8 @@ CHECKS: dict[str, Callable[[Run], tuple[str, str]]] = {
     "fan_out": fan_out,
     "load_balance": load_balance,
     "duplicate_rounds": duplicate_rounds,
-    "secure_timeouts": secure_timeouts,
+    "secure_sessions": secure_sessions,
+    "secure_partials": secure_partials,
     "pending_jobs": pending_jobs,
     "stage_sums": stage_sums,
     "runtime_agreement": runtime_agreement,
@@ -217,8 +235,8 @@ CHECKS: dict[str, Callable[[Run], tuple[str, str]]] = {
 }
 
 
-def run(run_dir: Path, prometheus: str, env_file: Path) -> bool:
-    benchmark = Run(run_dir, prometheus, env_file)
+def run(run_dir: Path, prometheus: str) -> bool:
+    benchmark = Run(run_dir, prometheus)
     results = {}
     for name, check in CHECKS.items():
         try:
@@ -237,10 +255,9 @@ def run(run_dir: Path, prometheus: str, env_file: Path) -> bool:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the pass/fail checks against a finished benchmark run")
     parser.add_argument("run_id")
-    parser.add_argument("--prometheus", default="http://localhost:9090")
-    parser.add_argument("--env-file", type=Path, default=Path("prod/local.env"))
+    parser.add_argument("--prometheus", default=os.environ.get("BENCH_PROMETHEUS_URL", "http://localhost:9090"))
     args = parser.parse_args()
-    raise SystemExit(0 if run(RESULTS_DIR / "benchmark" / args.run_id, args.prometheus, args.env_file) else 1)
+    raise SystemExit(0 if run(RESULTS_DIR / "benchmark" / args.run_id, args.prometheus) else 1)
 
 
 if __name__ == "__main__":

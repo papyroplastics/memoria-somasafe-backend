@@ -2107,6 +2107,8 @@ ml = [
 [package.dev-dependencies]
 bench = [
     { name = "locust" },
+    { name = "matplotlib" },
+    { name = "pandas" },
 ]
 dev = [
     { name = "fakeredis" },
@@ -2144,7 +2146,11 @@ requires-dist = [
 provides-extras = ["ml", "cuda"]
 
 [package.metadata.requires-dev]
-bench = [{ name = "locust", specifier = ">=2.46.7" }]
+bench = [
+    { name = "locust", specifier = ">=2.46.7" },
+    { name = "matplotlib", specifier = ">=3.10.9" },
+    { name = "pandas", specifier = ">=2.2" },
+]
 dev = [
     { name = "fakeredis" },
     { name = "flower" },

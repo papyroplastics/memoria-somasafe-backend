@@ -17,10 +17,10 @@ from common.db import (
     Session,
     engine,
     get_latest_weights,
+    seal_session,
     utcnow,
 )
 from common.secure_agg import generate_keypair
-from common.secure_session import seal_session
 from ..routes import secure as secure_routes
 from ..routes.secure import _open_session
 

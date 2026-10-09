@@ -10,8 +10,9 @@ from sqlmodel import Session
 from common.celery_tasks import SECURE_SUM_TASK, SECURE_SWEEP_TASK
 from common.config import (
     SECURE_SESSION_MIN_MEMBERS,
-    SECURE_SESSION_OPEN_TIMEOUT_SECONDS,
-    SECURE_SESSION_SEAL_TIMEOUT_SECONDS,
+    SECURE_SESSION_OPEN_FAIL_TIMEOUT_SECONDS,
+    SECURE_SESSION_OPEN_SEAL_TIMEOUT_SECONDS,
+    SECURE_SESSION_SEALED_FAIL_TIMEOUT_SECONDS,
     WORKER_REAP_AFTER_SECONDS,
 )
 from common.db import (
@@ -22,10 +23,10 @@ from common.db import (
     SecureSessionStatus,
     engine,
     get_latest_weights,
+    seal_session,
     utcnow,
 )
 from common.ratelimit import clear_user_limits
-from common.secure_session import seal_session
 from worker.celery_app import app
 from worker.compute import (
     Action,
@@ -41,8 +42,9 @@ log = get_task_logger(__name__)
 
 POLICY = SweepPolicy(
     min_members=SECURE_SESSION_MIN_MEMBERS,
-    open_timeout=SECURE_SESSION_OPEN_TIMEOUT_SECONDS,
-    seal_timeout=SECURE_SESSION_SEAL_TIMEOUT_SECONDS,
+    open_seal_timeout=SECURE_SESSION_OPEN_SEAL_TIMEOUT_SECONDS,
+    open_fail_timeout=SECURE_SESSION_OPEN_FAIL_TIMEOUT_SECONDS,
+    sealed_fail_timeout=SECURE_SESSION_SEALED_FAIL_TIMEOUT_SECONDS,
     summing_timeout=WORKER_REAP_AFTER_SECONDS,
 )
 

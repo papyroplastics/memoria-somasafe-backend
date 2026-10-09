@@ -5,7 +5,7 @@ from common.config import BROKER_URL, REDIS_URL
 from common.db import engine
 
 TRUNCATED = ("quantizationresult", "quantizationjob", "clientdeltasubmission",
-             "secureroundmember", "secureround", "authsession")
+             "securepartial", "securesessionmember", "securesession", "authsession")
 KOMBU_BINDINGS = b"_kombu.binding."
 
 

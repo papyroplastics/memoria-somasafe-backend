@@ -30,11 +30,11 @@ from common.db import (
     get_latest_weights,
     get_open_session,
     get_session,
+    seal_session,
     utcnow,
 )
 from common.ratelimit import RateLimit, add_usage
 from common.secure_agg import RING_MODULUS
-from common.secure_session import seal_session
 from api.lib.ratelimit import check_limit
 from api.lib.session import get_current_user_id
 from api.lib.challenge import require_device_owner

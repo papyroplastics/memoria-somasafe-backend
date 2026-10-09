@@ -6,6 +6,7 @@ import os
 import random
 import time
 from array import array
+from dataclasses import dataclass, replace
 from functools import cache
 from pathlib import Path
 from urllib.parse import urlencode
@@ -25,6 +26,7 @@ FORM = {"Content-Type": "application/x-www-form-urlencoded"}
 OCTET = {"Content-Type": "application/octet-stream"}
 PARK_SECONDS = 1.0
 GOLDEN = 0.6180339887
+OPEN = "Session is open"
 
 log = logging.getLogger(__name__)
 served: list[dict] | None = None
@@ -41,8 +43,8 @@ def add_arguments(parser) -> None:
                        help="aggregation interval in seconds, iterations are paced at it")
     group.add_argument("--user-stride", type=int, default=1,
                        help="Locust worker processes across all hosts, so test_N users never collide")
-    group.add_argument("--round-failure", type=float, default=0.1,
-                       help="probability of a secure round failing, its lowest user id never submits")
+    group.add_argument("--session-failure", type=float, default=0.1,
+                       help="probability of a secure session failing, its lowest user id never submits")
     group.add_argument("--stages", default="",
                        help="comma-separated <seconds>:<active users> stages, every user active when empty")
     group.add_argument("--schedule-start", type=float, default=0.0,
@@ -130,6 +132,15 @@ def masked_body(weight_count: int) -> bytes:
     return (array("I", [1]) * weight_count).tobytes()
 
 
+@dataclass(frozen=True)
+class Seat:
+    model_key: str
+    weights_id: int
+    session_id: int
+    user_id: int
+    submitted: bool = False
+
+
 class Client(FastHttpUser):
     spawned = 0
 
@@ -148,6 +159,8 @@ class Client(FastHttpUser):
         self.offset = (self.number * GOLDEN) % 1 * self.options.interval
         self.headers: dict[str, str] | None = None
         self.next_start: float | None = None
+        self.weights: dict[str, int] = {}
+        self.seats: dict[str, Seat] = {}
         self.login()
 
     def login(self) -> bool:
@@ -198,67 +211,79 @@ class Client(FastHttpUser):
         if self.headers is None and not self.login():
             return
 
-        jobs, rounds = [], []
+        jobs, sessions = [], []
         for model in self.models():
             key, kind = model["key"], model["submission_type"]
             weights_id = self.download(key)
             if self.headers is None:
                 return
             if kind == "secure":
-                rounds.extend(self.join(key))
+                held = self.seats.pop(key, None)
+                sessions.extend([held] if held else self.join(key, self.weights.get(key)))
             elif weights_id is not None:
                 jobs.extend(self.submit(key, kind, weights_id, model["weight_count"]))
-        self.settle(jobs, rounds, started + self.options.interval * POLL_WINDOW)
+        self.settle(jobs, sessions, started + self.options.interval * POLL_WINDOW)
 
     def download(self, key: str) -> int | None:
         resp = self.call("GET", f"/model/weights/{key}", "weights")
-        weights_id = resp.headers.get("X-Weights-ID") if resp.status_code == 200 else None
+        weights_id = int(resp.headers["X-Weights-ID"]) if resp.status_code == 200 else None
         for artifact in ARTIFACTS:
             self.call("GET", f"/model/download/{artifact}/{key}", "download/{artifact}")
-        return int(weights_id) if weights_id is not None else None
+        if weights_id is not None:
+            self.weights[key] = weights_id
+        return weights_id
 
     def submit(self, key: str, kind: str, weights_id: int, weight_count: int) -> list[str]:
         resp = self.call("POST", f"/model/submit/{kind}/{key}/{weights_id}", f"submit/{kind}",
                          data=dense_body(weight_count), headers=OCTET)
         return [resp.json()["job_id"]] if kind == "quantize" and resp.status_code == 202 else []
 
-    def join(self, key: str) -> list[tuple[str, int, int]]:
+    def join(self, key: str, weights_id: int | None) -> list[Seat]:
+        if weights_id is None:
+            return []
         ka_public_key = base64.b64encode(b"\x04" + os.urandom(64)).decode()
-        resp = self.call("POST", f"/model/secure/join/{key}", "secure/join",
+        resp = self.call("POST", f"/model/secure/join/{key}/{weights_id}", "secure/join",
                          json={"ka_public_key": ka_public_key})
         if resp.status_code != 202:
             return []
         joined = resp.json()
-        return [(key, joined["round_id"], joined["user_id"])]
+        return [Seat(key, weights_id, joined["session_id"], joined["user_id"])]
 
-    def settle(self, jobs: list[str], rounds: list[tuple[str, int, int]], deadline: float) -> None:
-        while (jobs or rounds) and self.headers is not None:
+    def settle(self, jobs: list[str], sessions: list[Seat], deadline: float) -> None:
+        while (jobs or sessions) and self.headers is not None:
             jobs = [job_id for job_id in jobs if self.quantizing(job_id)]
-            rounds = [joined for joined in rounds if self.round_open(*joined)]
-            if not (jobs or rounds) or time.time() + POLL_SECONDS > deadline:
-                return
+            sessions = [after for seat in sessions for after in self.session_step(seat)]
+            if not (jobs or sessions) or time.time() + POLL_SECONDS > deadline:
+                break
             time.sleep(POLL_SECONDS)
+        self.seats.update((seat.model_key, seat) for seat in sessions)
 
     def quantizing(self, job_id: str) -> bool:
         return self.call("GET", f"/model/quantize/result/{job_id}", "quantize/result").status_code == 202
 
-    def round_open(self, key: str, round_id: int, user_id: int) -> bool:
-        with self.client.get(f"/model/secure/round/{round_id}", name="secure/round", headers=self.headers,
-                             catch_response=True) as resp:
-            if resp.status_code == 409 and resp.json().get("detail", "").startswith("Round is open"):
+    def session_step(self, seat: Seat) -> list[Seat]:
+        with self.client.get(f"/model/secure/session/{seat.session_id}", name="secure/session",
+                             headers=self.headers, catch_response=True) as resp:
+            if resp.status_code in (404, 409):
                 resp.success()
-                return True
             if resp.status_code == 401:
                 self.headers = None
+            if resp.status_code == 404:
+                return self.join(seat.model_key, self.weights.get(seat.model_key))
+            if resp.status_code == 409 and resp.json().get("detail", "").startswith(OPEN):
+                return [seat]
             if resp.status_code != 200:
-                return False
+                return []
             descriptor = resp.json()
-        if not self.drops(key, round_id, user_id, descriptor["roster"]):
-            self.call("POST", f"/model/secure/submit/{round_id}", "secure/submit",
-                      data=masked_body(descriptor["weight_count"]), headers=OCTET)
-        return False
+        if seat.submitted:
+            return [seat]
+        if self.drops(seat, descriptor["roster"]):
+            return []
+        resp = self.call("POST", f"/model/secure/submit/{seat.session_id}", "secure/submit",
+                         data=masked_body(descriptor["weight_count"]), headers=OCTET)
+        return [replace(seat, submitted=True)] if resp.status_code == 202 else []
 
-    def drops(self, key: str, round_id: int, user_id: int, roster: list[dict]) -> bool:
-        if user_id != min(member["user_id"] for member in roster):
+    def drops(self, seat: Seat, roster: list[dict]) -> bool:
+        if seat.user_id != min(member["user_id"] for member in roster):
             return False
-        return random.Random(f"{key}:{round_id}").random() < self.options.round_failure
+        return random.Random(f"{seat.model_key}:{seat.session_id}").random() < self.options.session_failure

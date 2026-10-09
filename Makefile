@@ -1,6 +1,6 @@
 shared_repo := https://github.com/papyroplastics/memoria-somasafe-shared.git
 
-.PHONY: shared ml-data ml-test db-seed db-reseed db-run db-clean prod-db-seed api-run api-test worker-run worker-2-run worker-test worker-monitor prod-build prod-run prod-x2-run prod-clean
+.PHONY: shared ml-data ml-test db-seed db-reseed db-run db-clean prod-db-seed api-run api-test worker-run worker-2-run worker-test worker-monitor prod-build prod-run prod-x2-run prod-clean prod-bench
 shared:
 	@if [ -e shared ] || [ -L shared ]; then \
 		echo "shared already present"; \
@@ -48,7 +48,7 @@ prod_x1_compose := API_UPSTREAMS="fastapi-1:8000" $(prod_compose) $(addprefix --
 prod_x2_compose := API_UPSTREAMS="fastapi-1:8000 fastapi-2:8000" $(prod_compose) $(addprefix --profile ,$(prod_x2_profiles))
 
 prod-build:
-	$(prod_x1_compose) build
+	$(prod_x1_compose) --profile bench build
 prod-run:
 	$(prod_x1_compose) up
 prod-x2-run:
@@ -57,3 +57,5 @@ prod-clean:
 	$(prod_x2_compose) down -v
 prod-db-seed: shared
 	set -a && . $(prod_env) && set +a && POSTGRES_HOST=localhost uv run -m scripts.system.seed_db --assign-device --test-users
+prod-bench:
+	$(prod_compose) --profile bench run --rm bench $(ARGS)

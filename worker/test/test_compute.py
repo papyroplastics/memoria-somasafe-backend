@@ -91,7 +91,8 @@ def test_secure_session_mean_rejects_implausible_mean():
 
 
 NOW = datetime(2026, 1, 1, 12, 0, 0)
-POLICY = SweepPolicy(min_members=3, open_timeout=60, seal_timeout=60, summing_timeout=100)
+POLICY = SweepPolicy(min_members=3, open_seal_timeout=30, open_fail_timeout=60,
+                     sealed_fail_timeout=60, summing_timeout=100)
 
 
 def _session(status, members=0, submitted=0, member_count=None, age=0, base=1,
@@ -110,7 +111,9 @@ open_, sealed, summing = (SecureSessionStatus.open, SecureSessionStatus.sealed,
 @pytest.mark.parametrize("state, expected", [
     (_session(open_, members=5, base=2), (Action.fail, "stale_base")),
     (_session(open_, members=5), None),
-    (_session(open_, members=3, age=60), (Action.seal, "")),
+    (_session(open_, members=3, age=30), (Action.seal, "")),
+    (_session(open_, members=3, age=29), None),
+    (_session(open_, members=2, age=30), None),
     (_session(open_, members=2, age=60), (Action.fail, "open_timeout")),
     (_session(open_, members=2), None),
     (_session(sealed, 3, 3, 3, sealed_age=1), (Action.dispatch, "")),

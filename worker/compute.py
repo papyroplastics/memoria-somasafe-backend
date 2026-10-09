@@ -52,8 +52,9 @@ class SessionState:
 @dataclass(frozen=True)
 class SweepPolicy:
     min_members: int
-    open_timeout: int
-    seal_timeout: int
+    open_seal_timeout: int
+    open_fail_timeout: int
+    sealed_fail_timeout: int
     summing_timeout: int
 
 
@@ -89,18 +90,18 @@ def sweep_actions(sessions: list[SessionState], active: dict[str, int | None],
         if s.status is SecureSessionStatus.open:
             if stale:
                 act(Action.fail, "stale_base")
-            elif _elapsed(s.created_at, now, policy.open_timeout):
-                if s.members >= policy.min_members:
+            elif s.members >= policy.min_members:
+                if _elapsed(s.created_at, now, policy.open_seal_timeout):
                     act(Action.seal)
-                else:
-                    act(Action.fail, "open_timeout")
+            elif _elapsed(s.created_at, now, policy.open_fail_timeout):
+                act(Action.fail, "open_timeout")
         elif s.status is SecureSessionStatus.sealed:
             expected = s.member_count or 0
             if stale:
                 act(Action.fail, "stale_base")
             elif s.submitted >= expected:
                 act(Action.dispatch)
-            elif _elapsed(s.sealed_at, now, policy.seal_timeout):
+            elif _elapsed(s.sealed_at, now, policy.sealed_fail_timeout):
                 act(Action.fail, "seal_timeout")
         elif s.status is SecureSessionStatus.summing:
             if _elapsed(s.summing_at, now, policy.summing_timeout):

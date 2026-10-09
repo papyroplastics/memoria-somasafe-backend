@@ -10,12 +10,13 @@ import uuid
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import DDL, JSON, BigInteger, Column, Index, UniqueConstraint, event, text, update
+from sqlalchemy import DDL, JSON, BigInteger, Column, Index, UniqueConstraint, event, func, text, update
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import defer
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
 from common.config import DATABASE_URL
+from common.secure_agg import compute_scale
 
 
 def utcnow() -> datetime:
@@ -357,6 +358,21 @@ def get_open_session(session: Session, base_weights_id: int,
     if lock:
         stmt = stmt.with_for_update()
     return session.exec(stmt).first()
+
+
+def seal_session(session: Session, session_id: int) -> int | None:
+    """Freeze an open session's roster and fix n and S = floor(2^31/(n*B)).
+    ``None`` if it was no longer open. The caller commits."""
+    if not SecureSession.transition(session, session_id, SecureSessionStatus.open,
+                                    SecureSessionStatus.sealed, sealed_at=utcnow()):
+        return None
+    n = session.exec(select(func.count()).select_from(SecureSessionMember)
+                     .where(SecureSessionMember.session_id == session_id)).one()
+    row = session.get(SecureSession, session_id, populate_existing=True)
+    row.member_count = n
+    row.scale = compute_scale(n, row.clip_bound)
+    session.add(row)
+    return n
 
 
 def list_firmware(session: Session, interface_version: int) -> list[Firmware]:

@@ -18,6 +18,9 @@ and `plans/cloud-benchmark.md`).
 - Postgres configured by `postgres.conf` in the cloud, sized for its dedicated data host.
 - Prometheus (port 9090, `prometheus.yml`) scraping the gateways, Caddy, celery-exporter,
   the Postgres and Redis exporters, node-exporter and cAdvisor.
+- A one-shot `bench` container (`../benchmark/bench.Containerfile`) that runs the
+  [benchmark](../benchmark/README.md) scripts and Locust, with the host's `results/` and
+  the `worker_metrics` volume (read-only) mounted.
 
 ## Profiles
 
@@ -33,7 +36,8 @@ the cloud instances take the same name with an `-inst` suffix (`fastapi-1-inst`,
 | `redis-auth` | `redis-auth`, `redis-auth-exporter` |
 | `redis-broker` | `redis-broker`, `redis-broker-exporter` |
 | `edge` | `caddy`, `prometheus`, `celery-exporter` |
-| `client` | nothing besides the per-host exporters (Locust runs outside compose) |
+| `client` | nothing besides the per-host exporters |
+| `bench` | `bench`, never started with `up`, only through `run` |
 
 `node-exporter` and `cAdvisor` are in every profile. Services on different hosts don't
 declare `depends_on` on each other: the gateways connect lazily and the workers retry the
@@ -44,13 +48,15 @@ make prod-build
 make prod-run        # 1x1
 make prod-x2-run     # 2x2 (adds fastapi-2 and celery-2)
 make prod-db-seed    # once, against the running stack (add --test-users N for more users)
+make prod-bench ARGS="benchmark.run 1x1 ..."   # a benchmark module in the bench container
 make prod-clean      # tear down, volumes included
 ```
 
 ## Configuration
 
 Every container reads one env file, which is also the compose `--env-file`, so it sets the
-compose variables too (ports, `BIND_ADDR`, `WORKER_CONCURRENCY`, `POSTGRES_CONFIG_FILE`).
+compose variables too (ports, `BIND_ADDR`, `WORKER_CONCURRENCY`, `POSTGRES_CONFIG_FILE`), and
+the `BENCH_API_URL`/`BENCH_PROMETHEUS_URL` the bench container drives and queries.
 `compose.prod.yaml` takes its path from `PROD_ENV_FILE`, and both the variable and the flag
 must point at the same file:
 
@@ -69,8 +75,9 @@ must point at the same file:
 
 Compose only reads the first `--env-file`, so the shared values are duplicated in both
 files. Besides credentials, they compress the round cadence so a run of a few minutes sees
-several rounds (aggregation every 60 s, secure sessions sealing after 15 s and failing
-20 s after sealing) and set a long access-token TTL so no user re-logs in mid-run.
+several rounds (aggregation every 60 s, secure sessions with enough members sealing after
+20 s, sealed ones failing 60 s after sealing, and the sweep running every 5 s since it is
+also what dispatches the sums) and set a long access-token TTL so no user re-logs in mid-run.
 Containers only pick up changes to the env file when they are recreated.
 
 `make prod-db-seed` runs the seed script on the host with `local.env` loaded, so the seeded

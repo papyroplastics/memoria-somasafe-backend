@@ -10,8 +10,8 @@ from common.db import (
     SecureSessionMember,
     SecureSessionStatus,
     engine,
+    seal_session,
 )
-from common.secure_session import seal_session
 
 
 def _status(session_id: int) -> SecureSessionStatus:

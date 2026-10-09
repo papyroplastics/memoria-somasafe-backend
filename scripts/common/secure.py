@@ -11,8 +11,8 @@ from sqlmodel import Session
 
 from common.celery_tasks import SECURE_SUM_TASK
 from common.db import SecureSession, SecureSessionStatus, engine
+from common.db import seal_session as seal
 from common.secure_agg import dequantize, mask_vector, quantize, ring_sum
-from common.secure_session import seal_session as seal
 
 from scripts.common.api import get_descriptor, join, submit_masked
 

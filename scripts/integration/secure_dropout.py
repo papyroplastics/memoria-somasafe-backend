@@ -9,7 +9,7 @@ import numpy as np
 import requests
 from sqlmodel import Session, select
 
-from common.config import SECURE_SESSION_MIN_MEMBERS, SECURE_SESSION_SEAL_TIMEOUT_SECONDS
+from common.config import SECURE_SESSION_MIN_MEMBERS, SECURE_SESSION_SEALED_FAIL_TIMEOUT_SECONDS
 from common.db import (
     SecureSession,
     SecureSessionMember,
@@ -70,7 +70,7 @@ def run(base: str, key: str) -> None:
 
     with Session(engine) as session:
         row = session.get(SecureSession, session_id)
-        row.sealed_at = utcnow() - timedelta(seconds=SECURE_SESSION_SEAL_TIMEOUT_SECONDS + 60)
+        row.sealed_at = utcnow() - timedelta(seconds=SECURE_SESSION_SEALED_FAIL_TIMEOUT_SECONDS + 60)
         session.add(row)
         session.commit()
     secure_session_sweep()

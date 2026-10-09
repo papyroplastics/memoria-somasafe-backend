@@ -13,9 +13,9 @@ import pandas as pd
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results")) / "benchmark"
 WORKER_DIR = "worker_metrics"
 REQUEST_LOGS = "requests_*.csv"
-SECURE_ROUNDS = "secure_rounds.csv"
+SECURE_SESSIONS = "secure_sessions.csv"
 SCHEDULE_LAG = "schedule_lag"
-SECURE_POLL = "secure/round"
+SECURE_POLL = "secure/session"
 
 STEP_SECONDS = 2
 MAX_POINTS = 10_000
@@ -44,14 +44,16 @@ QUERIES = {
     "redis_ops": "sum by (instance_role) (rate(redis_commands_processed_total[10s]))",
     "upstreams_healthy": "caddy_reverse_proxy_upstreams_healthy",
 }
-AGGREGATION_TASKS = {"federated_aggregation": "cohort", "secure_aggregation": "members"}
+AGGREGATION_TASK = "federated_aggregation"
+STAGED_TASKS = {"federated_aggregation": ("cohort", "submissions", "aggregated"),
+                "secure_session_sum": ("members", "members", "summed")}
 
 PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 MUTED = "#898781"
 SURFACE = "#fcfcfb"
 SERVICES = ("caddy", "fastapi-1", "fastapi-2", "celery-1", "celery-2", "postgres", "redis-auth", "redis-broker")
 SERVICE_COLORS = dict(zip(SERVICES, PALETTE))
-STATUS_COLORS = {"aggregated": "#0ca30c", "failed": "#d03b3b", "in flight": MUTED}
+STATUS_COLORS = {"summed": "#0ca30c", "failed": "#d03b3b", "in flight": MUTED}
 
 plt.switch_backend("Agg")
 plt.rcParams.update({
@@ -175,7 +177,7 @@ def plot_client(requests: pd.DataFrame, start: float, duration: float, path: Pat
 
     throughput.set_title("completed requests by outcome")
     status = real["status"]
-    polling = (real["name"] == SECURE_POLL) & (status == 409)
+    polling = (real["name"] == SECURE_POLL) & status.isin([404, 409])
     classes = np.select([((status >= 200) & (status < 300)) | polling, status == 429], ["ok", "429"], "error")
     rates = real.assign(cls=classes).groupby(["bin", "cls"]).size().unstack("cls", fill_value=0) / BIN_SECONDS
     plot_lines(throughput, rates)
@@ -230,31 +232,31 @@ def plot_queues(prom: dict[str, pd.DataFrame], start: float, duration: float, pa
     service.set_ylabel("tasks/s")
 
     fanout.set_title("aggregation tasks completed per worker")
-    aggregations = tasks[tasks["name"].str.rsplit(".", n=1).str[-1].isin(AGGREGATION_TASKS)] if not tasks.empty else tasks
+    aggregations = tasks[tasks["name"].str.rsplit(".", n=1).str[-1] == AGGREGATION_TASK] if not tasks.empty else tasks
     plot_lines(fanout, wide(aggregations, start, ["hostname"]), SERVICE_COLORS)
     fanout.set_ylabel("tasks/s")
     save(fig, path)
 
 
-def plot_stages(rounds: pd.DataFrame, cohort: str, title: str, path: Path) -> None:
-    rounds = rounds[rounds["outcome"] == "aggregated"]
-    if rounds.empty:
+def plot_stages(runs: pd.DataFrame, cohort: str, last: str, outcome: str, title: str, path: Path) -> None:
+    runs = runs[runs["outcome"] == outcome]
+    if runs.empty:
         return
-    stages = list(rounds.columns[rounds.columns.get_loc(cohort) + 1:])
-    totals = rounds[stages].sum().sort_values(ascending=False)
+    stages = list(runs.columns[runs.columns.get_loc(last) + 1:])
+    totals = runs[stages].sum().sort_values(ascending=False)
     shown = [stage for stage in stages if stage in totals.index[:len(PALETTE) - 1]]
-    rounds = rounds.assign(**{
-        "other stages": rounds[[s for s in stages if s not in shown]].sum(axis=1),
-        "unaccounted": (rounds["total_seconds"] - rounds[stages].sum(axis=1)).clip(lower=0),
+    runs = runs.assign(**{
+        "other stages": runs[[s for s in stages if s not in shown]].sum(axis=1),
+        "unaccounted": (runs["total_seconds"] - runs[stages].sum(axis=1)).clip(lower=0),
     })
     segments = [(name, color) for name, color in
                 [*zip(shown, PALETTE), ("other stages", PALETTE[len(shown)]), ("unaccounted", MUTED)]
-                if rounds[name].sum() > 0]
-    models = sorted(rounds["model_key"].unique())
+                if runs[name].sum() > 0]
+    models = sorted(runs["model_key"].unique())
     fig, axes = plt.subplots(len(models), 1, figsize=(10, 2.4 * len(models) + 0.6), layout="constrained", squeeze=False)
     fig.suptitle(title, x=0.01, ha="left", fontsize=11)
     for ax, model in zip(axes[:, 0], models):
-        part = rounds[rounds["model_key"] == model].sort_values([cohort, "started_at"])
+        part = runs[runs["model_key"] == model].sort_values([cohort, "started_at"])
         x = np.arange(len(part))
         bottom = np.zeros(len(part))
         for name, color in segments:
@@ -267,7 +269,7 @@ def plot_stages(rounds: pd.DataFrame, cohort: str, title: str, path: Path) -> No
         ax.set_title(model)
         ax.set_ylabel("seconds")
     axes[0, 0].legend(loc="upper left", bbox_to_anchor=(1.01, 1))
-    axes[-1, 0].set_xlabel(f"{cohort} (one bar per round)")
+    axes[-1, 0].set_xlabel(f"{cohort} (one bar per task)")
     save(fig, path)
 
 
@@ -277,30 +279,28 @@ def plot_429(prom: dict[str, pd.DataFrame], workers: dict[str, pd.DataFrame], st
     ax.set_title("429 share of requests per handler")
     plot_lines(ax, wide(prom["ratio_429"], start.timestamp(), ["handler"]) * 100)
     ax.set_ylabel("%")
-    for task in AGGREGATION_TASKS:
-        frame = workers.get(task)
-        if frame is None or frame.empty:
-            continue
+    frame = workers.get(AGGREGATION_TASK)
+    if frame is not None and not frame.empty:
         minutes = (pd.to_datetime(frame["started_at"], utc=True, format="ISO8601") - start).dt.total_seconds() / 60
         for index, minute in enumerate(sorted(set(minutes.round(1)))):
             ax.axvline(minute, color="#c3c2b7", linewidth=0.8, linestyle=":",
-                       label=f"{task} started" if index == 0 else None)
+                       label=f"{AGGREGATION_TASK} started" if index == 0 else None)
     if ax.get_legend_handles_labels()[0]:
         ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1))
     save(fig, path)
 
 
-def plot_secure_rounds(rounds: pd.DataFrame, start: pd.Timestamp, duration: float, path: Path) -> None:
-    fig, (ax,) = time_axes(1, "Secure rounds", duration, height=3)
-    ax.set_title("rounds by outcome, binned by creation time")
-    if rounds.empty:
+def plot_secure_sessions(sessions: pd.DataFrame, start: pd.Timestamp, duration: float, path: Path) -> None:
+    fig, (ax,) = time_axes(1, "Secure sessions", duration, height=3)
+    ax.set_title("sessions by outcome, binned by creation time")
+    if sessions.empty:
         no_data(ax)
         save(fig, path)
         return
-    minutes = (pd.to_datetime(rounds["created_at"], utc=True, format="ISO8601") - start).dt.total_seconds() / 60
+    minutes = (pd.to_datetime(sessions["created_at"], utc=True, format="ISO8601") - start).dt.total_seconds() / 60
     width = max(1.0, np.ceil(duration / 40))
-    outcome = rounds["status"].where(rounds["status"].isin(["aggregated", "failed"]), "in flight")
-    counts = (rounds.assign(bin=minutes // width * width, outcome=outcome)
+    outcome = sessions["status"].where(sessions["status"].isin(["summed", "failed"]), "in flight")
+    counts = (sessions.assign(bin=minutes // width * width, outcome=outcome)
               .groupby(["bin", "outcome"]).size().unstack("outcome", fill_value=0))
     bottom = np.zeros(len(counts))
     for name, color in STATUS_COLORS.items():
@@ -308,7 +308,7 @@ def plot_secure_rounds(rounds: pd.DataFrame, start: pd.Timestamp, duration: floa
             ax.bar(counts.index + width / 2, counts[name], bottom=bottom, width=width * 0.85, color=color,
                    edgecolor=SURFACE, linewidth=1, label=name)
             bottom += counts[name].to_numpy()
-    ax.set_ylabel("rounds")
+    ax.set_ylabel("sessions")
     ax.legend(loc="upper left", bbox_to_anchor=(1.01, 1))
     save(fig, path)
 
@@ -389,12 +389,13 @@ def main() -> None:
     plot_containers(prom, origin, duration, figures / "containers.png")
     plot_gateways(prom, origin, duration, figures / "gateways.png")
     plot_queues(prom, origin, duration, figures / "queues.png")
-    for task, cohort in AGGREGATION_TASKS.items():
+    for task, (cohort, last, outcome) in STAGED_TASKS.items():
         if task in workers:
-            plot_stages(workers[task], cohort, f"{task} stages", figures / f"stages_{task}.png")
+            plot_stages(workers[task], cohort, last, outcome, f"{task} stages", figures / f"stages_{task}.png")
     plot_429(prom, workers, start, duration, figures / "ratio_429.png")
-    if (run_dir / SECURE_ROUNDS).exists():
-        plot_secure_rounds(pd.read_csv(run_dir / SECURE_ROUNDS), start, duration, figures / "secure_rounds.png")
+    if (run_dir / SECURE_SESSIONS).exists():
+        plot_secure_sessions(pd.read_csv(run_dir / SECURE_SESSIONS), start, duration,
+                             figures / "secure_sessions.png")
     plot_overview(prom, origin, duration, figures / "overview.png")
 
 
