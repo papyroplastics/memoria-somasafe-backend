@@ -21,7 +21,7 @@ class ModelSpec:
     min_app_version: str
     model_cls: type[TrainableModel]
     trainer_cls: type[Trainer]
-    submission_type: SubmissionType
+    submission_type: SubmissionType = SubmissionType.raw
     firmware_id: int | None = None
     version: int = 1
     contract_version: int = 0
@@ -39,7 +39,6 @@ BASE_MODELS: dict[str, ModelSpec] = {
         min_app_version="1.0.0",
         model_cls=feature_mlp.FeatureMLP,
         trainer_cls=feature_mlp.FeatureMLPTrainer,
-        submission_type=SubmissionType.quantize,
         contract_version=1,
     ),
     "lstm-ae": ModelSpec(
@@ -48,7 +47,6 @@ BASE_MODELS: dict[str, ModelSpec] = {
         min_app_version="1.0.0",
         model_cls=lstm_autoencoder.LSTMAutoencoder,
         trainer_cls=AutoencoderTrainer,
-        submission_type=SubmissionType.raw,
     ),
     "gru-ae": ModelSpec(
         key="gru-ae",
@@ -56,7 +54,6 @@ BASE_MODELS: dict[str, ModelSpec] = {
         min_app_version="1.0.0",
         model_cls=gru_autoencoder.GRUAutoencoder,
         trainer_cls=AutoencoderTrainer,
-        submission_type=SubmissionType.raw,
     ),
     "feature-ae": ModelSpec(
         key="feature-ae",
@@ -64,7 +61,6 @@ BASE_MODELS: dict[str, ModelSpec] = {
         min_app_version="1.0.0",
         model_cls=feature_autoencoder.FeatureAutoencoder,
         trainer_cls=feature_autoencoder.FeatureAutoencoderTrainer,
-        submission_type=SubmissionType.raw,
     ),
     "cnn-ae": ModelSpec(
         key="cnn-ae",
@@ -72,7 +68,6 @@ BASE_MODELS: dict[str, ModelSpec] = {
         min_app_version="1.0.0",
         model_cls=cnn_autoencoder.CNNAutoencoder,
         trainer_cls=AutoencoderTrainer,
-        submission_type=SubmissionType.raw,
     ),
     "mnist-mlp": ModelSpec(
         key="mnist-mlp",
@@ -80,7 +75,6 @@ BASE_MODELS: dict[str, ModelSpec] = {
         min_app_version="1.0.0",
         model_cls=mnist_mlp.MnistMLP,
         trainer_cls=mnist_mlp.MnistMLPTrainer,
-        submission_type=SubmissionType.quantize,
         contract_version=1,
     ),
     "mnist-mlp-heavy": ModelSpec(
@@ -89,7 +83,6 @@ BASE_MODELS: dict[str, ModelSpec] = {
         min_app_version="1.0.0",
         model_cls=mnist_mlp.MnistMLPHeavy,
         trainer_cls=mnist_mlp.MnistMLPTrainer,
-        submission_type=SubmissionType.quantize,
         contract_version=1,
     ),
     "covertype-nb": ModelSpec(
@@ -98,7 +91,6 @@ BASE_MODELS: dict[str, ModelSpec] = {
         min_app_version="1.0.0",
         model_cls=covertype_nb.CovertypeNB,
         trainer_cls=covertype_nb.CovertypeNBTrainer,
-        submission_type=SubmissionType.raw,
     ),
 }
 

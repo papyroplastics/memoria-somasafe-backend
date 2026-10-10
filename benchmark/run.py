@@ -13,16 +13,12 @@ from pathlib import Path
 
 LOCUSTFILE = Path(__file__).with_name("locustfile.py")
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results")) / "benchmark"
-HEAVY_MODEL = "mnist-mlp-heavy"
-SMALL_WEIGHTS = 50_000
+LIGHT_MODELS = ["covertype-nb", "feature-ae", "feature-mlp", "mnist-mlp"]
 SPLITS = {
-    "regular": lambda base, count: base != HEAVY_MODEL,
-    "extreme": lambda base, count: base == HEAVY_MODEL,
-    "small": lambda base, count: count < SMALL_WEIGHTS,
-    "medium": lambda base, count: count >= SMALL_WEIGHTS and base != HEAVY_MODEL,
-    "all": lambda base, count: True,
+    "light": LIGHT_MODELS,
+    "regular": [*LIGHT_MODELS, "cnn-ae"],
+    "extreme": ["mnist-mlp-heavy"],
 }
-NATIVE = "native"
 SUBMISSION_TYPES = ("raw", "quantize", "secure")
 TOPOLOGIES = ("1x1", "2x2")
 TEST_SUBJECTS = 15
@@ -68,22 +64,12 @@ def served_models(host: str) -> dict[str, tuple[str, int]]:
 
 def select_models(host: str, split: str, submission: str, explicit: str) -> dict[str, int]:
     served = served_models(host)
-    if explicit:
-        keys = [key for key in explicit.split(",") if key]
-        missing = [key for key in keys if key not in served]
-        if missing:
-            raise SystemExit(f"models not served: {', '.join(missing)}")
-        return {key: served[key][1] for key in keys}
-    models = {}
-    for key, (kind, count) in served.items():
-        base = key.removesuffix(f"-{kind}")
-        if not SPLITS[split](base, count):
-            continue
-        if (key == base) if submission == NATIVE else (kind == submission):
-            models[key] = count
-    if not models:
-        raise SystemExit(f"no served model matches split '{split}' and submission type '{submission}'")
-    return models
+    keys = ([key for key in explicit.split(",") if key] if explicit else
+            [base if submission == "raw" else f"{base}-{submission}" for base in SPLITS[split]])
+    missing = [key for key in keys if key not in served]
+    if missing:
+        raise SystemExit(f"models not served: {', '.join(missing)}")
+    return {key: served[key][1] for key in keys}
 
 
 def check_users(host: str, users: int, stride: int) -> None:
@@ -102,7 +88,7 @@ def main() -> None:
     parser.add_argument("--run-id", help="defaults to <timestamp>-<topology>-<split>-<submission>")
     parser.add_argument("--split", choices=SPLITS, default="regular")
     parser.add_argument("--models", default="", help="comma-separated model keys, overrides --split/--submission")
-    parser.add_argument("--submission", choices=[NATIVE, *SUBMISSION_TYPES], default=NATIVE,
+    parser.add_argument("--submission", choices=SUBMISSION_TYPES, default="raw",
                         help="submission type every model is exercised with")
     parser.add_argument("--stages", default="120:5,60:10,60:20,60:30,60:5",
                         help="<seconds>:<active users> stages; every user logs in during the first one")

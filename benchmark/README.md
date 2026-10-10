@@ -6,7 +6,7 @@ run against a stack brought up locally or in the cloud and seeded with enough te
 ## Running
 
 ```bash
-make prod-bench ARGS="benchmark.run 1x1 --split small --submission secure --stages 60:3,60:6,60:3"
+make prod-bench ARGS="benchmark.run 1x1 --split light --submission secure --stages 60:3,60:6,60:3"
 make prod-collect RUN=<run_id>       # prod/collect.sh <run_id> for the cloud
 uv run -m benchmark.export <run_id>  # plots, on the host
 ```
@@ -26,6 +26,11 @@ database checks to `checks.json` and resets the stack.
 
 ## Details worth knowing
 
+- **Splits.** `--split` picks a hand-made list of base models: `light` (covertype-nb,
+  feature-ae, feature-mlp, mnist-mlp), `regular` (`light` plus cnn-ae) or `extreme`
+  (mnist-mlp-heavy). `--submission` appends the variant suffix, `raw` being the base key.
+  The RNN autoencoders are left out of every split: their exports don't finish within a
+  round.
 - **Configuration.** Everything comes from the stack's env file: the aggregation interval,
   and `BENCH_API_URL`/`BENCH_PROMETHEUS_URL`, the defaults of `--host` and `--prometheus`.
 - **Reset, not recreate.** The reset truncates submissions, jobs, secure sessions with
