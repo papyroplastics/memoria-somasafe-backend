@@ -4,6 +4,8 @@ import numpy as np
 import tensorflow as tf
 from .models.common import TrainableModel, Trainer
 
+_SAVE_OPTIONS = tf.saved_model.SaveOptions(experimental_custom_gradients=False)
+
 def optimize_saved_model(rep_dataset: tf.data.Dataset, saved_dir: Path) -> bytes:
     def rep_iter():
         for feed in rep_dataset:
@@ -28,10 +30,9 @@ def get_trainable_model(model: TrainableModel) -> bytes:
             'train': model.train.get_concrete_function(),
             'save': model.save.get_concrete_function(),
             'restore': model.restore.get_concrete_function(),
-        })
+        }, options=_SAVE_OPTIONS)
 
         converter = tf.lite.TFLiteConverter.from_saved_model(str(saved_dir))  # type: ignore
-        #converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS, tf.lite.OpsSet.SELECT_TF_OPS]  # type: ignore
         converter.target_spec.supported_ops = [tf.lite.OpsSet.TFLITE_BUILTINS]  # type: ignore
         converter.experimental_enable_resource_variables = True
         return converter.convert()
@@ -42,7 +43,7 @@ def get_optimized_model(model: TrainableModel, rep_dataset: tf.data.Dataset) -> 
         saved_dir = Path(tmp) / 'model'
         tf.saved_model.save(model, str(saved_dir), signatures={
             'eval': model.eval.get_concrete_function(),
-        })
+        }, options=_SAVE_OPTIONS)
 
         return optimize_saved_model(rep_dataset, saved_dir)
 
