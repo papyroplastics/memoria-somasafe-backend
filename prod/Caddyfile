@@ -5,6 +5,8 @@
 :80 {
 	reverse_proxy {$API_UPSTREAMS} {
 		lb_policy round_robin
+		lb_try_duration 1s
+		fail_duration 10s
 		health_uri /healthz
 		health_interval 5s
 		health_timeout 2s

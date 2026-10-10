@@ -1,0 +1,19 @@
+#!/bin/sh
+set -e
+
+if ! command -v podman-compose >/dev/null; then
+  apt-get update
+  apt-get install -y curl python3 rsync kitty-terminfo tmux podman podman-compose
+fi
+systemctl enable --now podman.socket
+
+mkdir -p /etc/containers/containers.conf.d /opt/somasafe/backend/prod /opt/somasafe/backend/shared/gen \
+  /opt/somasafe/backend/results/worker-metrics /opt/somasafe/backend/results/prometheus
+%{ for path, content in files ~}
+echo '${base64encode(content)}' | base64 -d > ${path}
+%{ endfor ~}
+chmod +x /usr/local/bin/somasafe-*
+
+systemctl daemon-reload
+systemctl enable somasafe
+systemctl start --no-block somasafe

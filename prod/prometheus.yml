@@ -30,11 +30,6 @@ scrape_configs:
   - job_name: redis
     static_configs:
       - targets: [redis-auth-exporter:9121]
-        labels:
-          instance_role: auth
-      - targets: [redis-broker-exporter:9121]
-        labels:
-          instance_role: broker
 
   - job_name: node
     static_configs:

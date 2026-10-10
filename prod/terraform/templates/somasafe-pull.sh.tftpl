@@ -1,0 +1,16 @@
+#!/bin/sh
+set -e
+somasafe-token | podman login -u oauth2accesstoken --password-stdin ${registry_host}
+%{ for image in images ~}
+podman pull ${registry}/somasafe-${image}:${tag}
+%{ endfor ~}
+%{ if secret != "" ~}
+key=/opt/somasafe/backend/shared/gen/server-private-key.pem
+curl -sf -H "Authorization: Bearer $(somasafe-token)" \
+  https://secretmanager.googleapis.com/v1/${secret}/versions/latest:access \
+  | python3 -c 'import base64, json, sys; sys.stdout.buffer.write(base64.b64decode(json.load(sys.stdin)["payload"]["data"]))' \
+  > $key.tmp
+[ -s $key.tmp ]
+mv $key.tmp $key
+chmod 600 $key
+%{ endif ~}

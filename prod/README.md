@@ -1,88 +1,113 @@
 # Prod
 
 A production-like container deployment of the backend. The same images and compose files
-run the local stack and the cloud benchmark (see [`../benchmark/`](../benchmark/README.md)
-and `plans/cloud-benchmark.md`).
+run the local stack and the cloud stack that the [benchmark](../benchmark/README.md) drives.
 
 ## Stack
 
-`compose.prod.yaml` sits on top of `compose.yaml` (which provides `postgres` and
-`redis-auth`) and adds:
+`compose.prod.yaml` sits on top of `compose.yaml` (`postgres` and `redis-auth`) and adds:
 
-- A separate `redis-broker` instance for the Celery broker.
-- `fastapi-1`/`fastapi-2` gateways (`api.Containerfile`, no TensorFlow) behind Caddy, which
-  round-robins across `API_UPSTREAMS` on port 8000.
+- `fastapi-1`/`fastapi-2` gateways (`api.Containerfile`, no TensorFlow), behind Caddy
+  locally, which round-robins across `API_UPSTREAMS` and health-checks `/healthz`.
 - `celery-1` (light + heavy queues, runs beat) and `celery-2` (heavy only), from
-  `worker.Containerfile`, with the calibration artifacts baked in. Each writes per-task
-  stage timings to the `worker_metrics` volume as `<hostname>-<pid>/<task>.csv`.
-- Postgres configured by `postgres.conf` in the cloud, sized for its dedicated data host.
-- Prometheus (port 9090, `prometheus.yml`) scraping the gateways, Caddy, celery-exporter,
-  the Postgres and Redis exporters, node-exporter and cAdvisor.
-- A one-shot `bench` container (`../benchmark/bench.Containerfile`) that runs the
-  [benchmark](../benchmark/README.md) scripts and Locust, with the host's `results/` and
-  the `worker_metrics` volume (read-only) mounted.
+  `worker.Containerfile`, writing per-task stage timings to `results/worker-metrics`.
+- Prometheus and celery-exporter, plus Postgres and Redis exporters, node-exporter and
+  cAdvisor. The TSDB is bind-mounted at `results/prometheus`.
+- A one-shot `bench` container (`../benchmark/bench.Containerfile`) with `results/` mounted.
+- A `redis-broker` service that no profile list enables: the Celery broker is db 1 of
+  `redis-auth` unless `BROKER_HOST`/`BROKER_PORT` point elsewhere.
 
-## Profiles
-
-Every service belongs to one or more profiles, so each cloud host starts only its own
-services from the same files. Profiles are named after the host's main compose service, and
-the cloud instances take the same name with an `-inst` suffix (`fastapi-1-inst`, ...):
+Every service belongs to profiles, so each cloud host starts only its own services:
 
 | Profile | Services |
 | --- | --- |
-| `fastapi-1`, `fastapi-2` | `fastapi-1`, `fastapi-2` |
-| `celery-1`, `celery-2` | `celery-1`, `celery-2` |
+| `fastapi-1`, `fastapi-2` | the gateway |
+| `celery-1`, `celery-2` | the worker |
 | `postgres` | `postgres`, `postgres-exporter` |
 | `redis-auth` | `redis-auth`, `redis-auth-exporter` |
-| `redis-broker` | `redis-broker`, `redis-broker-exporter` |
-| `edge` | `caddy`, `prometheus`, `celery-exporter` |
-| `client` | nothing besides the per-host exporters |
-| `bench` | `bench`, never started with `up`, only through `run` |
+| `edge` | `caddy` |
+| `monitor` | `prometheus`, `celery-exporter` |
+| `client-1` | only the per-host exporters |
+| `bench` | `bench`, only through `run` |
 
-`node-exporter` and `cAdvisor` are in every profile. Services on different hosts don't
-declare `depends_on` on each other: the gateways connect lazily and the workers retry the
-broker. The Makefile enables every profile of a topology on one machine:
+`node-exporter` and `cadvisor` are in every host profile.
+
+## Local
 
 ```bash
 make prod-build
-make prod-run        # 1x1
-make prod-x2-run     # 2x2 (adds fastapi-2 and celery-2)
-make prod-db-seed    # once, against the running stack (add --test-users N for more users)
-make prod-bench ARGS="benchmark.run 1x1 ..."   # a benchmark module in the bench container
-make prod-clean      # tear down, volumes included
+make prod-run        # 1x1, or prod-x2-run to add fastapi-2 and celery-2
+make prod-db-seed    # ARGS=N for N test users
+make prod-bench ARGS="benchmark.run 1x1 ..."
+make prod-collect RUN=<run_id>
+make prod-clean      # volumes included; results/ is left alone
 ```
+
+Start the whole topology before seeding: adding `fastapi-2`/`celery-2` to a running stack
+recreates the data services.
 
 ## Configuration
 
-Every container reads one env file, which is also the compose `--env-file`, so it sets the
-compose variables too (ports, `BIND_ADDR`, `WORKER_CONCURRENCY`, `POSTGRES_CONFIG_FILE`), and
-the `BENCH_API_URL`/`BENCH_PROMETHEUS_URL` the bench container drives and queries.
-`compose.prod.yaml` takes its path from `PROD_ENV_FILE`, and both the variable and the flag
-must point at the same file:
+Every container reads one env file, which is also the compose `--env-file` (compose only
+reads the first one, so shared values are duplicated). `local.env` runs everything on one
+small machine by compose names, one worker process each, stock Postgres config. `cloud.env`
+uses the `-inst` host names, publishes ports on every interface and loads `postgres.conf`,
+sized for a 4 GB host. Both compress the round cadence (aggregation every 60 s, short seal
+and fail timeouts, a 5 s sweep) so a few minutes see several rounds, and set a long token
+TTL. Containers only pick up env changes when recreated.
 
-- `local.env`, used by the Makefile, runs the whole stack on one small machine: services
-  reach each other by their compose names, every process runs a single worker, and
-  Postgres uses the image's stock config instead of `postgres.conf`.
-- `cloud.env` is for the cloud hosts: services reach each other by the `-inst` host names,
-  ports are published on every interface, the broker listens on 6379 on its own host,
-  and Postgres uses `postgres.conf`, sized for a dedicated 16 GB host. Each host starts
-  only its own profile:
+Host-side commands (`prod-db-seed`, `prod-collect`) load `local.env` with Postgres and Redis
+on `localhost`, which is either the local stack or the cloud tunnel.
 
-  ```bash
-  PROD_ENV_FILE=prod/cloud.env podman compose -f compose.yaml -f compose.prod.yaml \
-    --env-file prod/cloud.env --profile fastapi-1 up
-  ```
+## Cloud
 
-Compose only reads the first `--env-file`, so the shared values are duplicated in both
-files. Besides credentials, they compress the round cadence so a run of a few minutes sees
-several rounds (aggregation every 60 s, secure sessions with enough members sealing after
-20 s, sealed ones failing 60 s after sealing, and the sweep running every 5 s since it is
-also what dispatches the sums) and set a long access-token TTL so no user re-logs in mid-run.
-Containers only pick up changes to the env file when they are recreated.
+`terraform/` deploys a 1x1 stack on Compute Engine, one VM per host named `<host>-inst`:
+`fastapi-1`, `celery-1`, `postgres`, `redis-auth` and `client-1`, which runs `monitor` and
+is the SSH bastion. There is no Caddy; the client hits `fastapi-1-inst` directly. Sizes fit
+a 12 vCPU quota. Hosts have no external IPv4: SSH goes over IPv6, outgoing traffic through
+Cloud NAT.
 
-`make prod-db-seed` runs the seed script on the host with `local.env` loaded, so the seeded
-credentials match the stack's, connecting to Postgres through its published port.
+Each host's startup script (`terraform/templates/`) writes the compose files, `cloud.env`,
+a DNS search domain for containers and a few helpers. The `somasafe` unit then pulls the
+host's images (and the server key on `celery-1`) and starts its profiles, retrying every
+30 s until they exist. `sudo somasafe-compose ...` runs compose with the host's profiles.
 
-Start every service of the topology before seeding: bringing up `fastapi-2`/`celery-2` on a
-running stack recreates the data services, and celery-exporter misses events for a while
-after.
+### One-time setup
+
+```bash
+gcloud auth login
+gcloud auth application-default login
+gcloud services enable compute.googleapis.com artifactregistry.googleapis.com \
+  secretmanager.googleapis.com iam.googleapis.com --project <project>
+echo 'project = "<project>"' > prod/terraform/terraform.tfvars
+terraform -chdir=prod/terraform init
+```
+
+Your OS Login account needs an SSH key enrolled (`gcloud compute os-login ssh-keys add`)
+and loaded in the agent. Hosts run as the `somasafe-host` service account, which can only
+read the registry and the key secret.
+
+### Session
+
+```bash
+terraform -chdir=prod/terraform apply
+prod/connect.sh       # own terminal: tunnels Postgres, Redis and Prometheus until killed
+prod/init.sh 200      # builds and pushes the images, uploads the key, seeds 200 users
+```
+
+Per run:
+
+```bash
+ssh <user>@<client-1-inst>       # address in `terraform output hosts`
+sudo somasafe-compose --profile bench run --rm bench benchmark.run 1x1 --processes 2 ...
+prod/collect.sh <run_id>         # back on the local machine
+```
+
+`collect.sh` pulls the run, runs `prod-collect` (settle, checks, reset), and copies the
+worker metrics and a Prometheus snapshot to `results/worker-metrics` and
+`results/benchmark/tsdb`.
+
+`terraform destroy` ends the session; VMs also stop after `max_run_hours`. After changing a
+deployed file, `apply` updates the startup script in place, and `sudo
+google_metadata_script_runner startup && sudo systemctl restart somasafe` on a host
+applies it.

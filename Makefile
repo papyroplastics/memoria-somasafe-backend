@@ -1,6 +1,6 @@
 shared_repo := https://github.com/papyroplastics/memoria-somasafe-shared.git
 
-.PHONY: shared ml-data ml-test db-seed db-reseed db-run db-clean prod-db-seed api-run api-test worker-run worker-2-run worker-test worker-monitor prod-build prod-run prod-x2-run prod-clean prod-bench
+.PHONY: shared ml-data ml-test db-seed db-reseed db-run db-clean prod-db-seed api-run api-test worker-run worker-2-run worker-test worker-monitor prod-build prod-run prod-x2-run prod-clean prod-bench prod-collect
 shared:
 	@if [ -e shared ] || [ -L shared ]; then \
 		echo "shared already present"; \
@@ -41,21 +41,26 @@ worker-monitor:
 	uv run -m celery --app worker.celery_app flower
 
 prod_env := prod/local.env
-prod_compose := PROD_ENV_FILE=$(prod_env) PODMAN_COMPOSE_PROVIDER=podman-compose podman compose -f compose.yaml -f compose.prod.yaml --env-file $(prod_env)
-prod_x1_profiles := edge fastapi-1 celery-1 postgres redis-auth redis-broker
+prod_compose := PROD_ENV_FILE=$(prod_env) PODMAN_COMPOSE_PROVIDER=podman-compose CONTAINERS_STORAGE=$(HOME)/.local/share/containers PODMAN_SOCKET=$(XDG_RUNTIME_DIR)/podman/podman.sock podman compose -f compose.yaml -f compose.prod.yaml --env-file $(prod_env)
+prod_x1_profiles := edge monitor fastapi-1 celery-1 postgres redis-auth
 prod_x2_profiles := $(prod_x1_profiles) fastapi-2 celery-2
-prod_x1_compose := API_UPSTREAMS="fastapi-1:8000" $(prod_compose) $(addprefix --profile ,$(prod_x1_profiles))
-prod_x2_compose := API_UPSTREAMS="fastapi-1:8000 fastapi-2:8000" $(prod_compose) $(addprefix --profile ,$(prod_x2_profiles))
+prod_host_env := set -a && . $(prod_env) && set +a && POSTGRES_HOST=localhost REDIS_HOST=localhost
+prod_x1_compose := $(prod_compose) $(addprefix --profile ,$(prod_x1_profiles))
+prod_x2_compose := $(prod_compose) $(addprefix --profile ,$(prod_x2_profiles))
 
 prod-build:
 	$(prod_x1_compose) --profile bench build
 prod-run:
+	mkdir -p results/worker-metrics results/prometheus
 	$(prod_x1_compose) up
 prod-x2-run:
+	mkdir -p results/worker-metrics results/prometheus
 	$(prod_x2_compose) up
 prod-clean:
 	$(prod_x2_compose) down -v
 prod-db-seed: shared
-	set -a && . $(prod_env) && set +a && POSTGRES_HOST=localhost uv run -m scripts.system.seed_db --assign-device --test-users
+	$(prod_host_env) uv run -m scripts.system.seed_db --assign-device --test-users $(ARGS)
 prod-bench:
 	$(prod_compose) --profile bench run --rm bench $(ARGS)
+prod-collect:
+	$(prod_host_env) uv run -m benchmark.collect $(RUN)

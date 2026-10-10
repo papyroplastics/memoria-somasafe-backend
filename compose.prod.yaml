@@ -17,9 +17,9 @@ x-celery-template: &celery
     WORKER_METRICS_DIR: /var/lib/worker-metrics
   volumes:
     - ./shared/gen/server-private-key.pem:/app/shared/gen/server-private-key.pem:ro
-    - worker_metrics:/var/lib/worker-metrics
+    - ./results/worker-metrics:/var/lib/worker-metrics
 
-x-every-host: &every-host [edge, fastapi-1, fastapi-2, celery-1, celery-2, postgres, redis-auth, redis-broker, client]
+x-every-host: &every-host [edge, monitor, fastapi-1, fastapi-2, celery-1, celery-2, postgres, redis-auth, redis-broker, client-1]
 
 services:
   postgres:
@@ -77,17 +77,14 @@ services:
       context: .
       dockerfile: benchmark/bench.Containerfile
     env_file: ${PROD_ENV_FILE:?}
-    environment:
-      WORKER_METRICS_DIR: /var/lib/worker-metrics
     volumes:
       - ./results:/app/results
-      - worker_metrics:/var/lib/worker-metrics:ro
 
   caddy:
     image: docker.io/library/caddy:2.11.4-alpine
     profiles: [edge]
     environment:
-      API_UPSTREAMS: ${API_UPSTREAMS:-fastapi-1:8000}
+      API_UPSTREAMS: ${API_UPSTREAMS:?}
     volumes:
       - ./prod/Caddyfile:/etc/caddy/Caddyfile:ro
     ports:
@@ -96,23 +93,24 @@ services:
 
   prometheus:
     image: docker.io/prom/prometheus:v3.15.0
-    profiles: [edge]
+    profiles: [monitor]
+    user: "0"
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
       - --storage.tsdb.retention.time=30d
       - --web.enable-admin-api
     volumes:
-      - ./prod/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - prometheus_data:/prometheus
+      - ./prod/${PROMETHEUS_CONFIG:-prometheus.yml}:/etc/prometheus/prometheus.yml:ro
+      - ./results/prometheus:/prometheus
     ports:
       - ${BIND_ADDR:-127.0.0.1}:9090:9090
 
   celery-exporter:
     image: docker.io/danihodovic/celery-exporter:0.12.2
-    profiles: [edge]
+    profiles: [monitor]
     environment:
-      CE_BROKER_URL: redis://${BROKER_HOST:-redis-broker}:${BROKER_PORT:-6379}/1
+      CE_BROKER_URL: redis://${REDIS_HOST:?}:6379/1
     ports:
       - ${BIND_ADDR:-127.0.0.1}:9808:9808
     command: --retry-interval=5
@@ -133,6 +131,7 @@ services:
     profiles: [redis-auth]
     environment:
       REDIS_ADDR: redis://redis-auth:6379
+      REDIS_EXPORTER_CHECK_SINGLE_KEYS: db1=light,db1=heavy
     ports:
       - ${BIND_ADDR:-127.0.0.1}:9121:9121
     depends_on: [redis-auth]
@@ -171,12 +170,10 @@ services:
       - /sys:/sys:ro
       - /sys/fs/cgroup:/sys/fs/cgroup:ro
       - /dev/disk:/dev/disk:ro
-      - ${HOME}/.local/share/containers:/var/lib/containers:ro
-      - ${XDG_RUNTIME_DIR}/podman/podman.sock:/var/run/podman/podman.sock
+      - ${CONTAINERS_STORAGE:?}:/var/lib/containers:ro
+      - ${PODMAN_SOCKET:?}:/var/run/podman/podman.sock
     ports:
       - ${BIND_ADDR:-127.0.0.1}:8080:8080
 
 volumes:
   redis_broker_data:
-  prometheus_data:
-  worker_metrics:

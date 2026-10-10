@@ -1,0 +1,4 @@
+#!/bin/sh
+cd /opt/somasafe/backend
+export PROD_ENV_FILE=prod/cloud.env PODMAN_COMPOSE_PROVIDER=podman-compose REGISTRY=${registry} TAG=${tag}
+exec podman compose -f compose.yaml -f compose.prod.yaml --env-file prod/cloud.env %{ for profile in profiles }--profile ${profile} %{ endfor }"$@"

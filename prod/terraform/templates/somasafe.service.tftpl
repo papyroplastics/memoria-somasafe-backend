@@ -1,0 +1,16 @@
+[Unit]
+Description=SomaSafe ${name} services
+Wants=network-online.target
+After=network-online.target podman.socket google-startup-scripts.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=/usr/local/bin/somasafe-pull
+ExecStart=/usr/local/bin/somasafe-compose up -d --no-build
+ExecStop=/usr/local/bin/somasafe-compose down
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

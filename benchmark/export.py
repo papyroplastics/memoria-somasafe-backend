@@ -11,7 +11,7 @@ import numpy as np
 import pandas as pd
 
 RESULTS_DIR = Path(os.environ.get("RESULTS_DIR", "results")) / "benchmark"
-WORKER_DIR = "worker_metrics"
+WORKER_DIR = RESULTS_DIR.parent / "worker-metrics"
 REQUEST_LOGS = "requests_*.csv"
 SECURE_SESSIONS = "secure_sessions.csv"
 SCHEDULE_LAG = "schedule_lag"
@@ -35,13 +35,13 @@ QUERIES = {
     "container_net_tx": f"sum by ({SERVICE}) "
                         f"(rate(container_network_transmit_bytes_total{{{COMPOSE_FILTER}}}[10s]))",
     "host_cpu": '1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[10s]))',
-    "queue_depth": 'redis_key_size{instance_role="broker", key=~"light|heavy"}',
+    "queue_depth": 'redis_key_size{key=~"light|heavy"}',
     "task_rate": "sum by (name, hostname) (rate(celery_task_succeeded_total[30s]))",
     "task_failed": "sum by (name, hostname) (rate(celery_task_failed_total[30s]))",
     "task_runtime_p95": "histogram_quantile(0.95, sum by (le, name) (rate(celery_task_runtime_bucket[30s])))",
     "pg_connections": "sum by (state) (pg_stat_activity_count)",
     "pg_commits": 'rate(pg_stat_database_xact_commit{datname="somasafe"}[10s])',
-    "redis_ops": "sum by (instance_role) (rate(redis_commands_processed_total[10s]))",
+    "redis_ops": "sum(rate(redis_commands_processed_total[10s]))",
     "upstreams_healthy": "caddy_reverse_proxy_upstreams_healthy",
 }
 AGGREGATION_TASK = "federated_aggregation"
@@ -94,7 +94,7 @@ def query_range(prometheus: str, query: str, start: float, end: float) -> pd.Dat
 
 def cut_worker_metrics(run_dir: Path, start: pd.Timestamp, end: pd.Timestamp) -> dict[str, pd.DataFrame]:
     parts = defaultdict(list)
-    for path in sorted((run_dir / WORKER_DIR).glob("*/*.csv")):
+    for path in sorted(WORKER_DIR.glob("*/*.csv")):
         frame = pd.read_csv(path)
         frame.insert(0, "process", path.parent.name)
         parts[path.stem.rsplit(".", 1)[-1]].append(frame)
@@ -361,7 +361,8 @@ def load_worker_metrics(run_dir: Path) -> dict[str, pd.DataFrame]:
 def main() -> None:
     parser = argparse.ArgumentParser(description="Export a benchmark run's metrics and plot them")
     parser.add_argument("run_id")
-    parser.add_argument("--prometheus", default="http://localhost:9090", help="Prometheus base URL")
+    parser.add_argument("--prometheus", default=os.environ.get("BENCH_PROMETHEUS_URL", "http://localhost:9090"),
+                        help="Prometheus base URL")
     parser.add_argument("--requery", action="store_true",
                         help="query Prometheus again even if the run already holds its series")
     args = parser.parse_args()

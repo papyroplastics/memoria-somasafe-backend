@@ -30,9 +30,9 @@ worker/    Celery task layer (models built on first use): quantization, aggregat
 scripts/   CLI entry points: `system/` (dataset, train, seed, export), `integration/`
            (headless federated/secure runs against the real API), `figures/` (report
            result and figure generators).
-prod/      Production-like container stack (gateways behind Caddy, workers, Prometheus),
-           with one compose profile per cloud host. See its README.
-benchmark/ Load-test tooling (Locust, reset, export, checks) run against `prod/`. See its
+prod/      Production-like container stack (gateways, workers, Prometheus) and its
+           Terraform cloud deployment, one compose profile per host. See its README.
+benchmark/ Load-test tooling (Locust, collect, export) run against `prod/`. See its
            README.
 ```
 
