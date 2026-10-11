@@ -21,6 +21,8 @@ from common.db import (
     utcnow,
 )
 from common.secure_agg import generate_keypair
+from worker.compute import Action, SweepAction
+from worker.tasks.secure import _fail
 from ..routes import secure as secure_routes
 from ..routes.secure import _open_session
 
@@ -290,3 +292,35 @@ def test_submit_wrong_length_400(client, auth_headers, owned_device):
     resp = client.post(f"/model/secure/submit/{session_id}",
                        headers=auth_headers | OCTET_STREAM, content=b"\x00" * 8)
     assert resp.status_code == 400
+
+
+def test_submit_racing_sweep_fail(client, auth_headers, owned_device, monkeypatch):
+    model = _secure_model(client, auth_headers)
+    join = _join(client, auth_headers, model["key"]).json()
+    session_id = join["session_id"]
+    _seal(session_id)
+    action = SweepAction(session_id, model["key"], Action.fail, SecureSessionStatus.sealed)
+
+    def fail_session():
+        with Session(engine) as session:
+            _fail(session, action, utcnow())
+            session.commit()
+
+    sweep = threading.Thread(target=fail_session)
+    real_latest = secure_routes.get_latest_weights
+
+    def latest_during_sweep(session, key):
+        sweep.start()
+        sweep.join(timeout=1)
+        return real_latest(session, key)
+
+    monkeypatch.setattr(secure_routes, "get_latest_weights", latest_during_sweep)
+    resp = client.post(f"/model/secure/submit/{session_id}",
+                       headers=auth_headers | OCTET_STREAM,
+                       content=b"\x00" * (model["weight_count"] * 4))
+    sweep.join()
+
+    assert resp.status_code == 202, resp.text
+    assert _status(session_id) is SecureSessionStatus.failed
+    with Session(engine) as session:
+        assert session.get(SecureSessionMember, (session_id, join["user_id"])) is None

@@ -8,7 +8,7 @@ import base64
 
 from fastapi import Body, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import func, text
+from sqlalchemy import func, text, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session, select
@@ -156,9 +156,11 @@ def secure_join(key: str, weights_id: int, body: SecureJoinRequest,
         add_usage(RateLimit.secure_join, user_id, key, SECURE_JOIN_COOLDOWN_SECONDS)
 
 
-def _require_member(session: Session, session_id: int,
-                    user_id: int) -> tuple[SecureSession, SecureSessionMember]:
-    current = session.get(SecureSession, session_id)
+def _require_member(session: Session, session_id: int, user_id: int,
+                    lock: bool = False) -> tuple[SecureSession, SecureSessionMember]:
+    current = session.get(SecureSession, session_id,
+                          with_for_update={"read": True} if lock else None,
+                          populate_existing=lock)
     if current is None:
         raise HTTPException(status_code=404, detail="Session not found")
     member = session.get(SecureSessionMember, (session_id, user_id))
@@ -197,9 +199,10 @@ def secure_descriptor(session_id: int,
 def secure_submit(session_id: int, body: bytes = Body(...),
                   session: Session = Depends(get_session),
                   user_id: int = Depends(get_current_user_id)):
-    current, member = _require_member(session, session_id, user_id)
+    current, member = _require_member(session, session_id, user_id, lock=True)
+    model_key = current.model_key
     require_device_owner(session, user_id)
-    check_limit(RateLimit.weight_submit, user_id, current.model_key,
+    check_limit(RateLimit.weight_submit, user_id, model_key,
                 SUBMIT_DAILY_LIMIT, SUBMIT_DAILY_WINDOW_SECONDS)
 
     if current.status != SecureSessionStatus.sealed:
@@ -209,7 +212,7 @@ def secure_submit(session_id: int, body: bytes = Body(...),
     if member.masked is not None:
         raise HTTPException(status_code=409, detail="Already submitted for this session")
 
-    active = get_latest_weights(session, current.model_key)
+    active = get_latest_weights(session, model_key)
     if active is None or active.id != current.base_weights_id:
         raise HTTPException(status_code=409,
                             detail="Session base weights are stale; the session is void")
@@ -219,12 +222,18 @@ def secure_submit(session_id: int, body: bytes = Body(...),
         raise HTTPException(status_code=400,
                             detail=f"Expected {version.weight_count} little-endian uint32 elements")
 
+    stored = session.execute(
+        update(SecureSessionMember)
+        .where(SecureSessionMember.session_id == session_id,  # type: ignore[arg-type]
+               SecureSessionMember.user_id == user_id,  # type: ignore[arg-type]
+               SecureSessionMember.masked.is_(None))  # type: ignore[union-attr]
+        .values(masked=bytes(body), submitted_at=utcnow())
+        .execution_options(synchronize_session=False)).rowcount  # type: ignore[attr-defined]
+    if stored != 1:
+        session.rollback()
+        raise HTTPException(status_code=409, detail="Already submitted for this session")
     try:
-        member.masked = bytes(body)
-        member.submitted_at = utcnow()
-        session.add(member)
         session.commit()
         return {"session_id": session_id, "submitted": True}
     finally:
-        add_usage(RateLimit.weight_submit, user_id, current.model_key,
-                  SUBMIT_DAILY_WINDOW_SECONDS)
+        add_usage(RateLimit.weight_submit, user_id, model_key, SUBMIT_DAILY_WINDOW_SECONDS)
