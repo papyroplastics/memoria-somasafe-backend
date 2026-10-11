@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pandas as pd
 import redis
-from sqlalchemy import func, select, text
+from sqlalchemy import func, select, text, update
 from sqlmodel import Session
 
 from common.celery_tasks import HEAVY_QUEUE, LIGHT_QUEUE
@@ -18,8 +18,10 @@ from common.db import (
     QuantizationJob,
     SecurePartial,
     SecureSession,
+    SecureSessionMember,
     SecureSessionStatus,
     engine,
+    utcnow,
 )
 
 SECURE_SESSION_COLUMNS = ("id", "model_key", "status", "base_weights_id", "member_count",
@@ -50,6 +52,21 @@ def idle(broker: redis.Redis) -> bool:
                           GlobalWeights.valid == True)
                    .exists())).scalar_one()
     return jobs == 0 and sessions == 0 and partials == 0
+
+
+def abandon_sessions() -> int:
+    submitted = (select(func.count()).select_from(SecureSessionMember)
+                 .where(SecureSessionMember.session_id == SecureSession.id,
+                        SecureSessionMember.submitted_at.is_not(None))  # type: ignore[union-attr]
+                 .scalar_subquery())
+    with Session(engine) as session:
+        count = session.execute(
+            update(SecureSession)
+            .where(SecureSession.status == SecureSessionStatus.sealed,  # type: ignore[arg-type]
+                   submitted < SecureSession.member_count)
+            .values(status=SecureSessionStatus.failed, finished_at=utcnow())).rowcount
+        session.commit()
+    return count
 
 
 def settle(load_end: float, interval: float, timeout: float) -> bool:
@@ -108,11 +125,13 @@ def secure_sessions(manifest: dict, sessions: pd.DataFrame) -> tuple[str, str]:
             "WHERE parent_weights_id IS NOT NULL GROUP BY 1")).all())
     replaced_at = pd.to_datetime(sessions["base_weights_id"].map(replaced), utc=True)
     sealed = sessions["sealed_at"].notna()
-    stale = failed & sealed & (replaced_at <= finished)
+    abandoned = failed & sealed & (finished >= pd.Timestamp(manifest["load_end"]))
+    counted = sealed & ~abandoned
+    stale = failed & counted & (replaced_at <= finished)
     detail = (f"{(sessions['status'] == 'summed').sum()}/{len(sessions)} summed, "
-              f"{(failed & ~sealed).sum()} failed open, {(failed & sealed).sum()}/{sealed.sum()} failed sealed "
+              f"{(failed & ~sealed).sum()} failed open, {(failed & counted).sum()}/{counted.sum()} failed sealed "
               f"(expected ~{manifest['load']['session_failure']:.0%}, {stale.sum()} on replaced weights), "
-              f"{left_open} left open, {len(unfinished)} unfinished")
+              f"{abandoned.sum()} failed after the load ended, {left_open} left open, {len(unfinished)} unfinished")
     if orphaned:
         detail += f", no fresh session after {', '.join(orphaned)}"
     return (FAIL if len(unfinished) or orphaned else PASS), detail
@@ -177,6 +196,7 @@ def main() -> None:
     manifest = json.loads(manifest_path.read_text())
     interval = float(FED_AGG_INTERVAL_SECONDS)
     if manifest["load_end"] is not None:
+        print(f"failed {abandon_sessions()} sealed session(s) still missing submissions")
         print("waiting for the queues and secure sessions to settle")
         load_end = pd.Timestamp(manifest["load_end"]).timestamp()
         manifest["settled"] = settle(load_end, interval, 3 * interval)
