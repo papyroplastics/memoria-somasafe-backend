@@ -15,7 +15,7 @@ from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.orm import defer
 from sqlmodel import Field, Session, SQLModel, create_engine, select
 
-from common.config import DATABASE_URL
+from common.config import DATABASE_URL, DB_MAX_OVERFLOW, DB_POOL_SIZE
 from common.secure_agg import compute_scale
 
 
@@ -294,7 +294,7 @@ for _blob_model, _column in ((WeightsArtifact, "data"), (QuantizationResult, "da
             f"ALTER COLUMN {_column} SET STORAGE EXTERNAL"))
 
 
-engine = create_engine(DATABASE_URL)
+engine = create_engine(DATABASE_URL, pool_size=DB_POOL_SIZE, max_overflow=DB_MAX_OVERFLOW)
 
 
 def init_db() -> None:

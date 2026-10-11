@@ -19,7 +19,7 @@ x-celery-template: &celery
     - ./shared/gen/server-private-key.pem:/app/shared/gen/server-private-key.pem:ro
     - ./results/worker-metrics:/var/lib/worker-metrics
 
-x-every-host: &every-host [edge, monitor, fastapi-1, fastapi-2, celery-1, celery-2, postgres, redis-auth, redis-broker, client-1]
+x-every-host: &every-host [edge, monitor, fastapi-1, fastapi-2, fastapi-3, fastapi-4, celery-1, celery-2, postgres, redis-auth, redis-broker, client-1]
 
 services:
   postgres:
@@ -53,6 +53,20 @@ services:
     hostname: fastapi-2
     ports:
       - ${BIND_ADDR:-127.0.0.1}:8002:8000
+
+  fastapi-3:
+    <<: *fastapi
+    profiles: [fastapi-3]
+    hostname: fastapi-3
+    ports:
+      - ${BIND_ADDR:-127.0.0.1}:8003:8000
+
+  fastapi-4:
+    <<: *fastapi
+    profiles: [fastapi-4]
+    hostname: fastapi-4
+    ports:
+      - ${BIND_ADDR:-127.0.0.1}:8004:8000
 
   celery-1:
     <<: *celery

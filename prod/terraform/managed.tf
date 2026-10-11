@@ -37,6 +37,11 @@ resource "google_sql_database_instance" "postgres" {
       zone = var.zone
     }
 
+    database_flags {
+      name  = "max_connections"
+      value = "1000"
+    }
+
     backup_configuration {
       enabled                        = false
       point_in_time_recovery_enabled = false

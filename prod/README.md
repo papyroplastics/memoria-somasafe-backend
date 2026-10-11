@@ -7,8 +7,9 @@ run the local stack and the cloud stack that the [benchmark](../benchmark/README
 
 `compose.prod.yaml` sits on top of `compose.yaml` (`postgres` and `redis-auth`) and adds:
 
-- `fastapi-1`/`fastapi-2` gateways (`api.Containerfile`, no TensorFlow), behind Caddy
-  locally, which round-robins across `API_UPSTREAMS` and health-checks `/healthz`.
+- `fastapi-1` to `fastapi-4` gateways (`api.Containerfile`, no TensorFlow), behind Caddy
+  locally, which round-robins across `API_UPSTREAMS` and health-checks `/healthz`. Locally
+  only the first two are used; `fastapi-3`/`fastapi-4` exist for the cloud topologies.
 - `celery-1` (light + heavy queues, runs beat) and `celery-2` (heavy only), from
   `worker.Containerfile`, writing per-task stage timings to `results/worker-metrics`.
 - Prometheus and celery-exporter, plus Postgres and Redis exporters, node-exporter and
@@ -21,7 +22,7 @@ Every service belongs to profiles, so each cloud host starts only its own servic
 
 | Profile | Services |
 | --- | --- |
-| `fastapi-1`, `fastapi-2` | the gateway |
+| `fastapi-1` to `fastapi-4` | the gateway |
 | `celery-1`, `celery-2` | the worker |
 | `postgres` | `postgres` |
 | `redis-auth` | `redis-auth` |
@@ -53,25 +54,45 @@ recreates the data services.
 Every container reads one env file, which is also the compose `--env-file` (compose only
 reads the first one, so shared values are duplicated). `local.env` runs everything on one
 small machine by compose names, one worker process each, stock Postgres config. `cloud.env`
-uses the `-inst` host names, publishes ports on every interface and leaves out
-`POSTGRES_HOST`/`REDIS_HOST`, which Terraform appends with the managed services' addresses.
-`postgres.conf`, sized for a 4 GB host, is only used locally. Both compress the round cadence (aggregation every 60 s, short seal
-and fail timeouts, a 5 s sweep) so a few minutes see several rounds, and set a long token
-TTL. Containers only pick up env changes when recreated.
+uses the `-inst` host names, publishes ports on every interface and leaves out the per-host
+values, which Terraform appends to each host's copy: `POSTGRES_HOST`/`REDIS_HOST` with the
+managed services' addresses, `BENCH_API_URL` with every gateway of the topology
+(comma-separated), and `WEB_CONCURRENCY`/`WORKER_CONCURRENCY` with the host's vCPU count.
+`postgres.conf`, sized for a 4 GB host, is only used locally. Both compress the round
+cadence (aggregation every 60 s locally and 30 s in the cloud, short seal and fail timeouts,
+a 5 s or 2 s sweep) so a few minutes see several rounds, and set a long token TTL.
+Containers only pick up env changes when recreated.
+
+`DB_POOL_SIZE`/`DB_MAX_OVERFLOW` size the SQLAlchemy pool of every process (5 and 10 by
+default). The cloud uses 40 and 10, so a gateway process never waits on the pool before its
+40 threadpool threads are busy; Cloud SQL allows 1,000 connections.
 
 Host-side commands (`prod-db-seed`, `prod-collect`) load `local.env` with Postgres and Redis
 on `localhost`, which is either the local stack or the cloud tunnel.
 
 ## Cloud
 
-`terraform/` deploys a 1x1 stack in `us-east1-c`, one Compute Engine VM per host named
-`<host>-inst`: `fastapi-1`, `celery-1` and `client-1`, which runs `monitor` and is the SSH
-bastion. There is no Caddy; the client hits `fastapi-1-inst` directly. The VMs are
-`c4-standard-4` on Hyperdisk Balanced, filling the 12 vCPU quota. Hosts have no external
-IPv4: SSH goes over IPv6, outgoing traffic through Cloud NAT.
+`terraform/` deploys a stack in `us-east1-c`, one Compute Engine VM per host named
+`<host>-inst`, on c4 machines with Hyperdisk Balanced. `-var topology=...` picks one of the
+presets in `variables.tf`, each filling the 12 vCPU quota:
+
+| Topology | Gateways | `celery-1` | `client-1` |
+| --- | --- | --- | --- |
+| `1x1` (default) | 1 × `c4-standard-4` | `c4-standard-4` | `c4-standard-4` |
+| `2x1` | 2 × `c4-standard-4` | `c4-standard-2` | `c4-standard-2` |
+| `4x1` | 4 × `c4-standard-2` | `c4-standard-2` | `c4-standard-2` |
+
+`client-1` runs `monitor` and is the SSH bastion. There is no Caddy: the benchmark spreads
+its users across the gateways itself. `prometheus.cloud.yml` is a Terraform template that
+gets the topology's gateways and servers, so it only works once rendered. Hosts have no
+external IPv4: SSH goes over IPv6, outgoing traffic through Cloud NAT.
+
+Pass the same `-var topology=...` to every `apply` and `destroy`, since a plain `apply`
+goes back to `1x1`. Switching to a topology with more hosts can exceed the quota while the
+old VMs still exist: shrink or remove them first with `-target`, then apply the rest.
 
 Postgres and Redis are managed services, which don't count against that quota: Cloud SQL
-(Postgres 18, Enterprise Plus, `sql_tier`) and Memorystore (Valkey 9.1, cluster mode
+(Postgres 18, Enterprise Plus, `sql_tier`, `db-perf-optimized-N-8` by default) and Memorystore (Valkey 9.1, cluster mode
 disabled, `redis_node_type`), both zonal, without replicas, backups or persistence, and
 without auth or TLS. Each is reached through a Private Service Connect endpoint that a
 service connection policy creates in the subnet; its address is a Terraform output
@@ -103,7 +124,7 @@ read the registry and the key secret.
 ### Session
 
 ```bash
-terraform -chdir=prod/terraform apply
+terraform -chdir=prod/terraform apply -var topology=1x1
 prod/connect.sh       # own terminal: tunnels Postgres, Redis and Prometheus through client-1 until killed
 prod/init.sh 200      # builds and pushes the images, uploads the key, seeds 200 users
 ```
@@ -112,7 +133,7 @@ Per run:
 
 ```bash
 ssh <user>@<client-1-inst>       # address in `terraform output hosts`
-sudo somasafe-compose --profile bench run --rm bench benchmark.run 1x1 --processes 2 ...
+sudo somasafe-compose --profile bench run --rm bench benchmark.run <topology> --processes 2 ...
 prod/collect.sh <run_id>         # back on the local machine
 ```
 

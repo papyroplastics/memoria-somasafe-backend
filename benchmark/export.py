@@ -51,7 +51,8 @@ STAGED_TASKS = {"federated_aggregation": ("cohort", "submissions", "aggregated")
 PALETTE = ["#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#4a3aa7", "#e34948"]
 MUTED = "#898781"
 SURFACE = "#fcfcfb"
-SERVICES = ("caddy", "fastapi-1", "fastapi-2", "celery-1", "celery-2", "postgres", "redis-auth", "redis-broker")
+SERVICES = ("fastapi-1", "fastapi-2", "fastapi-3", "fastapi-4", "celery-1", "celery-2", "postgres", "redis-auth",
+            "caddy", "redis-broker")
 SERVICE_COLORS = dict(zip(SERVICES, PALETTE))
 STATUS_COLORS = {"summed": "#0ca30c", "failed": "#d03b3b", "in flight": MUTED}
 
@@ -210,7 +211,7 @@ def plot_containers(prom: dict[str, pd.DataFrame], start: float, duration: float
 
 def plot_gateways(prom: dict[str, pd.DataFrame], start: float, duration: float, path: Path) -> None:
     fig, (rate, share) = time_axes(2, "Gateways", duration)
-    table = wide(prom["requests"], start, ["instance"])
+    table = wide(prom["requests"], start, ["instance"]).rename(columns=lambda name: name.removesuffix("-inst"))
     rate.set_title("requests per gateway")
     plot_lines(rate, table, SERVICE_COLORS)
     rate.set_ylabel("req/s")

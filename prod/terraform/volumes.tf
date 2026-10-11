@@ -4,7 +4,7 @@ data "google_compute_image" "debian" {
 }
 
 resource "google_compute_disk" "disk" {
-  for_each = var.hosts
+  for_each = local.hosts
 
   name  = "${each.key}-disk"
   image = data.google_compute_image.debian.self_link

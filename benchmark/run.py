@@ -20,7 +20,7 @@ SPLITS = {
     "extreme": ["mnist-mlp-heavy"],
 }
 SUBMISSION_TYPES = ("raw", "quantize", "secure")
-TOPOLOGIES = ("1x1", "2x2")
+TOPOLOGIES = ("1x1", "2x2", "2x1", "4x1")
 TEST_SUBJECTS = 15
 SHARED_PASSWORD = "test"
 
@@ -98,13 +98,15 @@ def main() -> None:
                         help="run as a master expecting this many remote Locust workers instead")
     parser.add_argument("--session-failure", type=float, default=0.1,
                         help="probability of a secure session failing on the seal timeout")
-    parser.add_argument("--host", default=os.environ.get("BENCH_API_URL", "http://localhost:8000"))
+    parser.add_argument("--host", default=os.environ.get("BENCH_API_URL", "http://localhost:8000"),
+                        help="gateway URL, or a comma-separated list users are spread across")
     args = parser.parse_args()
 
     if "FED_AGG_INTERVAL_SECONDS" not in os.environ:
         raise SystemExit("FED_AGG_INTERVAL_SECONDS is not set, run with the stack's env file")
     interval = float(os.environ["FED_AGG_INTERVAL_SECONDS"])
-    host = args.host.rstrip("/")
+    hosts = [host.rstrip("/") for host in args.host.split(",") if host]
+    host = hosts[0]
     stride = args.workers or args.processes
     stages = parse_stages(args.stages)
     users = max(active for _, active in stages)
@@ -135,7 +137,7 @@ def main() -> None:
         "models": models,
         "load": {"users": users, "spawn_rate": args.spawn_rate, "stages": args.stages,
                  "processes": stride, "interval": interval,
-                 "session_failure": args.session_failure, "host": host},
+                 "session_failure": args.session_failure, "hosts": hosts},
         "stages": [{"start": iso(begin), "end": iso(end), "active": active}
                    for (_, active), begin, end in zip(stages, boundaries, boundaries[1:])],
         "start": iso(schedule_start),
@@ -151,7 +153,7 @@ def main() -> None:
         sys.executable, "-m", "locust", "-f", str(LOCUSTFILE), "--headless", "--only-summary",
         *distribution, "--host", host, "--users", str(users), "--spawn-rate", str(args.spawn_rate),
         "--run-time", f"{math.ceil(boundaries[-1] - schedule_start)}s",
-        "--run-dir", str(run_dir), "--models", ",".join(models), "--interval", str(interval),
+        "--hosts", ",".join(hosts), "--run-dir", str(run_dir), "--models", ",".join(models), "--interval", str(interval),
         "--user-stride", str(stride), "--session-failure", str(args.session_failure),
         "--stages", args.stages, "--schedule-start", str(schedule_start),
     ])

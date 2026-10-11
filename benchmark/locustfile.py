@@ -47,6 +47,8 @@ def add_arguments(parser) -> None:
                        help="probability of a secure session failing, its lowest user id never submits")
     group.add_argument("--stages", default="",
                        help="comma-separated <seconds>:<active users> stages, every user active when empty")
+    group.add_argument("--hosts", default="",
+                       help="comma-separated gateway URLs, users are spread across them by number")
     group.add_argument("--schedule-start", type=float, default=0.0,
                        help="unix time the stages count from, shared by every Locust process")
 
@@ -144,6 +146,16 @@ class Seat:
 class Client(FastHttpUser):
     spawned = 0
 
+    def __init__(self, environment) -> None:
+        options = environment.parsed_options
+        index = Client.spawned
+        Client.spawned += 1
+        self.number = 1 + max(environment.runner.worker_index, 0) + index * options.user_stride
+        hosts = [host for host in options.hosts.split(",") if host]
+        if hosts:
+            self.host = hosts[self.number % len(hosts)]
+        super().__init__(environment)
+
     def wait_time(self) -> float:
         if self.next_start is None:
             return PARK_SECONDS
@@ -151,9 +163,6 @@ class Client(FastHttpUser):
 
     def on_start(self) -> None:
         self.options = self.environment.parsed_options
-        index = Client.spawned
-        Client.spawned += 1
-        self.number = 1 + max(self.environment.runner.worker_index, 0) + index * self.options.user_stride
         self.username = f"test_{self.number}"
         self.password = self.username if self.number <= TEST_SUBJECTS else SHARED_PASSWORD
         self.offset = (self.number * GOLDEN) % 1 * self.options.interval

@@ -1,16 +1,27 @@
 locals {
   registry_host = "${var.region}-docker.pkg.dev"
   registry      = "${local.registry_host}/${var.project}/${google_artifact_registry_repository.registry.repository_id}"
-  cloud_env = "${file("${path.module}/../cloud.env")}POSTGRES_HOST=${local.postgres_host}\nREDIS_HOST=${local.redis_host}\n"
-  files = merge({
-    for file in [
-      "compose.yaml",
-      "compose.prod.yaml",
-      "prod/prometheus.cloud.yml",
-    ] : "/opt/somasafe/backend/${file}" => file("${path.module}/../../${file}")
-  }, { "/opt/somasafe/backend/prod/cloud.env" = local.cloud_env })
+  hosts         = var.topologies[var.topology]
+  gateways      = sort([for name in keys(local.hosts) : name if startswith(name, "fastapi-")])
+  servers       = sort([for name in keys(local.hosts) : "${name}-inst" if name != "client-1"])
+  files = {
+    for file in ["compose.yaml", "compose.prod.yaml"] :
+    "/opt/somasafe/backend/${file}" => file("${path.module}/../../${file}")
+  }
+  shared_files = merge(local.files, {
+    "/opt/somasafe/backend/prod/prometheus.cloud.yml" = templatefile("${path.module}/../prometheus.cloud.yml", {
+      gateways = [for name in local.gateways : "${name}-inst:800${trimprefix(name, "fastapi-")}"]
+      servers  = local.servers
+    })
+  })
   host_files = {
-    for name, host in var.hosts : name => {
+    for name, host in local.hosts : name => {
+      "/opt/somasafe/backend/prod/cloud.env" = join("", [
+        file("${path.module}/../cloud.env"),
+        "POSTGRES_HOST=${local.postgres_host}\nREDIS_HOST=${local.redis_host}\n",
+        "BENCH_API_URL=${join(",", [for gateway in local.gateways : "http://${gateway}-inst:800${trimprefix(gateway, "fastapi-")}"])}\n",
+        "WEB_CONCURRENCY=${regex("\\d+$", host.machine)}\nWORKER_CONCURRENCY=${regex("\\d+$", host.machine)}\n",
+      ])
       "/usr/local/bin/somasafe-token"              = file("${path.module}/templates/somasafe-token.sh")
       "/etc/containers/containers.conf.d/dns.conf" = "[containers]\ndns_searches = [\"${var.zone}.c.${var.project}.internal\"]\n"
       "/usr/local/bin/somasafe-pull" = templatefile("${path.module}/templates/somasafe-pull.sh.tftpl", {
@@ -33,7 +44,7 @@ locals {
 }
 
 resource "google_compute_instance" "instance" {
-  for_each = var.hosts
+  for_each = local.hosts
 
   name                      = "${each.key}-inst"
   machine_type              = each.value.machine
@@ -64,7 +75,7 @@ resource "google_compute_instance" "instance" {
 
   metadata = {
     startup-script = templatefile("${path.module}/templates/startup.sh.tftpl", {
-      files = merge(local.files, local.host_files[each.key])
+      files = merge(local.shared_files, local.host_files[each.key])
     })
     enable-oslogin : "TRUE"
     enable-oslogin-2fa : "FALSE"

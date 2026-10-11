@@ -33,6 +33,12 @@ database checks to `checks.json` and resets the stack.
   round.
 - **Configuration.** Everything comes from the stack's env file: the aggregation interval,
   and `BENCH_API_URL`/`BENCH_PROMETHEUS_URL`, the defaults of `--host` and `--prometheus`.
+- **Several gateways.** `--host` takes a comma-separated list. Without a load balancer in
+  front, each user sends all its requests to one gateway, picked by its user number modulo
+  the number of gateways, so the load splits evenly at every stage. The setup requests
+  (model list, user check) go to the first one. In the cloud, Terraform sets
+  `BENCH_API_URL` to every gateway of the topology. The topology argument (`1x1`, `2x2`,
+  `2x1`, `4x1`) is only a label for the run id and the manifest.
 - **Reset, not recreate.** The reset truncates submissions, jobs, secure sessions with
   their seats and partial results, and auth sessions, drops every aggregated weight
   snapshot except each version's seeded one and flushes Redis, keeping the Celery queue

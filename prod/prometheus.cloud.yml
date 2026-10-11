@@ -5,7 +5,7 @@ global:
 scrape_configs:
   - job_name: fastapi
     static_configs:
-      - targets: [fastapi-1-inst:8001]
+      - targets: [${join(", ", gateways)}]
     relabel_configs: &host-instance
       - source_labels: [__address__]
         regex: '(.+):\d+'
@@ -27,7 +27,7 @@ scrape_configs:
 
   - job_name: node
     static_configs:
-      - targets: [fastapi-1-inst:9100, celery-1-inst:9100]
+      - targets: [${join(", ", [for server in servers : "${server}:9100"])}]
       - targets: [client-1-inst:9100]
         labels:
           role: client
@@ -35,7 +35,7 @@ scrape_configs:
 
   - job_name: cadvisor
     static_configs:
-      - targets: [fastapi-1-inst:8080, celery-1-inst:8080]
+      - targets: [${join(", ", [for server in servers : "${server}:8080"])}]
       - targets: [client-1-inst:8080]
         labels:
           role: client

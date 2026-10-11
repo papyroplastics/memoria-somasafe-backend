@@ -44,6 +44,8 @@ _POSTGRES_HOST = os.environ.get("POSTGRES_HOST", "localhost")
 _POSTGRES_PORT = int(os.environ.get("POSTGRES_PORT", 5432))
 DATABASE_URL = (f"postgresql+psycopg://{_POSTGRES_USER}:{_POSTGRES_PASSWORD}"
                 f"@{_POSTGRES_HOST}:{_POSTGRES_PORT}/{_require('POSTGRES_DB')}")
+DB_POOL_SIZE = int(os.environ.get("DB_POOL_SIZE", 5))
+DB_MAX_OVERFLOW = int(os.environ.get("DB_MAX_OVERFLOW", 10))
 
 # Auth sessions and rate limiting on db 0, the Celery broker and result backend on
 # db 1, of the same instance unless BROKER_HOST/BROKER_PORT point at another one.
