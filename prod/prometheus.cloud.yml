@@ -19,15 +19,15 @@ scrape_configs:
 
   - job_name: postgres
     static_configs:
-      - targets: [postgres-inst:9187]
+      - targets: [client-1-inst:9187]
 
   - job_name: redis
     static_configs:
-      - targets: [redis-auth-inst:9121]
+      - targets: [client-1-inst:9121]
 
   - job_name: node
     static_configs:
-      - targets: [fastapi-1-inst:9100, celery-1-inst:9100, postgres-inst:9100, redis-auth-inst:9100]
+      - targets: [fastapi-1-inst:9100, celery-1-inst:9100]
       - targets: [client-1-inst:9100]
         labels:
           role: client
@@ -35,7 +35,7 @@ scrape_configs:
 
   - job_name: cadvisor
     static_configs:
-      - targets: [fastapi-1-inst:8080, celery-1-inst:8080, postgres-inst:8080, redis-auth-inst:8080]
+      - targets: [fastapi-1-inst:8080, celery-1-inst:8080]
       - targets: [client-1-inst:8080]
         labels:
           role: client

@@ -1,15 +1,14 @@
 locals {
   registry_host = "${var.region}-docker.pkg.dev"
   registry      = "${local.registry_host}/${var.project}/${google_artifact_registry_repository.registry.repository_id}"
-  files = {
+  cloud_env = "${file("${path.module}/../cloud.env")}POSTGRES_HOST=${local.postgres_host}\nREDIS_HOST=${local.redis_host}\n"
+  files = merge({
     for file in [
       "compose.yaml",
       "compose.prod.yaml",
-      "prod/cloud.env",
-      "prod/postgres.conf",
       "prod/prometheus.cloud.yml",
     ] : "/opt/somasafe/backend/${file}" => file("${path.module}/../../${file}")
-  }
+  }, { "/opt/somasafe/backend/prod/cloud.env" = local.cloud_env })
   host_files = {
     for name, host in var.hosts : name => {
       "/usr/local/bin/somasafe-token"              = file("${path.module}/templates/somasafe-token.sh")

@@ -23,14 +23,16 @@ Every service belongs to profiles, so each cloud host starts only its own servic
 | --- | --- |
 | `fastapi-1`, `fastapi-2` | the gateway |
 | `celery-1`, `celery-2` | the worker |
-| `postgres` | `postgres`, `postgres-exporter` |
-| `redis-auth` | `redis-auth`, `redis-auth-exporter` |
+| `postgres` | `postgres` |
+| `redis-auth` | `redis-auth` |
 | `edge` | `caddy` |
-| `monitor` | `prometheus`, `celery-exporter` |
+| `monitor` | `prometheus` and the Celery, Postgres and Redis exporters |
 | `client-1` | only the per-host exporters |
 | `bench` | `bench`, only through `run` |
 
-`node-exporter` and `cadvisor` are in every host profile.
+`node-exporter` and `cadvisor` are in every host profile. The Postgres and Redis exporters
+reach their services through `POSTGRES_HOST`/`REDIS_HOST`, so they also work against the
+managed ones in the cloud, where they skip Redis `CONFIG`, which Memorystore blocks.
 
 ## Local
 
@@ -51,8 +53,9 @@ recreates the data services.
 Every container reads one env file, which is also the compose `--env-file` (compose only
 reads the first one, so shared values are duplicated). `local.env` runs everything on one
 small machine by compose names, one worker process each, stock Postgres config. `cloud.env`
-uses the `-inst` host names, publishes ports on every interface and loads `postgres.conf`,
-sized for a 4 GB host. Both compress the round cadence (aggregation every 60 s, short seal
+uses the `-inst` host names, publishes ports on every interface and leaves out
+`POSTGRES_HOST`/`REDIS_HOST`, which Terraform appends with the managed services' addresses.
+`postgres.conf`, sized for a 4 GB host, is only used locally. Both compress the round cadence (aggregation every 60 s, short seal
 and fail timeouts, a 5 s sweep) so a few minutes see several rounds, and set a long token
 TTL. Containers only pick up env changes when recreated.
 
@@ -61,11 +64,20 @@ on `localhost`, which is either the local stack or the cloud tunnel.
 
 ## Cloud
 
-`terraform/` deploys a 1x1 stack on Compute Engine, one VM per host named `<host>-inst`:
-`fastapi-1`, `celery-1`, `postgres`, `redis-auth` and `client-1`, which runs `monitor` and
-is the SSH bastion. There is no Caddy; the client hits `fastapi-1-inst` directly. Sizes fit
-a 12 vCPU quota. Hosts have no external IPv4: SSH goes over IPv6, outgoing traffic through
-Cloud NAT.
+`terraform/` deploys a 1x1 stack in `us-east1-c`, one Compute Engine VM per host named
+`<host>-inst`: `fastapi-1`, `celery-1` and `client-1`, which runs `monitor` and is the SSH
+bastion. There is no Caddy; the client hits `fastapi-1-inst` directly. The VMs are
+`c4-standard-4` on Hyperdisk Balanced, filling the 12 vCPU quota. Hosts have no external
+IPv4: SSH goes over IPv6, outgoing traffic through Cloud NAT.
+
+Postgres and Redis are managed services, which don't count against that quota: Cloud SQL
+(Postgres 18, Enterprise Plus, `sql_tier`) and Memorystore (Valkey 9.1, cluster mode
+disabled, `redis_node_type`), both zonal, without replicas, backups or persistence, and
+without auth or TLS. Each is reached through a Private Service Connect endpoint that a
+service connection policy creates in the subnet; its address is a Terraform output
+(`postgres_host`, `redis_host`). The Cloud SQL instance gets a generated name, since a
+deleted one can't be reused for a week. The managed services are left out of
+`max_run_hours` and keep running until `terraform destroy`.
 
 Each host's startup script (`terraform/templates/`) writes the compose files, `cloud.env`,
 a DNS search domain for containers and a few helpers. The `somasafe` unit then pulls the
@@ -78,7 +90,8 @@ host's images (and the server key on `celery-1`) and starts its profiles, retryi
 gcloud auth login
 gcloud auth application-default login
 gcloud services enable compute.googleapis.com artifactregistry.googleapis.com \
-  secretmanager.googleapis.com iam.googleapis.com --project <project>
+  secretmanager.googleapis.com iam.googleapis.com sqladmin.googleapis.com \
+  memorystore.googleapis.com networkconnectivity.googleapis.com --project <project>
 echo 'project = "<project>"' > prod/terraform/terraform.tfvars
 terraform -chdir=prod/terraform init
 ```
@@ -91,7 +104,7 @@ read the registry and the key secret.
 
 ```bash
 terraform -chdir=prod/terraform apply
-prod/connect.sh       # own terminal: tunnels Postgres, Redis and Prometheus until killed
+prod/connect.sh       # own terminal: tunnels Postgres, Redis and Prometheus through client-1 until killed
 prod/init.sh 200      # builds and pushes the images, uploads the key, seeds 200 users
 ```
 

@@ -117,24 +117,23 @@ services:
 
   postgres-exporter:
     image: docker.io/prometheuscommunity/postgres-exporter:v0.20.1
-    profiles: [postgres]
+    profiles: [monitor]
     environment:
-      DATA_SOURCE_URI: postgres:5432/${POSTGRES_DB}?sslmode=disable
+      DATA_SOURCE_URI: ${POSTGRES_HOST:?}:5432/${POSTGRES_DB}?sslmode=disable
       DATA_SOURCE_USER: ${POSTGRES_USER}
       DATA_SOURCE_PASS: ${POSTGRES_PASSWORD}
     ports:
       - ${BIND_ADDR:-127.0.0.1}:9187:9187
-    depends_on: [postgres]
 
   redis-auth-exporter:
     image: docker.io/oliver006/redis_exporter:v1.92.0-alpine
-    profiles: [redis-auth]
+    profiles: [monitor]
     environment:
-      REDIS_ADDR: redis://redis-auth:6379
+      REDIS_ADDR: redis://${REDIS_HOST:?}:6379
       REDIS_EXPORTER_CHECK_SINGLE_KEYS: db1=light,db1=heavy
+      REDIS_EXPORTER_CONFIG_COMMAND: "-"
     ports:
       - ${BIND_ADDR:-127.0.0.1}:9121:9121
-    depends_on: [redis-auth]
 
   redis-broker-exporter:
     image: docker.io/oliver006/redis_exporter:v1.92.0-alpine

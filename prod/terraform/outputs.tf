@@ -14,3 +14,11 @@ output "hosts" {
 output "internal_ipv4" {
   value = { for k, inst in google_compute_instance.instance : inst.name => inst.network_interface[0].network_ip }
 }
+
+output "postgres_host" {
+  value = local.postgres_host
+}
+
+output "redis_host" {
+  value = local.redis_host
+}
