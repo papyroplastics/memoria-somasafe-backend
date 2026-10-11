@@ -150,6 +150,7 @@ class ModelVersion(IntPKModel, table=True):
     contract_version: int
     submission_type: SubmissionType
     min_app_version: str
+    round_limit: int
     created_at: datetime = Field(default_factory=utcnow)
 
     __table_args__ = (UniqueConstraint("model_key", "version"),)
@@ -167,6 +168,7 @@ class GlobalWeights(IntPKModel, table=True):
                                           ondelete="SET NULL")
     weights: bytes             # zstd-compressed packed float32 (np.float32 .tobytes())
     valid: bool = True
+    closed: bool = False
     created_at: datetime = Field(default_factory=utcnow, index=True)
 
     __table_args__ = (Index("uq_globalweights_parent_valid", "parent_weights_id",
@@ -186,13 +188,11 @@ class WeightsArtifact(SQLModel, table=True):
 
 
 class ClientDeltaSubmission(IntPKModel, table=True):
-    """A client-uploaded weight *delta* (Δ = local − global). ``base_weights_id``
-    is the GlobalWeights it trained from — aggregation matches on it so only
-    same-base deltas mix; ``valid`` is a revocation switch."""
+    """A client's weight delta on ``base_weights_id``, cleared once its round is over."""
 
     user_id: int = Field(foreign_key="user.id", index=True)
     base_weights_id: int = Field(foreign_key="globalweights.id")
-    deltas: bytes              # packed float32 delta (np.float32 .tobytes())
+    deltas: bytes | None = None
     weight_count: int
     valid: bool = True
     created_at: datetime = Field(default_factory=utcnow)
@@ -347,6 +347,23 @@ def get_latest_weights(session: Session, key: str) -> GlobalWeights | None:
     if latest is None:
         return None
     return get_version_weights(session, latest.id)
+
+
+def get_active_weights_ids(session: Session) -> list[int]:
+    keys = session.exec(select(ModelDefinition.key)).all()
+    return [weights.id for key in keys if (weights := get_latest_weights(session, key))]
+
+
+def count_round_submissions(session: Session, base_weights_id: int) -> int:
+    return session.exec(select(func.count()).select_from(ClientDeltaSubmission)
+                        .where(ClientDeltaSubmission.base_weights_id == base_weights_id,
+                               ClientDeltaSubmission.valid == True)).one()  # noqa: E712
+
+
+def count_summed_members(session: Session, base_weights_id: int) -> int:
+    return session.exec(select(func.coalesce(func.sum(SecureSession.member_count), 0))
+                        .where(SecureSession.base_weights_id == base_weights_id,
+                               SecureSession.status == SecureSessionStatus.summed)).one()
 
 
 def get_open_session(session: Session, base_weights_id: int,

@@ -324,3 +324,38 @@ def test_submit_racing_sweep_fail(client, auth_headers, owned_device, monkeypatc
     assert _status(session_id) is SecureSessionStatus.failed
     with Session(engine) as session:
         assert session.get(SecureSessionMember, (session_id, join["user_id"])) is None
+
+
+@pytest.fixture
+def closed_round(client, auth_headers):
+    key = _secure_model(client, auth_headers)["key"]
+    weights_id = _active_weights_id(key)
+
+    def set_closed(value: bool) -> None:
+        with Session(engine) as session:
+            session.execute(update(GlobalWeights).where(GlobalWeights.id == weights_id)
+                            .values(closed=value))
+            session.commit()
+
+    yield key, set_closed
+    set_closed(False)
+
+
+def test_join_closed_round_409(client, auth_headers, owned_device, closed_round):
+    key, set_closed = closed_round
+    set_closed(True)
+    resp = _join(client, auth_headers, key)
+    assert resp.status_code == 409
+    assert "closed" in resp.json()["detail"]
+
+
+def test_submit_closed_round_409(client, auth_headers, owned_device, closed_round):
+    key, set_closed = closed_round
+    model = _secure_model(client, auth_headers)
+    session_id = _join(client, auth_headers, key).json()["session_id"]
+    _seal(session_id)
+    set_closed(True)
+    resp = client.post(f"/model/secure/submit/{session_id}",
+                       headers=auth_headers | OCTET_STREAM,
+                       content=b"\x00" * (model["weight_count"] * 4))
+    assert resp.status_code == 409

@@ -71,8 +71,8 @@ def sum_session(app, session_id: int, timeout: float = 120.0) -> None:
     raise SystemExit(f"secure session {session_id} was not summed within {timeout:.0f}s")
 
 
-def run_session(app, base: str, key: str, weights_id: int, seats: list[Seat],
-                min_members: int) -> SessionResult:
+def join_session(base: str, key: str, weights_id: int, seats: list[Seat],
+                 min_members: int) -> tuple[int, int, dict[str, int]]:
     session_id = None
     user_ids = {}
     for seat in seats:
@@ -81,7 +81,12 @@ def run_session(app, base: str, key: str, weights_id: int, seats: list[Seat],
             raise SystemExit("joins were split across sessions; lower the session size")
         session_id = resp["session_id"]
         user_ids[seat.user] = resp["user_id"]
-    n = seal_session(session_id, min_members)
+    return session_id, seal_session(session_id, min_members), user_ids
+
+
+def run_session(app, base: str, key: str, weights_id: int, seats: list[Seat],
+                min_members: int) -> SessionResult:
+    session_id, n, user_ids = join_session(base, key, weights_id, seats, min_members)
 
     desc = get_descriptor(base, seats[0].token, session_id)
     scale, clip = desc["scale"], desc["clip_bound"]

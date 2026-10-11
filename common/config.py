@@ -65,6 +65,7 @@ SERVE_GRACE_SECONDS = int(os.environ.get("SERVE_GRACE_SECONDS", MINUTE * 5))
 RESULT_TTL_SECONDS = int(os.environ.get("RESULT_TTL_SECONDS", HOUR))
 CLEANUP_INTERVAL_SECONDS = int(os.environ.get("CLEANUP_INTERVAL_SECONDS", MINUTE * 2))
 CLEANUP_BATCH_SIZE = int(os.environ.get("CLEANUP_BATCH_SIZE", 500))
+SUBMISSION_RETENTION_SECONDS = int(os.environ.get("SUBMISSION_RETENTION_SECONDS", DAY * 10))
 
 # --- Worker (see worker.celery_app) ---
 # Must hold soft < hard < FED_LOCK_TTL_SECONDS < CELERY_VISIBILITY_TIMEOUT_SECONDS.
@@ -83,11 +84,11 @@ SEED = int(os.environ.get("SEED", 1234))
 # of its summed sessions, and its rows are the sessions' partial means.
 FED_AGG_INTERVAL_SECONDS = int(os.environ.get("FED_AGG_INTERVAL_SECONDS", DAY))
 FED_LOCK_TTL_SECONDS = int(os.environ.get("FED_LOCK_TTL_SECONDS", MINUTE * 7))
-# Memory budget for a round's stacked rows; caps the cohort at the newest
-# FED_AGG_MEMORY_BYTES // (weight_count * 4) rows.
+# Memory budget for a round's rows, read in blocks of coordinates.
 FED_AGG_MEMORY_BYTES = int(os.environ.get("FED_AGG_MEMORY_BYTES", 500 * 1024 * 1024))
 # Minimum submissions a model needs on its active weights for a round to run.
 FED_MIN_SUBMISSIONS = int(os.environ.get("FED_MIN_SUBMISSIONS", 1))
+FED_ROUND_LIMIT = int(os.environ.get("FED_ROUND_LIMIT", 1000))
 # Fraction of rows the trimmed mean drops from each side of every coordinate.
 # Must be in [0, 0.5); below 1/n it trims nothing and is a plain mean.
 FED_TRIM_RATIO = float(os.environ.get("FED_TRIM_RATIO", 0.2))

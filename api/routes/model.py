@@ -6,12 +6,13 @@ import numpy as np
 from fastapi import APIRouter, Body, Depends, HTTPException
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
+from sqlalchemy import update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlmodel import Session, select
 
 from worker.celery_app import app as celery_app
 
-from common.celery_tasks import QUANTIZE_TASK
+from common.celery_tasks import FED_AGG_TASK, QUANTIZE_TASK
 from common.config import (
     DOWNLOAD_COOLDOWN_SECONDS,
     SUBMIT_DAILY_LIMIT,
@@ -27,6 +28,7 @@ from common.db import (
     QuantizationResult,
     SubmissionType,
     ClientDeltaSubmission,
+    count_round_submissions,
     get_latest_version,
     get_latest_weights,
     get_model_def,
@@ -91,10 +93,10 @@ def require_submission_type(session: Session, key: str,
 
 
 def check_submission(session: Session, key: str, weights_id: int,
-                     body: bytes) -> GlobalWeights:
+                     body: bytes, user_id: int) -> GlobalWeights:
     require_model(session, key)
 
-    base = session.get(GlobalWeights, weights_id)
+    base = session.get(GlobalWeights, weights_id, with_for_update={"read": True})
     if base is None or base.model_key != key:
         raise HTTPException(status_code=400,
                             detail=f"Unknown base weights for model '{key}'")
@@ -105,16 +107,39 @@ def check_submission(session: Session, key: str, weights_id: int,
             status_code=409,
             detail=f"Stale base weights; re-download the latest weights of "
                    f"'{key}' before submitting")
+    if base.closed:
+        raise HTTPException(status_code=409, detail="Round is closed; wait for the next weights")
 
-    weight_count = session.get(ModelVersion, base.version_id).weight_count
-    if len(body) != weight_count * 4:
+    version = session.get(ModelVersion, base.version_id)
+    if len(body) != version.weight_count * 4:
         raise HTTPException(
             status_code=400,
-            detail=f"Expected {weight_count} little-endian float32 weights")
+            detail=f"Expected {version.weight_count} little-endian float32 weights")
     if not np.all(np.isfinite(np.frombuffer(body, dtype=np.float32))):
         raise HTTPException(status_code=400,
                             detail="Weights contain non-finite values")
+
+    resubmit = session.exec(
+        select(ClientDeltaSubmission.id)
+        .where(ClientDeltaSubmission.base_weights_id == base.id,
+               ClientDeltaSubmission.user_id == user_id)).first() is not None
+    if not resubmit and count_round_submissions(session, base.id) >= version.round_limit:
+        raise HTTPException(status_code=409,
+                            detail="Round is full; wait for the next weights")
     return base
+
+
+def close_full_round(session: Session, base: GlobalWeights) -> None:
+    limit = session.get(ModelVersion, base.version_id).round_limit
+    if count_round_submissions(session, base.id) < limit:
+        return
+    closed = session.execute(update(GlobalWeights)
+                             .where(GlobalWeights.id == base.id,  # type: ignore[arg-type]
+                                    GlobalWeights.closed == False)  # noqa: E712
+                             .values(closed=True)).rowcount  # type: ignore[attr-defined]
+    session.commit()
+    if closed:
+        celery_app.send_task(FED_AGG_TASK, args=[base.model_key, base.id])
 
 
 def store_submission(session: Session, base: GlobalWeights, body: bytes,
@@ -192,7 +217,7 @@ def quantize_model(key: str, weights_id: int, body: bytes = Body(...),
                 SUBMIT_DAILY_LIMIT, SUBMIT_DAILY_WINDOW_SECONDS)
     require_submission_type(session, key, {SubmissionType.quantize})
     require_device_owner(session, user_id)
-    base = check_submission(session, key, weights_id, body)
+    base = check_submission(session, key, weights_id, body, user_id)
 
     try:
         submission_id = store_submission(session, base, body, user_id)
@@ -200,8 +225,8 @@ def quantize_model(key: str, weights_id: int, body: bytes = Body(...),
         session.add(job)
         session.commit()
         session.refresh(job)
-        # The job id doubles as the task id so the result endpoint can wait on it.
         celery_app.send_task(QUANTIZE_TASK, args=[str(job.id)], task_id=str(job.id))
+        close_full_round(session, base)
         return {"job_id": str(job.id)}
     finally:
         add_usage(RateLimit.weight_submit, user_id, key, SUBMIT_DAILY_WINDOW_SECONDS)
@@ -216,10 +241,12 @@ def submit_weights(key: str, weights_id: int, body: bytes = Body(...),
     require_submission_type(session, key,
                             {SubmissionType.raw, SubmissionType.quantize})
     require_device_owner(session, user_id)
-    base = check_submission(session, key, weights_id, body)
+    base = check_submission(session, key, weights_id, body, user_id)
 
     try:
-        return {"submission_id": store_submission(session, base, body, user_id)}
+        submission_id = store_submission(session, base, body, user_id)
+        close_full_round(session, base)
+        return {"submission_id": submission_id}
     finally:
         add_usage(RateLimit.weight_submit, user_id, key, SUBMIT_DAILY_WINDOW_SECONDS)
 

@@ -167,6 +167,7 @@ def reset() -> None:
         deleted = conn.execute(text(
             "DELETE FROM globalweights WHERE id NOT IN "
             "(SELECT min(id) FROM globalweights GROUP BY version_id)")).rowcount
+        conn.execute(text("UPDATE globalweights SET closed = false"))
         conn.execute(text(
             "SELECT setval(pg_get_serial_sequence('globalweights', 'id'), "
             "(SELECT coalesce(max(id), 0) + 1 FROM globalweights), false)"))

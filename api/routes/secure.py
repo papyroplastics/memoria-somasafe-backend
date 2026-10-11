@@ -91,6 +91,8 @@ def _active_base(session: Session, key: str, weights_id: int) -> GlobalWeights:
             status_code=409,
             detail=f"Stale base weights; re-download the latest weights of "
                    f"'{key}' before joining")
+    if base.closed:
+        raise HTTPException(status_code=409, detail="Round is closed; wait for the next weights")
     return base
 
 
@@ -108,6 +110,11 @@ def _open_session(session: Session, base: GlobalWeights) -> SecureSession:
                                     index_where=text("status = 'open'")))
         current = get_open_session(session, base.id, lock=True)
     raise HTTPException(status_code=503, detail="Could not open a session; retry")
+
+
+def _member_count(session: Session, session_id: int) -> int:
+    return session.exec(select(func.count()).select_from(SecureSessionMember)
+                        .where(SecureSessionMember.session_id == session_id)).one()
 
 
 @router.post("/secure/join/{key}/{weights_id}", response_model=SecureJoinResponse,
@@ -145,9 +152,7 @@ def secure_join(key: str, weights_id: int, body: SecureJoinRequest,
             raise HTTPException(status_code=409,
                                 detail="Already participating on these weights")
 
-        members = session.exec(select(func.count()).select_from(SecureSessionMember)
-                               .where(SecureSessionMember.session_id == current.id)).one()
-        if members >= SECURE_SESSION_MAX_MEMBERS:
+        if _member_count(session, current.id) >= SECURE_SESSION_MAX_MEMBERS:
             seal_session(session, current.id)
         session.commit()
         return SecureJoinResponse(session_id=current.id, base_weights_id=base.id,
@@ -213,9 +218,9 @@ def secure_submit(session_id: int, body: bytes = Body(...),
         raise HTTPException(status_code=409, detail="Already submitted for this session")
 
     active = get_latest_weights(session, model_key)
-    if active is None or active.id != current.base_weights_id:
+    if active is None or active.id != current.base_weights_id or active.closed:
         raise HTTPException(status_code=409,
-                            detail="Session base weights are stale; the session is void")
+                            detail="Session base weights are stale or closed; the session is void")
 
     version = session.get(ModelVersion, current.version_id)
     if len(body) != version.weight_count * 4:

@@ -52,7 +52,7 @@ class DenseStrategy:
                          delta.astype(np.float32).tobytes(), spec.submission_type)
             logout(base, token)
         result = wait_for_aggregation(app, key)
-        print(f"{prefix} aggregated: cohort {result['cohort']}, cap {result['cap']}")
+        print(f"{prefix} aggregated: cohort {result['cohort']}, {result['blocks']} blocks")
 
 
 class SecureStrategy:

@@ -10,8 +10,8 @@ from common.secure_agg import RING_MODULUS, dequantize
 from ml.aggregation import trimmed_mean_inplace
 
 
-def cohort_cap(weight_count: int, memory_bytes: int) -> int:
-    return max(1, memory_bytes // (weight_count * 4))
+def block_size(rows: int, memory_bytes: int) -> int:
+    return max(1, memory_bytes // (rows * 4))
 
 
 def dense_update(reference: np.ndarray, deltas: np.ndarray, trim: float) -> np.ndarray:

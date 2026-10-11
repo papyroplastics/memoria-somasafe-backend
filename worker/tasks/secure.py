@@ -7,7 +7,7 @@ from celery.utils.log import get_task_logger
 from sqlalchemy import delete, func, select, update
 from sqlmodel import Session
 
-from common.celery_tasks import SECURE_SUM_TASK, SECURE_SWEEP_TASK
+from common.celery_tasks import FED_AGG_TASK, SECURE_SUM_TASK, SECURE_SWEEP_TASK
 from common.config import (
     SECURE_SESSION_MIN_MEMBERS,
     SECURE_SESSION_OPEN_FAIL_TIMEOUT_SECONDS,
@@ -16,11 +16,13 @@ from common.config import (
     WORKER_REAP_AFTER_SECONDS,
 )
 from common.db import (
+    GlobalWeights,
     ModelVersion,
     SecurePartial,
     SecureSession,
     SecureSessionMember,
     SecureSessionStatus,
+    count_summed_members,
     engine,
     get_latest_weights,
     seal_session,
@@ -60,6 +62,7 @@ class SecureSumOutcome(StrEnum):
     skipped_not_sealed = auto()
     skipped_not_summing = auto()
     stale_base = auto()
+    round_closed = auto()
     failed = auto()
 
 
@@ -70,6 +73,19 @@ class SecureSumRecord:
     model_key: str | None = None
     base_weights_id: int | None = None
     members: int | None = None
+    closed_round: bool = False
+
+
+def _fail_closed(session: Session, session_id: int, record: SecureSumRecord) -> None:
+    if not SecureSession.transition(session, session_id, SecureSessionStatus.summing,
+                                    SecureSessionStatus.failed, finished_at=utcnow()):
+        session.rollback()
+        record.outcome = SecureSumOutcome.skipped_not_summing
+        return
+    session.execute(delete(SecureSessionMember)
+                    .where(SecureSessionMember.session_id == session_id))  # type: ignore[arg-type]
+    session.commit()
+    record.outcome = SecureSumOutcome.round_closed
 
 
 def _vector(masked: bytes | None) -> np.ndarray:
@@ -92,6 +108,9 @@ def _sum(session_id: int, timer: Timer[SecureSumStage], record: SecureSumRecord)
                 session.commit()
                 record.outcome = SecureSumOutcome.stale_base
                 return
+            if active.closed:
+                _fail_closed(session, session_id, record)
+                return
             weight_count = session.get(ModelVersion, current.version_id).weight_count
 
         with timer(SecureSumStage.ring_sum):
@@ -104,6 +123,11 @@ def _sum(session_id: int, timer: Timer[SecureSumStage], record: SecureSumRecord)
                                        current.clip_bound)
 
         with timer(SecureSumStage.commit):
+            base = session.get(GlobalWeights, current.base_weights_id,
+                               with_for_update={"key_share": True}, populate_existing=True)
+            if base.closed:
+                _fail_closed(session, session_id, record)
+                return
             session.add(SecurePartial(session_id=session_id,
                                       mean=mean.astype(np.float32).tobytes()))
             session.execute(update(SecureSessionMember)
@@ -114,6 +138,11 @@ def _sum(session_id: int, timer: Timer[SecureSumStage], record: SecureSumRecord)
                 session.rollback()
                 record.outcome = SecureSumOutcome.skipped_not_summing
                 return
+            limit = session.get(ModelVersion, current.version_id).round_limit
+            if count_summed_members(session, base.id) >= limit:
+                base.closed = True
+                session.add(base)
+                record.closed_round = True
             session.commit()
     record.outcome = SecureSumOutcome.summed
 
@@ -133,6 +162,8 @@ def secure_session_sum(session_id: int) -> None:
             record.outcome = SecureSumOutcome.failed
             SecureSession.claim(session_id, SecureSessionStatus.summing,
                                 SecureSessionStatus.failed, finished_at=utcnow())
+    if record.closed_round:
+        app.send_task(FED_AGG_TASK, args=[record.model_key, record.base_weights_id])
     write(SECURE_SUM_TASK, record, timer)
 
 

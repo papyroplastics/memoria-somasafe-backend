@@ -13,7 +13,7 @@ start = time.perf_counter()
 result = wait_for_aggregation(app, key)
 elapsed = time.perf_counter() - start
 
-print(f"{key}: {result['outcome']} (cohort {result['cohort']}, cap {result['cap']})")
+print(f"{key}: {result['outcome']} (cohort {result['cohort']}, {result['blocks']} blocks)")
 for name, value in result.items():
     if isinstance(value, float):
         print(f"  {name}: {value:.3f}s")

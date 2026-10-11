@@ -10,7 +10,7 @@ from worker.compute import (
     Action,
     SessionState,
     SweepPolicy,
-    cohort_cap,
+    block_size,
     dense_update,
     secure_session_mean,
     sweep_actions,
@@ -42,9 +42,20 @@ def test_trimmed_mean_rejects_bad_trim():
         trimmed_mean_inplace(np.zeros((3, 3), dtype=np.float32), 0.5)
 
 
-def test_cohort_cap():
-    assert cohort_cap(109386, 500 * 1024 * 1024) == 500 * 1024 * 1024 // (109386 * 4)
-    assert cohort_cap(10**9, 1024) == 1
+def test_block_size():
+    assert block_size(1000, 500 * 1024 * 1024) == 500 * 1024 * 1024 // 4000
+    assert block_size(10**9, 1024) == 1
+
+
+@pytest.mark.parametrize("size", [1, 7, 50, 101])
+def test_blockwise_update_matches_whole(size):
+    rng = np.random.default_rng(3)
+    reference = rng.standard_normal(101).astype(np.float32)
+    deltas = rng.standard_normal((17, 101)).astype(np.float32)
+    whole = dense_update(reference, deltas.copy(), 0.2)
+    blocked = np.concatenate([dense_update(reference[i:i + size], deltas[:, i:i + size].copy(), 0.2)
+                              for i in range(0, 101, size)])
+    np.testing.assert_allclose(blocked, whole, atol=1e-6)
 
 
 def test_dense_update():

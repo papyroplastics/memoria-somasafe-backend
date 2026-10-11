@@ -8,9 +8,21 @@ from common.config import (
     CLEANUP_BATCH_SIZE,
     RESULT_TTL_SECONDS,
     SERVE_GRACE_SECONDS,
+    SUBMISSION_RETENTION_SECONDS,
     WORKER_REAP_AFTER_SECONDS,
 )
-from common.db import JobStatus, QuantizationJob, QuantizationResult, engine, utcnow
+from common.db import (
+    ClientDeltaSubmission,
+    JobStatus,
+    QuantizationJob,
+    QuantizationResult,
+    SecurePartial,
+    SecureSession,
+    SecureSessionMember,
+    engine,
+    get_active_weights_ids,
+    utcnow,
+)
 from worker.celery_app import app
 
 
@@ -34,6 +46,34 @@ def _expire_batch(session: Session, grace_cutoff, ttl_cutoff) -> int:
                         .values(status=JobStatus.expired, signature=None))
     session.commit()
     return len(ids)
+
+
+def _clear_payloads(session: Session, retention_cutoff) -> None:
+    active = get_active_weights_ids(session)
+    in_use = (select(QuantizationJob.id)
+              .where(QuantizationJob.submission_id == ClientDeltaSubmission.id,
+                     QuantizationJob.status.in_((JobStatus.pending, JobStatus.running)))  # type: ignore[attr-defined]
+              .exists())
+    session.execute(
+        update(ClientDeltaSubmission)
+        .where(ClientDeltaSubmission.deltas.is_not(None),  # type: ignore[union-attr]
+               or_(ClientDeltaSubmission.base_weights_id.not_in(active),  # type: ignore[attr-defined]
+                   ClientDeltaSubmission.created_at < retention_cutoff),
+               ~in_use)
+        .values(deltas=None))
+    session.execute(
+        update(SecureSessionMember)
+        .where(SecureSessionMember.masked.is_not(None),  # type: ignore[union-attr]
+               or_(SecureSessionMember.base_weights_id.not_in(active),  # type: ignore[attr-defined]
+                   SecureSessionMember.submitted_at < retention_cutoff))  # type: ignore[operator]
+        .values(masked=None))
+    session.execute(
+        delete(SecurePartial)
+        .where(SecurePartial.session_id.in_(  # type: ignore[attr-defined]
+            select(SecureSession.id)
+            .where(or_(SecureSession.base_weights_id.not_in(active),  # type: ignore[attr-defined]
+                       SecureSession.finished_at < retention_cutoff)))))  # type: ignore[operator]
+    session.commit()
 
 
 @app.task(name=CLEANUP_TASK, ignore_result=True)
@@ -61,3 +101,6 @@ def cleanup_results() -> None:
                    QuantizationJob.created_at < ttl_cutoff)
             .values(status=JobStatus.expired))
         session.commit()
+
+    with Session(engine) as session:
+        _clear_payloads(session, now - timedelta(seconds=SUBMISSION_RETENTION_SECONDS))

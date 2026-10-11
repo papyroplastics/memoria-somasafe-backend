@@ -3,7 +3,7 @@ from enum import StrEnum, auto
 
 import numpy as np
 from celery.utils.log import get_task_logger
-from sqlalchemy import Select, delete, select
+from sqlalchemy import ColumnElement, Select, delete, func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlmodel import Session
 
@@ -17,6 +17,7 @@ from common.config import (
 )
 from common.db import (
     ClientDeltaSubmission,
+    GlobalWeights,
     ModelVersion,
     SecurePartial,
     SecureSession,
@@ -39,7 +40,7 @@ from worker.baking import (
     store,
 )
 from worker.celery_app import app
-from worker.compute import cohort_cap, dense_update
+from worker.compute import block_size, dense_update
 from worker.locking import model_lock
 from worker.metrics import Timer, write
 
@@ -65,6 +66,7 @@ STAGES = (AggregationStage.metadata, AggregationStage.blob_fetch, AggregationSta
 class AggregationOutcome(StrEnum):
     aggregated = auto()
     skipped_locked = auto()
+    skipped_stale = auto()
     skipped_unavailable = auto()
     skipped_min_submissions = auto()
     export_failed = auto()
@@ -77,9 +79,9 @@ class AggregationRecord:
     model_key: str
     outcome: AggregationOutcome | None = None
     base_weights_id: int | None = None
-    cap: int | None = None
     cohort: int | None = None
     submissions: int | None = None
+    blocks: int | None = None
 
 
 @dataclass(frozen=True)
@@ -88,80 +90,121 @@ class RoundPlan:
     fingerprint: str
     contract_version: int
     reference_id: int
-    reference: np.ndarray
-    deltas: np.ndarray
+    weights: np.ndarray
     secure: bool
 
 
-def _dense_rows(session: Session, reference_id: int, cap: int) -> tuple[int, int, Select]:
-    ids = list(session.execute(
-        select(ClientDeltaSubmission.id)  # type: ignore
-        .where(ClientDeltaSubmission.base_weights_id == reference_id,
-               ClientDeltaSubmission.valid == True)
-        .order_by(ClientDeltaSubmission.created_at.desc())  # type: ignore
-        .limit(cap)).scalars())
-    return len(ids), len(ids), (select(ClientDeltaSubmission.deltas)  # type: ignore
-                                .where(ClientDeltaSubmission.id.in_(ids)))  # type: ignore
+@dataclass(frozen=True)
+class RoundRows:
+    count: int
+    submissions: int
+    blob: ColumnElement
+    query: Select
 
 
-def _secure_rows(session: Session, reference_id: int, cap: int) -> tuple[int, int, Select]:
-    rows = session.execute(
-        select(SecureSession.id, SecureSession.member_count)
-        .where(SecureSession.base_weights_id == reference_id,
-               SecureSession.status == SecureSessionStatus.summed)
-        .order_by(SecureSession.finished_at.desc())  # type: ignore
-        .limit(cap)).all()
-    ids = [session_id for session_id, _ in rows]
-    return len(ids), sum(members for _, members in rows), (
-        select(SecurePartial.mean)  # type: ignore
-        .where(SecurePartial.session_id.in_(ids)))  # type: ignore
+def _dense_rows(session: Session, reference_id: int) -> RoundRows:
+    where = (ClientDeltaSubmission.base_weights_id == reference_id,
+             ClientDeltaSubmission.valid == True,  # noqa: E712
+             ClientDeltaSubmission.deltas.is_not(None))  # type: ignore[union-attr]
+    count = session.execute(select(func.count()).select_from(ClientDeltaSubmission)
+                            .where(*where)).scalar_one()
+    return RoundRows(count, count, ClientDeltaSubmission.deltas,  # type: ignore[arg-type]
+                     select(ClientDeltaSubmission).where(*where))
 
 
-def _read_round(key: str, timer: Timer[AggregationStage],
-                record: AggregationRecord) -> RoundPlan | None:
+def _secure_rows(session: Session, reference_id: int) -> RoundRows:
+    where = (SecureSession.base_weights_id == reference_id,
+             SecureSession.status == SecureSessionStatus.summed)
+    count, members = session.execute(
+        select(func.count(), func.coalesce(func.sum(SecureSession.member_count), 0))
+        .where(*where)).one()
+    return RoundRows(count, members, SecurePartial.mean,  # type: ignore[arg-type]
+                     select(SecurePartial)
+                     .join(SecureSession, SecureSession.id == SecurePartial.session_id)  # type: ignore[arg-type]
+                     .where(*where))
+
+
+def _read_block(session: Session, rows: RoundRows, start: int, stop: int) -> np.ndarray:
+    block = np.empty((rows.count, stop - start), dtype=np.float32)
+    query = rows.query.with_only_columns(
+        func.substring(rows.blob, start * 4 + 1, (stop - start) * 4))
+    filled = 0
+    for blob in session.execute(query.execution_options(yield_per=256)).scalars():
+        block[filled] = np.frombuffer(blob, dtype=np.float32)
+        filled += 1
+    if filled != rows.count:
+        raise RuntimeError(f"block read {filled} of {rows.count} rows")
+    return block
+
+
+def _set_closed(weights_id: int, closed: bool) -> None:
     with Session(engine) as session:
+        session.execute(update(GlobalWeights)
+                        .where(GlobalWeights.id == weights_id)  # type: ignore[arg-type]
+                        .values(closed=closed))
+        session.commit()
+
+
+def _round_base(key: str, expected_id: int | None,
+                record: AggregationRecord) -> tuple[int, int] | None:
+    with Session(engine) as session:
+        latest = get_latest_version(session, key)
+        reference = get_version_weights(session, latest.id) if latest is not None else None
+        if reference is None:
+            record.outcome = AggregationOutcome.skipped_unavailable
+            return None
+        record.base_weights_id = reference.id
+        if expected_id is not None and reference.id != expected_id:
+            record.outcome = AggregationOutcome.skipped_stale
+            return None
+        return latest.id, reference.id
+
+
+def _read_round(key: str, expected_id: int | None,
+                timer: Timer[AggregationStage], record: AggregationRecord) -> RoundPlan | None:
+    with timer(AggregationStage.metadata):
+        base = _round_base(key, expected_id, record)
+        if base is None:
+            return None
+        version_id, reference_id = base
+        _set_closed(reference_id, True)
+
+    with Session(engine) as session:
+        session.connection(execution_options={"isolation_level": "REPEATABLE READ"})
         with timer(AggregationStage.metadata):
-            latest = get_latest_version(session, key)
-            if latest is None:
-                record.outcome = AggregationOutcome.skipped_unavailable
-                return None
-            reference = get_version_weights(session, latest.id)
-            if reference is None:
-                record.outcome = AggregationOutcome.skipped_unavailable
-                return None
-            record.base_weights_id = reference.id
-
+            latest = session.get(ModelVersion, version_id)
+            reference = session.get(GlobalWeights, reference_id)
             secure = latest.submission_type is SubmissionType.secure
-            cap = cohort_cap(latest.weight_count, FED_AGG_MEMORY_BYTES)
-            cohort, submissions, blobs = (_secure_rows if secure else _dense_rows)(
-                session, reference.id, cap)
-            record.cap = cap
-            record.cohort = cohort
-            record.submissions = submissions
+            rows = (_secure_rows if secure else _dense_rows)(session, reference_id)
+            record.cohort = rows.count
+            record.submissions = rows.submissions
 
-        if submissions < FED_MIN_SUBMISSIONS:
+        if rows.submissions < FED_MIN_SUBMISSIONS or rows.count == 0:
+            _set_closed(reference_id, False)
             record.outcome = AggregationOutcome.skipped_min_submissions
             return None
 
-        with timer(AggregationStage.blob_fetch):
-            deltas = np.empty((cohort, latest.weight_count), dtype=np.float32)
-            rows = session.execute(blobs.execution_options(yield_per=64)).scalars()
-            filled = 0
-            for blob in rows:
-                deltas[filled] = np.frombuffer(blob, dtype=np.float32)
-                filled += 1
-            deltas = deltas[:filled]
-            weights = np.frombuffer(decompress(reference.weights), dtype=np.float32)
-        record.cohort = filled
+        reference_weights = np.frombuffer(decompress(reference.weights), dtype=np.float32)
+        weights = np.empty_like(reference_weights)
+        size = block_size(rows.count, FED_AGG_MEMORY_BYTES)
+        starts = range(0, latest.weight_count, size)
+        record.blocks = len(starts)
+        for start in starts:
+            stop = min(start + size, latest.weight_count)
+            with timer(AggregationStage.blob_fetch):
+                block = _read_block(session, rows, start, stop)
+            with timer(AggregationStage.trimmed_mean):
+                weights[start:stop] = dense_update(reference_weights[start:stop], block,
+                                                   FED_TRIM_RATIO)
 
         return RoundPlan(latest.id, latest.fingerprint, latest.contract_version,
-                         reference.id, weights, deltas, secure)
+                         reference_id, weights, secure)
 
 
-def _aggregate(key: str,
+def _aggregate(key: str, expected_id: int | None,
                timer: Timer[AggregationStage | Restore | QuantizedBake | TrainableBake],
                record: AggregationRecord) -> None:
-    plan = _read_round(key, timer, record)
+    plan = _read_round(key, expected_id, timer, record)
     if plan is None:
         return
 
@@ -171,9 +214,7 @@ def _aggregate(key: str,
         record.outcome = AggregationOutcome.skipped_unavailable
         return
 
-    with timer(AggregationStage.trimmed_mean):
-        new_weights = dense_update(plan.reference, plan.deltas, FED_TRIM_RATIO)
-    restore(rt.model, new_weights, timer)
+    restore(rt.model, plan.weights, timer)
     try:
         quantized = bake_quantized(rt.model, rt.rep_dataset, plan.contract_version, timer)
         trainable = bake_trainable(rt.model, plan.contract_version, timer)
@@ -182,7 +223,7 @@ def _aggregate(key: str,
         record.outcome = AggregationOutcome.export_failed
         return
     with timer(AggregationStage.compress_weights):
-        weights = compress_weights(new_weights)
+        weights = compress_weights(plan.weights)
 
     try:
         with timer(AggregationStage.commit), Session(engine) as session:
@@ -203,7 +244,7 @@ def _aggregate(key: str,
 
 
 @app.task(name=FED_AGG_TASK)
-def federated_aggregation(model_key: str) -> dict[str, object]:
+def federated_aggregation(model_key: str, base_weights_id: int | None = None) -> dict[str, object]:
     timer = Timer(*STAGES)
     record = AggregationRecord(model_key)
     with model_lock(f"agg:{model_key}", FED_LOCK_TTL_SECONDS) as held:
@@ -211,7 +252,7 @@ def federated_aggregation(model_key: str) -> dict[str, object]:
             record.outcome = AggregationOutcome.skipped_locked
         else:
             try:
-                _aggregate(model_key, timer, record)
+                _aggregate(model_key, base_weights_id, timer, record)
             except Exception:
                 log.exception("aggregation for %s failed", model_key)
                 record.outcome = AggregationOutcome.failed

@@ -13,6 +13,7 @@ from sqlmodel import Session, select
 from api.routes.auth import hash_password
 from common.config import (
     DATASETS_DIR,
+    FED_ROUND_LIMIT,
     MODELS_DIR,
     SEED_EMAIL,
     SEED_PASSWORD,
@@ -150,6 +151,7 @@ def seed_models(session: Session, reseed: bool = False) -> None:
                 latest.submission_type = spec.submission_type
                 latest.contract_version = spec.contract_version
                 latest.min_app_version = spec.min_app_version
+            latest.round_limit = FED_ROUND_LIMIT
             version = latest
         else:
             version = ModelVersion(
@@ -158,6 +160,7 @@ def seed_models(session: Session, reseed: bool = False) -> None:
                 submission_type=spec.submission_type,
                 contract_version=spec.contract_version,
                 min_app_version=spec.min_app_version,
+                round_limit=FED_ROUND_LIMIT,
             )
             session.add(version)
             session.flush()

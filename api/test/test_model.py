@@ -1,15 +1,22 @@
-"""Tests for the /model routes (api.routes.model).
-
-These assume a worker is running against the same queue/DB, so a submitted
-quantize job is expected to actually complete and produce a result.
-"""
-
-import time
+"""Tests for the /model routes (api.routes.model). No worker runs, so quantize jobs
+stay pending."""
 
 import pytest
+from sqlmodel import select
 
+from common.celery_tasks import FED_AGG_TASK
 from common.compression import decompress
 from common.config import SUBMIT_DAILY_LIMIT
+from common.db import (
+    ClientDeltaSubmission,
+    GlobalWeights,
+    ModelVersion,
+    Session,
+    count_round_submissions,
+    engine,
+    get_latest_weights,
+)
+from ..routes import model as model_routes
 
 FINGERPRINT_HEADER = "X-Model-Fingerprint"
 MODEL_VERSION_HEADER = "X-Model-Version"
@@ -154,12 +161,9 @@ def test_quantize_enqueues_and_polls_pending(client, auth_headers, owned_device)
     assert submit.status_code == 202, submit.text
     job_id = submit.json()["job_id"]
 
-    deadline = time.monotonic() + 10
     result = client.get(f"/model/quantize/result/{job_id}", headers=auth_headers)
-    while result.status_code == 202 and time.monotonic() < deadline:
-        time.sleep(0.2)
-        result = client.get(f"/model/quantize/result/{job_id}", headers=auth_headers)
-    assert result.status_code == 200, result.text
+    assert result.status_code == 202, result.text
+    assert result.json()["status"] == "pending"
 
 
 def test_quantize_unknown_weights_400(client, auth_headers, owned_device):
@@ -227,3 +231,73 @@ def test_submit_daily_limit(client, auth_headers, owned_device):
                            content=_zero_params(model)).status_code == 202
     assert client.post(url, headers=auth_headers | OCTET_STREAM,
                        content=_zero_params(model)).status_code == 429
+
+
+def _user_headers(client, i: int) -> dict:
+    resp = client.post("/auth/token", data={"username": f"test_{i}", "password": f"test_{i}"})
+    if resp.status_code != 200:
+        pytest.skip("seed the test users first (make db-seed)")
+    return {"Authorization": f"Bearer {resp.json()['access_token']}"}
+
+
+@pytest.fixture
+def raw_round(client, auth_headers):
+    model = _model_with_weights(client, auth_headers, "raw")
+    with Session(engine) as session:
+        base = get_latest_weights(session, model["key"])
+        version = session.get(ModelVersion, base.version_id)
+        limit, base_id, version_id = version.round_limit, base.id, version.id
+        floor = session.exec(select(ClientDeltaSubmission.id)
+                             .order_by(ClientDeltaSubmission.id.desc())).first() or 0
+
+    def set_limit(value: int) -> None:
+        with Session(engine) as session:
+            version = session.get(ModelVersion, version_id)
+            version.round_limit = value
+            session.add(version)
+            session.commit()
+
+    def submissions() -> int:
+        with Session(engine) as session:
+            return count_round_submissions(session, base_id)
+
+    yield model, base_id, set_limit, submissions
+    set_limit(limit)
+    with Session(engine) as session:
+        session.get(GlobalWeights, base_id).closed = False
+        for row in session.exec(select(ClientDeltaSubmission)
+                                .where(ClientDeltaSubmission.id > floor)):
+            session.delete(row)
+        session.commit()
+
+
+def _submit_raw(client, headers, model, base_id):
+    return client.post(f"/model/submit/raw/{model['key']}/{base_id}",
+                       headers=headers | OCTET_STREAM, content=_zero_params(model))
+
+
+def test_full_round_rejects_new_submitters(client, raw_round):
+    model, base_id, set_limit, submissions = raw_round
+    first = _user_headers(client, 1)
+    assert _submit_raw(client, first, model, base_id).status_code == 202
+    set_limit(submissions())
+
+    assert _submit_raw(client, _user_headers(client, 2), model, base_id).status_code == 409
+    assert _submit_raw(client, first, model, base_id).status_code == 202
+
+
+def test_filling_round_dispatches_aggregation(client, raw_round, monkeypatch):
+    model, base_id, set_limit, submissions = raw_round
+    sent = []
+    monkeypatch.setattr(model_routes.celery_app, "send_task",
+                        lambda name, args=None, **_: sent.append((name, args)))
+    set_limit(submissions() + 2)
+
+    assert _submit_raw(client, _user_headers(client, 1), model, base_id).status_code == 202
+    assert sent == []
+    assert _submit_raw(client, _user_headers(client, 2), model, base_id).status_code == 202
+    assert sent == [(FED_AGG_TASK, [model["key"], base_id])]
+
+    late = _submit_raw(client, _user_headers(client, 1), model, base_id)
+    assert late.status_code == 409 and "closed" in late.json()["detail"]
+    assert len(sent) == 1

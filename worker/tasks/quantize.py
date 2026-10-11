@@ -64,8 +64,8 @@ def _read(job_id: uuid.UUID) -> QuantizePlan:
     with Session(engine) as session:
         job = session.get(QuantizationJob, job_id)
         submission = session.get(ClientDeltaSubmission, job.submission_id)
-        if submission is None:
-            raise ValueError(f"submission {job.submission_id} not found")
+        if submission is None or submission.deltas is None:
+            raise ValueError(f"submission {job.submission_id} has no deltas")
         base = session.get(GlobalWeights, submission.base_weights_id)
         if base is None:
             raise ValueError(f"base weights {submission.base_weights_id} not found")
