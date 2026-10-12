@@ -32,6 +32,7 @@ resource "google_sql_database_instance" "postgres" {
     edition           = "ENTERPRISE_PLUS"
     tier              = var.sql_tier
     availability_type = "ZONAL"
+    disk_size         = var.sql_disk_gb
 
     location_preference {
       zone = var.zone

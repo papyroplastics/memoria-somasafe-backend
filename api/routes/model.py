@@ -42,8 +42,9 @@ from common.ratelimit import RateLimit, add_usage
 from api.lib.ratelimit import check_limit
 from api.lib.session import get_current_user_id
 from api.lib.challenge import require_device_owner
+from api.lib.routing import SessionRoute
 
-router = APIRouter(prefix="/model")
+router = APIRouter(prefix="/model", route_class=SessionRoute)
 
 
 FINGERPRINT_HEADER = "X-Model-Fingerprint"

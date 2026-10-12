@@ -92,6 +92,7 @@ def main() -> None:
                         help="submission type every model is exercised with")
     parser.add_argument("--stages", default="120:5,60:10,60:20,60:30,60:5",
                         help="<seconds>:<active users> stages; every user logs in during the first one")
+    parser.add_argument("--period", type=float, default=300.0, help="seconds between a user's participations")
     parser.add_argument("--spawn-rate", type=float, default=2.0, help="users (logins) per second")
     parser.add_argument("--processes", type=int, default=2, help="local Locust worker processes")
     parser.add_argument("--workers", type=int, default=0,
@@ -105,6 +106,8 @@ def main() -> None:
     if "FED_AGG_INTERVAL_SECONDS" not in os.environ:
         raise SystemExit("FED_AGG_INTERVAL_SECONDS is not set, run with the stack's env file")
     interval = float(os.environ["FED_AGG_INTERVAL_SECONDS"])
+    if args.period <= 0:
+        raise SystemExit("--period must be positive")
     hosts = [host.rstrip("/") for host in args.host.split(",") if host]
     host = hosts[0]
     stride = args.workers or args.processes
@@ -136,7 +139,7 @@ def main() -> None:
         "submission_type": args.submission,
         "models": models,
         "load": {"users": users, "spawn_rate": args.spawn_rate, "stages": args.stages,
-                 "processes": stride, "interval": interval,
+                 "processes": stride, "period": args.period, "interval": interval,
                  "session_failure": args.session_failure, "hosts": hosts},
         "stages": [{"start": iso(begin), "end": iso(end), "active": active}
                    for (_, active), begin, end in zip(stages, boundaries, boundaries[1:])],
@@ -153,7 +156,7 @@ def main() -> None:
         sys.executable, "-m", "locust", "-f", str(LOCUSTFILE), "--headless", "--only-summary",
         *distribution, "--host", host, "--users", str(users), "--spawn-rate", str(args.spawn_rate),
         "--run-time", f"{math.ceil(boundaries[-1] - schedule_start)}s",
-        "--hosts", ",".join(hosts), "--run-dir", str(run_dir), "--models", ",".join(models), "--interval", str(interval),
+        "--hosts", ",".join(hosts), "--run-dir", str(run_dir), "--models", ",".join(models), "--period", str(args.period),
         "--user-stride", str(stride), "--session-failure", str(args.session_failure),
         "--stages", args.stages, "--schedule-start", str(schedule_start),
     ])

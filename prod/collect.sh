@@ -21,7 +21,7 @@ pull() {
 }
 
 pull client-1-inst "$remote/benchmark/$run" "$results/benchmark/$run"
-make -C "$backend" prod-collect RUN="$run"
+(. "$dir/host-env.sh" && cd "$backend" && uv run -m benchmark.collect "$run")
 
 pull celery-1-inst "$remote/worker-metrics" "$results/worker-metrics"
 

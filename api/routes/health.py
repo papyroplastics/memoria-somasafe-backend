@@ -5,8 +5,9 @@ from sqlmodel import Session
 
 from common.db import get_session
 from common.redis import client as redis_client
+from api.lib.routing import SessionRoute
 
-router = APIRouter()
+router = APIRouter(route_class=SessionRoute)
 
 
 @router.get("/healthz")

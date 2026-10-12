@@ -33,8 +33,9 @@ from api.lib import challenge
 from common.config import DEVICE_ATTEST_COOLDOWN_SECONDS
 from common.db import Device, get_session, utcnow
 from api.lib.session import get_current_user_id
+from api.lib.routing import SessionRoute
 
-router = APIRouter(prefix="/device")
+router = APIRouter(prefix="/device", route_class=SessionRoute)
 
 NONCE_LENGTH = 32
 

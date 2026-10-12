@@ -16,8 +16,9 @@ from common.ratelimit import RateLimit, add_usage
 from api.lib.challenge import require_device_owner
 from api.lib.ratelimit import check_limit
 from api.lib.session import get_current_user_id
+from api.lib.routing import SessionRoute
 
-router = APIRouter(prefix="/ota")
+router = APIRouter(prefix="/ota", route_class=SessionRoute)
 
 FIRMWARE_SIGNATURE_HEADER = "X-Firmware-Signature"
 

@@ -125,7 +125,7 @@ def _secure_rows(session: Session, reference_id: int) -> RoundRows:
 
 
 def _read_block(session: Session, rows: RoundRows, start: int, stop: int) -> np.ndarray:
-    block = np.empty((rows.count, stop - start), dtype=np.float32)
+    block = np.empty((rows.count, stop - start), dtype=np.float32, order="F")
     query = rows.query.with_only_columns(
         func.substring(rows.blob, start * 4 + 1, (stop - start) * 4))
     filled = 0

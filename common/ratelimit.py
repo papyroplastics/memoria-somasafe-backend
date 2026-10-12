@@ -45,11 +45,15 @@ def add_usage(action: RateLimit, user_id: int, resource: str, window: int) -> No
         client.expire(key, window)
 
 
+_SCAN_COUNT = 1000
+_MODEL_PREFIXES = tuple(f"rl:{action.value}:" for action in _MODEL_ACTIONS)
+
+
 def clear_model_limits(model_key: str) -> None:
-    for action in _MODEL_ACTIONS:
-        keys = list(client.scan_iter(match=f"rl:{action.value}:{model_key}:*"))
-        if keys:
-            client.delete(*keys)
+    keys = [key for key in client.scan_iter(match=f"rl:*:{model_key}:*", count=_SCAN_COUNT)
+            if (key.decode() if isinstance(key, bytes) else key).startswith(_MODEL_PREFIXES)]
+    for start in range(0, len(keys), _SCAN_COUNT):
+        client.unlink(*keys[start:start + _SCAN_COUNT])
 
 
 def clear_user_limits(model_key: str, user_ids: list[int]) -> None:

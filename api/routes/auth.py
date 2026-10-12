@@ -19,8 +19,9 @@ from api.lib.session import (
 )
 from common.config import ACCESS_TOKEN_TTL_SECONDS, PASSWORD_MAX_LENGTH, REFRESH_TOKEN_TTL_SECONDS
 from common.db import AuthSession, User, get_session, utcnow
+from api.lib.routing import SessionRoute
 
-router = APIRouter(prefix="/auth")
+router = APIRouter(prefix="/auth", route_class=SessionRoute)
 password_hash = PasswordHash.recommended()
 
 class TokenPair(BaseModel):
@@ -61,16 +62,18 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(),
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
 
     user = session.exec(select(User).where(User.username == form_data.username)).first()
+    user_id, hashed = (user.id, user.hashed_password) if user is not None else (None, None)
+    session.close()
 
-    if user is None:
+    if hashed is None:
         # equalize timing against user enumeration
         password_hash.verify(form_data.password, "dummypassword")
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
 
-    if not password_hash.verify(form_data.password, user.hashed_password):
+    if not password_hash.verify(form_data.password, hashed):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Incorrect username or password")
 
-    return _new_session(session, user.id)
+    return _new_session(session, user_id)
 
 
 @router.post("/refresh")

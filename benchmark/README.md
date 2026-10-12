@@ -6,7 +6,7 @@ run against a stack brought up locally or in the cloud and seeded with enough te
 ## Running
 
 ```bash
-make prod-bench ARGS="benchmark.run 1x1 --split light --submission secure --stages 60:3,60:6,60:3"
+make prod-bench ARGS="benchmark.run 1x1 --split light --submission secure --period 60 --stages 60:3,60:6,60:3"
 make prod-collect RUN=<run_id>       # prod/collect.sh <run_id> for the cloud
 uv run -m benchmark.export <run_id>  # plots, on the host
 ```
@@ -16,13 +16,19 @@ uv run -m benchmark.export <run_id>  # plots, on the host
 the manifest and drives headless Locust through `--stages`. It only produces load: the run
 must be collected before the next one starts.
 
-`collect.py` runs on the host. It waits for the stack to settle (at least one aggregation
-interval, then empty queues, no unfinished quantize job, no sealed or summing secure session
-and no partial result waiting for a round), saves the `SecureSession` rows, writes the
-database checks to `checks.json` and resets the stack.
+`collect.py` runs on the host. It settles the stack itself: it fails sealed sessions still
+missing submissions, waits for empty queues, no unfinished quantize job and no sealed or
+summing session, queues one last round of every model (the same task the timer fires) and
+waits until no partial result is left unaggregated, then runs the cleanup sweep. Each step
+times out after 10 minutes. It then records each model's `round_limit` in the manifest,
+saves the `SecureSession` rows, writes the database checks to `checks.json` and resets the
+stack. The checks cover duplicate rounds, round sizes against the limit (overshoot, and
+rounds other than the last one that closed below it), payloads left on inactive weights,
+secure session outcomes, unaggregated partials and stuck quantize jobs.
 
 `export.py` cuts the worker metrics to the run's window, dumps the Prometheus series to CSV
-(only once, or with `--requery`) and plots from `results/benchmark/<run_id>/`.
+(only once, or with `--requery`) and plots from `results/benchmark/<run_id>/`, including
+the database size and the rounds aggregated per model over time.
 
 ## Details worth knowing
 
@@ -31,8 +37,11 @@ database checks to `checks.json` and resets the stack.
   (mnist-mlp-heavy). `--submission` appends the variant suffix, `raw` being the base key.
   The RNN autoencoders are left out of every split: their exports don't finish within a
   round.
-- **Configuration.** Everything comes from the stack's env file: the aggregation interval,
-  and `BENCH_API_URL`/`BENCH_PROMETHEUS_URL`, the defaults of `--host` and `--prometheus`.
+- **Configuration.** The stack's env file gives `BENCH_API_URL`/`BENCH_PROMETHEUS_URL`, the
+  defaults of `--host` and `--prometheus`, and the timer interval recorded in the manifest.
+  The round limit lives in each model version, seeded from `FED_ROUND_LIMIT`, so changing
+  it means reseeding. A round of limit L needs at least L distinct active users, since a
+  user contributes once per round.
 - **Several gateways.** `--host` takes a comma-separated list. Without a load balancer in
   front, each user sends all its requests to one gateway, picked by its user number modulo
   the number of gateways, so the load splits evenly at every stage. The setup requests
@@ -46,22 +55,27 @@ database checks to `checks.json` and resets the stack.
 - **Users.** Each Locust user is a seeded `test_N` account that owns a device. With
   several Locust processes, user numbers are interleaved by process index
   (`--user-stride`), so the run needs `test_1` up to roughly the highest stage count
-  plus `processes` (or `--workers` for a Locust master with remote workers). Seed more with `make prod-db-seed` and `--test-users N`. Users past
-  `test_15` share a password but still pay a full argon2 verify, so keep `--spawn-rate`
-  low.
+  plus `processes` (or `--workers` for a Locust master with remote workers). Seed more with
+  `make prod-db-seed` (`prod/seed.sh` in the cloud). Users past `test_15` share a password
+  but still pay a full argon2 verify, which takes 64 MiB while it runs: a 2 vCPU gateway
+  verifies about 6 logins per second, and a faster `--spawn-rate` only queues verifies and
+  their memory.
 - **Stages.** `--stages` is a list of `<seconds>:<active users>`. Every user spawns and
   logs in during the first stage, which is therefore the login burst and must last at
   least `users / spawn-rate`; afterwards a user is active only while its `test_N` number
   is within the current stage's count, and parks otherwise. The Locust processes never
   talk to each other: they all receive the same `--schedule-start`, so they switch stages
   at the same moment. The export marks the stage boundaries on every plot.
-- **Iterations.** An active user repeats one iteration per aggregation interval, starting
-  at a fixed per-user offset so iterations spread over the interval: for every model it
+- **Iterations.** An active user repeats one iteration every `--period` seconds, starting
+  at a fixed per-user offset so iterations spread over the period: for every model it
   downloads the weights and both artifacts, then submits through the model's submission
-  type, polling quantize results until they are ready or 80% of the interval has passed.
-  Rate limits keep their real values, and each finished round clears them. A user whose
-  iteration starts before the previous round has finished therefore gets 429s on that
-  model, which is expected around round boundaries.
+  type, polling quantize results and secure sessions until they are done or 80% of the
+  period has passed. With U active users a round of limit L closes about every
+  `L × period / U` seconds. Rate limits keep their real values, and each finished round
+  clears them, so 429s only appear when a round takes about as long as the period. A
+  `409` saying the round is closed or full, or that the base weights are stale, is the
+  expected answer between a round closing and the next weights, and Locust counts it as a
+  success.
 - **Secure path without cryptography.** The server never unmasks individual vectors. It
   only checks lengths and that each session's mean stays finite and within `clip_bound`.
   So clients join the session of the last weights they downloaded with a random
@@ -76,10 +90,10 @@ database checks to `checks.json` and resets the stack.
   every member seeds a PRNG with the model key and session id, so they all agree on which
   sessions are dropped, and in those the member with the lowest user id never submits.
   The session then fails, on the sealed fail timeout or earlier if a round replaces its
-  weights, and its other members rejoin. The env files only shorten the timeout that seals
-  open sessions with enough members, so the only other failures are open sessions still
-  short of members when a round lands; their members rejoin on the new weights.
-  The checks report the failed share of sealed sessions against `--session-failure`.
+  weights, and its other members rejoin. The only other failures are sessions caught by a
+  round closing: still open or sealed when the new weights land, or summed after the round
+  already had its members. The checks report the failed share of sealed sessions against
+  `--session-failure`, and how many of them summed after their round closed.
   Open sessions short of members when the load stops are left open, and the settle and
   the checks ignore them.
 - **Request logs.** Every Locust worker process writes `requests_<index>.csv`. Names are

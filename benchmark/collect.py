@@ -10,9 +10,10 @@ import redis
 from sqlalchemy import func, select, text, update
 from sqlmodel import Session
 
-from common.celery_tasks import HEAVY_QUEUE, LIGHT_QUEUE
-from common.config import BROKER_URL, FED_AGG_INTERVAL_SECONDS, REDIS_URL, RESULTS_DIR
+from common.celery_tasks import CLEANUP_TASK, FED_DISPATCH_TASK, HEAVY_QUEUE, LIGHT_QUEUE
+from common.config import BROKER_URL, REDIS_URL, RESULTS_DIR
 from common.db import (
+    ClientDeltaSubmission,
     GlobalWeights,
     JobStatus,
     QuantizationJob,
@@ -21,29 +22,44 @@ from common.db import (
     SecureSessionMember,
     SecureSessionStatus,
     engine,
+    get_active_weights_ids,
+    get_latest_version,
     utcnow,
 )
+from worker.celery_app import app
 
 SECURE_SESSION_COLUMNS = ("id", "model_key", "status", "base_weights_id", "member_count",
                           "created_at", "sealed_at", "summing_at", "finished_at")
 UNFINISHED_JOBS = (JobStatus.pending, JobStatus.running)
 UNFINISHED_SESSIONS = (SecureSessionStatus.sealed, SecureSessionStatus.summing)
 SETTLE_POLL_SECONDS = 5
+SETTLE_TIMEOUT_SECONDS = 600
 TRUNCATED = ("quantizationresult", "quantizationjob", "clientdeltasubmission",
              "securepartial", "securesessionmember", "securesession", "authsession")
 KOMBU_BINDINGS = b"_kombu.binding."
 PASS, FAIL, SKIP = "pass", "fail", "skip"
 
 
-def idle(broker: redis.Redis) -> bool:
-    queued = sum(broker.llen(queue) for queue in (LIGHT_QUEUE, HEAVY_QUEUE)) + broker.hlen("unacked")
-    if queued:
+def drained(broker: redis.Redis) -> bool:
+    return not sum(broker.llen(queue) for queue in (LIGHT_QUEUE, HEAVY_QUEUE)) + broker.hlen("unacked")
+
+
+def quiet(broker: redis.Redis) -> bool:
+    abandon_sessions()
+    if not drained(broker):
         return False
     with Session(engine) as session:
         jobs = session.execute(select(func.count()).select_from(QuantizationJob)
                                .where(QuantizationJob.status.in_(UNFINISHED_JOBS))).scalar_one()  # type: ignore[attr-defined]
         sessions = session.execute(select(func.count()).select_from(SecureSession)
                                    .where(SecureSession.status.in_(UNFINISHED_SESSIONS))).scalar_one()  # type: ignore[attr-defined]
+    return jobs == 0 and sessions == 0
+
+
+def aggregated(broker: redis.Redis) -> bool:
+    if not drained(broker):
+        return False
+    with Session(engine) as session:
         partials = session.execute(
             select(func.count()).select_from(SecurePartial)
             .join(SecureSession, SecureSession.id == SecurePartial.session_id)  # type: ignore[arg-type]
@@ -51,7 +67,7 @@ def idle(broker: redis.Redis) -> bool:
                    .where(GlobalWeights.parent_weights_id == SecureSession.base_weights_id,
                           GlobalWeights.valid == True)
                    .exists())).scalar_one()
-    return jobs == 0 and sessions == 0 and partials == 0
+    return partials == 0
 
 
 def abandon_sessions() -> int:
@@ -69,15 +85,32 @@ def abandon_sessions() -> int:
     return count
 
 
-def settle(load_end: float, interval: float, timeout: float) -> bool:
-    broker = redis.from_url(BROKER_URL)
-    while True:
-        now = time.time()
-        if now >= load_end + interval and idle(broker):
-            return True
-        if now >= load_end + timeout:
+def wait(done, label: str) -> bool:
+    print(f"waiting for {label}")
+    deadline = time.time() + SETTLE_TIMEOUT_SECONDS
+    while not done():
+        if time.time() >= deadline:
+            print(f"timed out waiting for {label}")
             return False
         time.sleep(SETTLE_POLL_SECONDS)
+    return True
+
+
+def settle() -> bool:
+    broker = redis.from_url(BROKER_URL)
+    if not wait(lambda: quiet(broker), "the queues and secure sessions to settle"):
+        return False
+    app.send_task(FED_DISPATCH_TASK)
+    if not wait(lambda: aggregated(broker), "the last round of every model"):
+        return False
+    app.send_task(CLEANUP_TASK)
+    return wait(lambda: drained(broker), "the cleanup sweep")
+
+
+def round_limits(models: dict) -> dict[str, int]:
+    with Session(engine) as session:
+        return {key: version.round_limit for key in models
+                if (version := get_latest_version(session, key)) is not None}
 
 
 def save_secure_sessions(path: Path) -> pd.DataFrame:
@@ -112,7 +145,7 @@ def secure_sessions(manifest: dict, sessions: pd.DataFrame) -> tuple[str, str]:
     left_open = (sessions["status"] == "open").sum()
     created = pd.to_datetime(sessions["created_at"], utc=True, format="ISO8601")
     finished = pd.to_datetime(sessions["finished_at"], utc=True, format="ISO8601")
-    cutoff = pd.Timestamp(manifest["load_end"]) - pd.Timedelta(seconds=manifest["load"]["interval"])
+    cutoff = pd.Timestamp(manifest["load_end"]) - pd.Timedelta(seconds=manifest["load"]["period"])
     failed = sessions["status"] == "failed"
     orphaned = []
     for index, session in sessions[failed & (finished < cutoff)].iterrows():
@@ -128,9 +161,11 @@ def secure_sessions(manifest: dict, sessions: pd.DataFrame) -> tuple[str, str]:
     abandoned = failed & sealed & (finished >= pd.Timestamp(manifest["load_end"]))
     counted = sealed & ~abandoned
     stale = failed & counted & (replaced_at <= finished)
+    closed = failed & sessions["summing_at"].notna()
     detail = (f"{(sessions['status'] == 'summed').sum()}/{len(sessions)} summed, "
               f"{(failed & ~sealed).sum()} failed open, {(failed & counted).sum()}/{counted.sum()} failed sealed "
-              f"(expected ~{manifest['load']['session_failure']:.0%}, {stale.sum()} on replaced weights), "
+              f"(expected ~{manifest['load']['session_failure']:.0%}, {stale.sum()} on replaced weights, "
+              f"{closed.sum()} summed after their round closed), "
               f"{abandoned.sum()} failed after the load ended, {left_open} left open, {len(unfinished)} unfinished")
     if orphaned:
         detail += f", no fresh session after {', '.join(orphaned)}"
@@ -153,7 +188,54 @@ def pending_jobs(manifest: dict, sessions: pd.DataFrame) -> tuple[str, str]:
     return (FAIL if stuck else PASS), detail or "no quantization jobs"
 
 
+def round_sizes(manifest: dict, sessions: pd.DataFrame) -> tuple[str, str]:
+    with Session(engine) as session:
+        rows = session.execute(text(
+            "SELECT w.model_key, v.round_limit, "
+            "(SELECT count(*) FROM clientdeltasubmission d "
+            " WHERE d.base_weights_id = w.parent_weights_id AND d.valid) + "
+            "(SELECT coalesce(sum(s.member_count), 0) FROM securesession s "
+            " WHERE s.base_weights_id = w.parent_weights_id AND s.status = 'summed') "
+            "FROM globalweights w JOIN modelversion v ON v.id = w.version_id "
+            "WHERE w.parent_weights_id IS NOT NULL AND w.valid ORDER BY w.id")).all()
+    if not rows:
+        return SKIP, "no aggregated rounds"
+    rounds: dict[str, list[tuple[int, int]]] = {}
+    for key, limit, submissions in rows:
+        rounds.setdefault(key, []).append((limit, submissions))
+    parts, early = [], 0
+    for key, sizes in rounds.items():
+        full = [submissions - limit for limit, submissions in sizes if submissions >= limit]
+        below = sum(submissions < limit for limit, submissions in sizes[:-1])
+        early += below
+        overshoot = f" (+{min(full)}..+{max(full)})" if full else ""
+        parts.append(f"{key}: {len(sizes)} round(s) at limit {sizes[-1][0]}, {len(full)} full{overshoot}, "
+                     f"{below} closed early, last {sizes[-1][1]}")
+    return (FAIL if early else PASS), "; ".join(parts)
+
+
+def payloads_cleared(manifest: dict, sessions: pd.DataFrame) -> tuple[str, str]:
+    with Session(engine) as session:
+        active = get_active_weights_ids(session)
+        deltas = session.execute(
+            select(func.count()).select_from(ClientDeltaSubmission)
+            .where(ClientDeltaSubmission.deltas.is_not(None),  # type: ignore[union-attr]
+                   ClientDeltaSubmission.base_weights_id.not_in(active))).scalar_one()  # type: ignore[attr-defined]
+        masked = session.execute(
+            select(func.count()).select_from(SecureSessionMember)
+            .where(SecureSessionMember.masked.is_not(None),  # type: ignore[union-attr]
+                   SecureSessionMember.base_weights_id.not_in(active))).scalar_one()  # type: ignore[attr-defined]
+        partials = session.execute(
+            select(func.count()).select_from(SecurePartial)
+            .join(SecureSession, SecureSession.id == SecurePartial.session_id)  # type: ignore[arg-type]
+            .where(SecureSession.base_weights_id.not_in(active))).scalar_one()  # type: ignore[attr-defined]
+    detail = f"{deltas} delta(s), {masked} masked vector(s), {partials} partial(s) left on inactive weights"
+    return (FAIL if deltas or masked or partials else PASS), detail
+
+
 CHECKS = {
+    "round_sizes": round_sizes,
+    "payloads_cleared": payloads_cleared,
     "duplicate_rounds": duplicate_rounds,
     "secure_sessions": secure_sessions,
     "secure_partials": secure_partials,
@@ -195,12 +277,10 @@ def main() -> None:
     run_dir = RESULTS_DIR / "benchmark" / args.run_id
     manifest_path = run_dir / "manifest.json"
     manifest = json.loads(manifest_path.read_text())
-    interval = float(FED_AGG_INTERVAL_SECONDS)
+    manifest["round_limits"] = round_limits(manifest["models"])
     if manifest["load_end"] is not None:
         print(f"failed {abandon_sessions()} sealed session(s) still missing submissions")
-        print("waiting for the queues and secure sessions to settle")
-        load_end = pd.Timestamp(manifest["load_end"]).timestamp()
-        manifest["settled"] = settle(load_end, interval, 3 * interval)
+        manifest["settled"] = settle()
     else:
         manifest["settled"] = False
     manifest["end"] = datetime.now(UTC).isoformat()

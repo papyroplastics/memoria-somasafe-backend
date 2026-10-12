@@ -58,17 +58,23 @@ uses the `-inst` host names, publishes ports on every interface and leaves out t
 values, which Terraform appends to each host's copy: `POSTGRES_HOST`/`REDIS_HOST` with the
 managed services' addresses, `BENCH_API_URL` with every gateway of the topology
 (comma-separated), and `WEB_CONCURRENCY`/`WORKER_CONCURRENCY` with the host's vCPU count.
-`postgres.conf`, sized for a 4 GB host, is only used locally. Both compress the round
-cadence (aggregation every 60 s locally and 30 s in the cloud, short seal and fail timeouts,
-a 5 s or 2 s sweep) so a few minutes see several rounds, and set a long token TTL.
-Containers only pick up env changes when recreated.
+`postgres.conf`, sized for a 4 GB host, is only used locally. `local.env` compresses the
+round cadence (aggregation every 60 s, short seal and fail timeouts, a 5 s sweep) so a few
+minutes see several rounds. `cloud.env` keeps realistic deadlines instead: rounds close
+when they reach `FED_ROUND_LIMIT`, the timer is a 1 h backstop, and sessions seal after
+60 s and fail after 180 s open or 120 s sealed. Both set a long token TTL. Containers only
+pick up env changes when recreated.
 
 `DB_POOL_SIZE`/`DB_MAX_OVERFLOW` size the SQLAlchemy pool of every process (5 and 10 by
 default). The cloud uses 40 and 10, so a gateway process never waits on the pool before its
 40 threadpool threads are busy; Cloud SQL allows 1,000 connections.
 
-Host-side commands (`prod-db-seed`, `prod-collect`) load `local.env` with Postgres and Redis
-on `localhost`, which is either the local stack or the cloud tunnel.
+The `prod-*` make targets are for the local stack: the host-side ones (`prod-db-seed`,
+`prod-collect`) load `local.env` with Postgres and Redis on `localhost`. The cloud scripts
+(`init.sh`, `seed.sh`, `collect.sh`) load `cloud.env` through `host-env.sh` instead, with
+Postgres and Redis on the tunnel's `localhost` ports. Variables already set in the
+environment win over the file, so `FED_ROUND_LIMIT=2000 prod/seed.sh 5000` reseeds the round
+limit of every latest version without editing it.
 
 ## Cloud
 
@@ -92,13 +98,14 @@ goes back to `1x1`. Switching to a topology with more hosts can exceed the quota
 old VMs still exist: shrink or remove them first with `-target`, then apply the rest.
 
 Postgres and Redis are managed services, which don't count against that quota: Cloud SQL
-(Postgres 18, Enterprise Plus, `sql_tier`, `db-perf-optimized-N-8` by default) and Memorystore (Valkey 9.1, cluster mode
+(Postgres 18, Enterprise Plus, `sql_tier`, `db-perf-optimized-N-8` by default, on a
+`sql_disk_gb` disk, 100 GB by default) and Memorystore (Valkey 9.1, cluster mode
 disabled, `redis_node_type`), both zonal, without replicas, backups or persistence, and
 without auth or TLS. Each is reached through a Private Service Connect endpoint that a
 service connection policy creates in the subnet; its address is a Terraform output
 (`postgres_host`, `redis_host`). The Cloud SQL instance gets a generated name, since a
 deleted one can't be reused for a week. The managed services are left out of
-`max_run_hours` and keep running until `terraform destroy`.
+`max_run_hours` (8 by default) and keep running until `terraform destroy`.
 
 Each host's startup script (`terraform/templates/`) writes the compose files, `cloud.env`,
 a DNS search domain for containers and a few helpers. The `somasafe` unit then pulls the
@@ -127,6 +134,7 @@ read the registry and the key secret.
 terraform -chdir=prod/terraform apply -var topology=1x1
 prod/connect.sh       # own terminal: tunnels Postgres, Redis and Prometheus through client-1 until killed
 prod/init.sh 200      # builds and pushes the images, uploads the key, seeds 200 users
+prod/seed.sh 8000     # later: seed more users, or reseed FED_ROUND_LIMIT
 ```
 
 Per run:
@@ -137,9 +145,11 @@ sudo somasafe-compose --profile bench run --rm bench benchmark.run <topology> --
 prod/collect.sh <run_id>         # back on the local machine
 ```
 
-`collect.sh` pulls the run, runs `prod-collect` (settle, checks, reset), and copies the
-worker metrics and a Prometheus snapshot to `results/worker-metrics` and
-`results/benchmark/tsdb`.
+`collect.sh` pulls the run, runs `benchmark.collect` against the tunnel (settle, checks,
+reset), and copies the worker metrics and a Prometheus snapshot to `results/worker-metrics`
+and `results/benchmark/tsdb`. For runs longer than an SSH session, start the bench with
+`sudo systemd-run --unit <name> somasafe-compose --profile bench run --rm bench ...` and
+collect once the unit stops.
 
 `terraform destroy` ends the session; VMs also stop after `max_run_hours`. After changing a
 deployed file, `apply` updates the startup script in place, and `sudo

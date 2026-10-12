@@ -27,6 +27,7 @@ OCTET = {"Content-Type": "application/octet-stream"}
 PARK_SECONDS = 1.0
 GOLDEN = 0.6180339887
 OPEN = "Session is open"
+ROUND_OVER = ("Round is closed", "Round is full", "Stale base weights", "Session base weights are stale")
 
 log = logging.getLogger(__name__)
 served: list[dict] | None = None
@@ -39,8 +40,8 @@ def add_arguments(parser) -> None:
                        help="directory the requests_<n>.csv logs are written to")
     group.add_argument("--models", default="",
                        help="comma-separated model keys to exercise, every served model when empty")
-    group.add_argument("--interval", type=float, default=60.0,
-                       help="aggregation interval in seconds, iterations are paced at it")
+    group.add_argument("--period", type=float, default=300.0,
+                       help="seconds between a user's participations")
     group.add_argument("--user-stride", type=int, default=1,
                        help="Locust worker processes across all hosts, so test_N users never collide")
     group.add_argument("--session-failure", type=float, default=0.1,
@@ -134,6 +135,13 @@ def masked_body(weight_count: int) -> bytes:
     return (array("I", [1]) * weight_count).tobytes()
 
 
+def round_over(resp) -> bool:
+    try:
+        return resp.json().get("detail", "").startswith(ROUND_OVER)
+    except ValueError:
+        return False
+
+
 @dataclass(frozen=True)
 class Seat:
     model_key: str
@@ -165,7 +173,7 @@ class Client(FastHttpUser):
         self.options = self.environment.parsed_options
         self.username = f"test_{self.number}"
         self.password = self.username if self.number <= TEST_SUBJECTS else SHARED_PASSWORD
-        self.offset = (self.number * GOLDEN) % 1 * self.options.interval
+        self.offset = (self.number * GOLDEN) % 1 * self.options.period
         self.headers: dict[str, str] | None = None
         self.next_start: float | None = None
         self.weights: dict[str, int] = {}
@@ -182,9 +190,12 @@ class Client(FastHttpUser):
 
     def call(self, method: str, path: str, name: str, **kwargs):
         headers = (self.headers or {}) | kwargs.pop("headers", {})
-        resp = self.client.request(method, path, name=name, headers=headers, **kwargs)
-        if resp.status_code == 401:
-            self.headers = None
+        with self.client.request(method, path, name=name, headers=headers, catch_response=True,
+                                 **kwargs) as resp:
+            if resp.status_code == 409 and round_over(resp):
+                resp.success()
+            if resp.status_code == 401:
+                self.headers = None
         return resp
 
     def models(self) -> list[dict]:
@@ -213,7 +224,7 @@ class Client(FastHttpUser):
         if started < self.next_start:
             return
         lag = started - self.next_start
-        self.next_start = started + self.options.interval
+        self.next_start = started + self.options.period
         events.request.fire(request_type="LAG", name=SCHEDULE_LAG, response_time=lag * 1000,
                             response_length=0, response=None, context={}, exception=None,
                             start_time=started, url="")
@@ -231,7 +242,7 @@ class Client(FastHttpUser):
                 sessions.extend([held] if held else self.join(key, self.weights.get(key)))
             elif weights_id is not None:
                 jobs.extend(self.submit(key, kind, weights_id, model["weight_count"]))
-        self.settle(jobs, sessions, started + self.options.interval * POLL_WINDOW)
+        self.settle(jobs, sessions, started + self.options.period * POLL_WINDOW)
 
     def download(self, key: str) -> int | None:
         resp = self.call("GET", f"/model/weights/{key}", "weights")

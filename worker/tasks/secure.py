@@ -29,6 +29,7 @@ from common.db import (
     utcnow,
 )
 from common.ratelimit import clear_user_limits
+from common.redis import client as redis_client
 from worker.celery_app import app
 from worker.compute import (
     Action,
@@ -49,6 +50,7 @@ POLICY = SweepPolicy(
     sealed_fail_timeout=SECURE_SESSION_SEALED_FAIL_TIMEOUT_SECONDS,
     summing_timeout=WORKER_REAP_AFTER_SECONDS,
 )
+DISPATCH_TTL_SECONDS = 60
 
 
 class SecureSumStage(StrEnum):
@@ -226,4 +228,5 @@ def secure_session_sweep() -> None:
             clear_user_limits(action.model_key, cleared)
 
     for session_id in dispatch:
-        secure_session_sum.delay(session_id)
+        if redis_client.set(f"secure:sum-dispatched:{session_id}", 1, nx=True, ex=DISPATCH_TTL_SECONDS):
+            secure_session_sum.delay(session_id)

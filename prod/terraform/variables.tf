@@ -13,7 +13,7 @@ variable "subnet_cidr" {
 }
 
 variable "max_run_hours" {
-  default = 6
+  default = 8
 }
 
 variable "tag" {
@@ -22,6 +22,10 @@ variable "tag" {
 
 variable "sql_tier" {
   default = "db-perf-optimized-N-8"
+}
+
+variable "sql_disk_gb" {
+  default = 100
 }
 
 variable "redis_node_type" {

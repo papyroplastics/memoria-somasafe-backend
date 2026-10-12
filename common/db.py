@@ -320,6 +320,7 @@ def get_latest_version(session: Session, key: str) -> ModelVersion | None:
         select(ModelVersion)
         .where(ModelVersion.model_key == key)
         .order_by(ModelVersion.version.desc())  # type: ignore[attr-defined]
+        .limit(1)
     ).first()
 
 
@@ -331,6 +332,7 @@ def get_version_weights(session: Session, version_id: int) -> GlobalWeights | No
         .where(GlobalWeights.version_id == version_id,
                GlobalWeights.valid == True)  # noqa: E712 — SQL expression
         .order_by(GlobalWeights.created_at.desc())  # type: ignore[attr-defined]
+        .limit(1)
     ).first()
 
 
@@ -414,5 +416,5 @@ def get_firmware(session: Session, interface_version: int,
 def user_owns_device(session: Session, user_id: int) -> bool:
     """True if the user has attested ownership of at least one device."""
     return session.exec(
-        select(Device).where(Device.owner_id == user_id)
+        select(Device).where(Device.owner_id == user_id).limit(1)
     ).first() is not None
