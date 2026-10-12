@@ -15,6 +15,7 @@ from ml.model_list import MODELS
 from ml.sources.common import DataSource
 from ml.sources.dalia import ANOMALY_KINDS, BVP_RATE, CLEAN
 from ml.saving import load_weights, weights_path
+from ..common.plots import KIND_NAMES
 from ..common.reports import get_report_dir, write_yaml
 
 KINDS = (CLEAN, *ANOMALY_KINDS)
@@ -74,22 +75,22 @@ if __name__ == "__main__":
 
     fig_in, axs_in = plt.subplots(len(KINDS), 1, sharex=True, figsize=(8, 2 * len(KINDS)))
     fig_rec, axs_rec = plt.subplots(len(KINDS), 1, sharex=True, figsize=(8, 2 * len(KINDS)))
-    fig_in.suptitle(f'{sid} window {window_idx} — BVP, z-scored on {sid}')
-    fig_rec.suptitle(f'{sid} window {window_idx} — {args.model} reconstruction')
+    fig_in.suptitle(f'{sid} ventana {window_idx} — BVP, normalizada (z) en {sid}')
+    fig_rec.suptitle(f'{sid} ventana {window_idx} — reconstrucción de {args.model}')
 
     for i, (ax_in, ax_rec, kind) in enumerate(zip(axs_in, axs_rec, KINDS)):
         bvp = views[kind][:, 0]
         recon = recons[i]
 
         ax_in.plot(t, bvp)
-        ax_in.set_ylabel(kind)
+        ax_in.set_ylabel(KIND_NAMES.get(kind, kind))
 
-        ax_rec.plot(t, bvp, alpha=0.4, label='input')
-        ax_rec.plot(t, recon, label='reconstruction')
-        ax_rec.set_ylabel(kind)
+        ax_rec.plot(t, bvp, alpha=0.4, label='entrada')
+        ax_rec.plot(t, recon, label='reconstrucción')
+        ax_rec.set_ylabel(KIND_NAMES.get(kind, kind))
 
-    axs_in[-1].set_xlabel('seconds')
-    axs_rec[-1].set_xlabel('seconds')
+    axs_in[-1].set_xlabel('segundos')
+    axs_rec[-1].set_xlabel('segundos')
     axs_rec[0].legend(loc='upper right')
 
     report_dir = get_report_dir(args.model)

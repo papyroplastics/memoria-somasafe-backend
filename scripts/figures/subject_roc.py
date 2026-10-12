@@ -47,7 +47,7 @@ if __name__ == "__main__":
 
     order = [sid for sid in clean if sid in mixed and sid in truth]
     highlight = {f'S{int(i)}' for i in args.highlight.split(',') if i.strip()}
-    mode = 'global' if args.global_f else 'per-subject'
+    mode = 'global' if args.global_f else 'por sujeto'
 
     fine = np.round(np.arange(0.0, 1.0 + 1e-9, args.step), 4)
     gthr = (np.quantile(np.concatenate([clean[sid] for sid in order]), 1.0 - fine)
@@ -66,20 +66,20 @@ if __name__ == "__main__":
 
     report_dir = get_report_dir(args.model, f'subject_roc/{args.dataset}')
     roc_grid(report_dir / 'roc_by_subject.png', order, curves, highlight,
-             'empirical clean FPR', 'recall',
-             f'{args.model} — per-subject ROC, {mode} threshold ({weights.name})')
+             'FPR limpia empírica', 'sensibilidad',
+             f'{args.model} — ROC por sujeto, umbral {mode} ({weights.name})')
 
     stack = np.vstack(recalls)
     mean, std = np.nanmean(stack, axis=0), np.nanstd(stack, axis=0)
     fig, ax = plt.subplots()
-    ax.plot(fine, mean, 'C0-', label='mean recall')
-    ax.fill_between(fine, mean - std, mean + std, alpha=0.2, color='C0', label='±1 std')
-    ax.plot([0, 1], [0, 1], 'k--', linewidth=1, label='random classifier')
+    ax.plot(fine, mean, 'C0-', label='sensibilidad media')
+    ax.fill_between(fine, mean - std, mean + std, alpha=0.2, color='C0', label='±1 desv. est.')
+    ax.plot([0, 1], [0, 1], 'k--', linewidth=1, label='clasificador aleatorio')
     ax.set_xlim(0, 1)
     ax.set_ylim(0, 1)
-    ax.set_xlabel('expected FPR')
-    ax.set_ylabel('recall')
-    ax.set_title(f'{args.model} — recall vs. expected FPR, {mode} threshold, '
+    ax.set_xlabel('FPR esperada')
+    ax.set_ylabel('sensibilidad')
+    ax.set_title(f'{args.model} — sensibilidad vs. FPR esperada, umbral {mode}, '
                  f'mean ± std over {len(order)} subjects')
     ax.legend()
     fig.savefig(report_dir / 'roc_aggregate.png')

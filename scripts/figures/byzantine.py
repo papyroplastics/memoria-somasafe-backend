@@ -15,10 +15,13 @@ from ml.sources.common import holdout, pool
 from ml.model_list import MODELS
 from ml.models.common import Trainer
 from ml.training import History, average, evaluate, local_update, trimmed_mean
-from ..common.plots import line_plot
+from ..common.plots import line_plot, metric_name
 from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 
 Aggregator = Callable[[np.ndarray], np.ndarray]
+
+
+LABELS = {'plain mean': 'media simple', 'trimmed mean': 'media recortada'}
 
 
 def inject_malicious(deltas: np.ndarray, n_malicious: int, magnitude: float,
@@ -90,7 +93,7 @@ def main() -> None:
 
     counts = list(range(0, args.max_malicious + 1))
     rows: list[dict] = []
-    series: dict[str, list[float]] = {label: [] for label in aggregators}
+    series: dict[str, list[float]] = {LABELS[label]: [] for label in aggregators}
     for n in counts:
         values = {}
         for label, aggregate in aggregators.items():
@@ -99,7 +102,7 @@ def main() -> None:
                                      args.rounds, aggregate, n, args.attack_magnitude,
                                      np.random.default_rng(SEED + n))
             values[label] = history[-1][2][metric]
-            series[label].append(values[label])
+            series[LABELS[label]].append(values[label])
         rows.append({'malicious': n,
                      **{f"{label.replace(' ', '_')}_{metric}": v
                         for label, v in values.items()}})
@@ -108,8 +111,8 @@ def main() -> None:
 
     report_dir = get_report_dir(args.model, 'byzantine')
     line_plot(report_dir / 'byzantine.png', counts, series,
-              'malicious clients', f'final {metric}',
-              f'{args.model} — Byzantine robustness')
+              'clientes maliciosos', f'{metric_name(metric)} final',
+              f'{args.model} — robustez bizantina')
     write_metrics_csv(rows, report_dir, 'byzantine.csv')
     write_yaml(report_dir / 'byzantine.yaml', {
         'model': args.model,

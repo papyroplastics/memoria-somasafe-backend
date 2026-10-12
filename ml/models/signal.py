@@ -52,9 +52,9 @@ class AutoencoderTrainer(ReconstructionTrainer):
             recon = self.model.eval(*batch)['reconstruction']
             fig, axs = plt.subplots(1, 2)
             axs[0].plot(batch[0][0].numpy())
-            axs[0].set_title('Input window [BVP]')
+            axs[0].set_title('Ventana de entrada [BVP]')
             axs[1].plot(recon[0].numpy())
-            axs[1].set_title('Reconstruction [BVP]')
+            axs[1].set_title('Reconstrucción [BVP]')
             fig.savefig(result_dir / 'reconstruction.png')
             print(f"saved reconstruction plot to {result_dir / 'reconstruction.png'}")
             break

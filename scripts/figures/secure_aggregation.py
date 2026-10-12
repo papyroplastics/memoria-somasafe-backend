@@ -14,7 +14,7 @@ from common.config import DATASETS_DIR, SEED
 from ml.model_list import MODELS
 from ml.sources.common import pool
 from ml.training import ATTACKS, Attack, SecureConfig, secure_loop
-from ..common.plots import line_plot
+from ..common.plots import line_plot, metric_name
 from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 
 PLAIN = SecureConfig(secure=False, trim=0.0, clip=math.inf)
@@ -28,6 +28,19 @@ SWEEPS = {
     'participants': ('clients_per_round', [10, 20, 50, 100]),
 }
 EXPERIMENTS = ['convergence', *SWEEPS, 'byzantine']
+
+LABELS = {'plain mean': 'media simple', 'dense trimmed mean': 'media recortada densa',
+          'secure sessions': 'sesiones seguras', 'secure (random)': 'segura (aleatorio)',
+          'secure (spread)': 'segura (dispersos)', 'secure (clustered)': 'segura (agrupados)'}
+DATASETS = {'mnist-iid-100': 'MNIST IID, 100 clientes',
+            'mnist-noniid-100': 'MNIST no-IID, 100 clientes'}
+FIELDS = {'session_size': 'tamaño de sesión', 'trim': 'razón de recorte',
+          'clip': 'cota de recorte B', 'clients_per_round': 'clientes por ronda'}
+ATTACK_NAMES = {'sign-flip': 'inversión de signo', 'noise': 'ruido', 'push': 'empuje a ±B'}
+
+
+def labeled(series: dict) -> dict:
+    return {LABELS.get(k, DATASETS.get(k, k)): v for k, v in series.items()}
 
 
 class Runner:
@@ -80,8 +93,9 @@ def run_convergence(runner: Runner, args, report_dir):
                                           runner.secure),
         }
         finals[dataset] = {label: values[-1] for label, values in series.items()}
-        line_plot(report_dir / f'convergence_{dataset}.png', rounds, series, 'global round',
-                  'accuracy', f'{runner.model} on {dataset} — aggregation rules')
+        line_plot(report_dir / f'convergence_{dataset}.png', rounds, labeled(series),
+                  'ronda global', metric_name('accuracy'),
+                  f'{runner.model}, {DATASETS.get(dataset, dataset)} — reglas de agregación')
     return {'final_accuracy': finals}
 
 
@@ -97,9 +111,9 @@ def run_sweep(name: str):
                 for v in values]
             baselines[dataset] = runner.run('convergence', dataset, 'dense trimmed mean',
                                             runner.dense)[-1]
-        line_plot(report_dir / f'{name}.png', values, series, field,
-                  f'accuracy after {args.rounds} rounds',
-                  f'{runner.model} — secure aggregation, {field}', logx=(name == 'clip'))
+        line_plot(report_dir / f'{name}.png', values, labeled(series), FIELDS[field],
+                  f'{metric_name("accuracy")} tras {args.rounds} rondas',
+                  f'{runner.model} — agregación segura, {FIELDS[field]}', logx=(name == 'clip'))
         return {'swept': field, 'values': values, 'final_accuracy': series,
                 'dense_trimmed_baseline': baselines}
 
@@ -125,9 +139,11 @@ def run_byzantine(runner: Runner, args, report_dir):
                                kind=kind, fraction=f)[-1]
                     for f in fractions]
             summary.setdefault(dataset, {})[kind] = series
-            line_plot(report_dir / f'byzantine_{kind}_{dataset}.png', fractions, series,
-                      'fraction of malicious clients', f'accuracy after {args.rounds} rounds',
-                      f'{runner.model} on {dataset} — {kind} attack')
+            line_plot(report_dir / f'byzantine_{kind}_{dataset}.png', fractions, labeled(series),
+                      'fracción de clientes maliciosos',
+                      f'{metric_name("accuracy")} tras {args.rounds} rondas',
+                      f'{runner.model}, {DATASETS.get(dataset, dataset)} — ataque de '
+                      f'{ATTACK_NAMES.get(kind, kind)}, B = {runner.secure.clip:g}')
     return {'fractions': fractions, 'attack_scale': args.attack_scale,
             'final_accuracy': summary}
 

@@ -13,7 +13,7 @@ from ml.model_list import MODELS
 from ml.saving import load_weights, weights_path
 from ml.sources.dalia import ANOMALY_KINDS, CLEAN, MIXED
 
-from ..common.plots import bar_plot
+from ..common.plots import KIND_NAMES, bar_plot
 from ..common.reports import get_report_dir, read_subject_split, write_metrics_csv, write_yaml
 from ..common.scoring import (
     calibrate_expected_fpr, mixed_truth, score_subjects, subject_thresholds, variant_sources,
@@ -100,13 +100,13 @@ if __name__ == "__main__":
 
     report_dir = get_report_dir(args.model, f'anomaly_kinds/{args.dataset}')
     bar_plot(report_dir / 'anomaly_kinds.png',
-             [row['kind'] for row in rows],
-             {'recall at the operating point': [row['recall'] for row in rows],
-              'AUC vs. clean windows': [row['auc'] for row in rows]},
-             'anomaly kind', 'rate',
-             f'{args.model} — detectability by anomaly kind (held-out subjects)',
-             hlines=[(clean_fpr, f'clean FPR {clean_fpr:.3f}'),
-                     (0.5, 'AUC 0.5 — no separation from clean')])
+             [KIND_NAMES.get(row['kind'], row['kind']) for row in rows],
+             {'sensibilidad en el punto de operación': [row['recall'] for row in rows],
+              'AUC vs. ventanas limpias': [row['auc'] for row in rows]},
+             'tipo de anomalía', 'tasa',
+             f'{args.model} — detectabilidad por tipo de anomalía (sujetos excluidos)',
+             hlines=[(clean_fpr, f'FPR limpia {clean_fpr:.3f}'),
+                     (0.5, 'AUC 0,5 — sin separación de lo limpio')])
 
     write_metrics_csv(rows, report_dir, 'anomaly_kinds.csv')
     write_yaml(report_dir / 'anomaly_kinds.yaml', {

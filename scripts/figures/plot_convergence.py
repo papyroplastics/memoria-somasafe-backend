@@ -7,7 +7,7 @@ drawn too, since both loops held out the same subjects and trained on the same r
 import argparse
 
 from ml.model_list import MODELS
-from ..common.plots import line_plot
+from ..common.plots import line_plot, metric_name
 from ..common.reports import (
     get_report_dir, loop_dir, read_history_csv, read_run, write_metrics_csv, write_yaml)
 
@@ -31,7 +31,7 @@ def plot_convergence(model: str, run: dict, values: list[float], tag: str | None
 
     report_dir = get_report_dir(model, loop_dir('federated', tag))
     line_plot(report_dir / 'convergence.png', rounds, {metric: values},
-              'global round', metric, f'{model} — federated convergence')
+              'ronda global', metric_name(metric), f'{model} — convergencia federada')
     write_metrics_csv([{'round': r, metric: v} for r, v in zip(rounds, values)],
                       report_dir, 'convergence.csv')
     write_yaml(report_dir / 'convergence.yaml', {
@@ -51,8 +51,8 @@ def plot_overlay(model: str, fed_run: dict, fed_values: list[float],
 
     report_dir = get_report_dir(model, loop_dir('centralized_vs_federated', tag))
     line_plot(report_dir / 'centralized_vs_federated.png', steps,
-              {'centralized': cen_values, 'federated': fed_values},
-              'global round / epoch', metric, f'{model} — centralized vs. federated')
+              {'centralizado': cen_values, 'federado': fed_values},
+              'ronda global / época', metric_name(metric), f'{model} — centralizado vs. federado')
     write_metrics_csv(
         [{'step': s,
           f'centralized_{metric}': cen_values[s - 1] if s <= len(cen_values) else '',

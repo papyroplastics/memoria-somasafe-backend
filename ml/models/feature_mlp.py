@@ -85,14 +85,14 @@ class FeatureMLPTrainer(Trainer):
             fn += int(tf.reduce_sum((1 - pred) * y))
 
         matrix = [[tn, fp], [fn, tp]]
-        labels = ['Normal', 'Anomaly']
+        labels = ['normal', 'anomalía']
 
         fig, ax = plt.subplots()
         im = ax.imshow(matrix, cmap='Blues')
         ax.set_xticks([0, 1])
         ax.set_yticks([0, 1])
-        ax.set_xticklabels([f'Pred {l}' for l in labels])
-        ax.set_yticklabels([f'True {l}' for l in labels])
+        ax.set_xticklabels([f'pred. {l}' for l in labels])
+        ax.set_yticklabels([f'real {l}' for l in labels])
         for i in range(2):
             for j in range(2):
                 ax.text(j, i, str(matrix[i][j]), ha='center', va='center', fontsize=12)

@@ -42,7 +42,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     thresholds_fn = global_thresholds if args.global_f else subject_thresholds
-    mode = 'global' if args.global_f else 'per-subject'
+    mode = 'global' if args.global_f else 'por sujeto'
 
     model = MODELS[args.model].model_cls()
     sources = variant_sources(model, args.dataset, DATASETS_DIR, variants=(CLEAN, MIXED))
@@ -84,21 +84,21 @@ if __name__ == "__main__":
     levels = [row['expected_fpr'] for row in sweep]
 
     line_plot(report_dir / 'calibration.png', levels,
-              {'recall (mixed set)': [row['recall'] for row in sweep],
-               'empirical clean FPR': [row['clean_fpr'] for row in sweep],
-               "Youden's J = recall - FPR": [row['youden_j'] for row in sweep]},
-              'expected FPR (calibrated clean false-positive rate)', 'rate',
-              f'{args.model} — detector calibration, {mode} threshold (held-out subjects)',
-              vline=(expected_fpr, f'selected expected FPR {expected_fpr:.4f}'))
+              {'sensibilidad (conjunto mixto)': [row['recall'] for row in sweep],
+               'FPR limpia empírica': [row['clean_fpr'] for row in sweep],
+               'J de Youden = sensibilidad - FPR': [row['youden_j'] for row in sweep]},
+              'FPR esperada (tasa de falsos positivos calibrada)', 'tasa',
+              f'{args.model} — calibración del detector, umbral {mode} (sujetos excluidos)',
+              vline=(expected_fpr, f'FPR esperada elegida {expected_fpr:.4f}'))
 
     roc_order = sorted(range(len(sweep)), key=lambda i: sweep[i]['clean_fpr'])
     line_plot(report_dir / 'roc.png',
               [sweep[i]['clean_fpr'] for i in roc_order],
-              {'recall': [sweep[i]['recall'] for i in roc_order]},
-              'empirical clean FPR', 'recall',
-              f'{args.model} — detector ROC, {mode} threshold (held-out subjects)',
+              {'sensibilidad': [sweep[i]['recall'] for i in roc_order]},
+              'FPR limpia empírica', 'sensibilidad',
+              f'{args.model} — ROC del detector, umbral {mode} (sujetos excluidos)',
               vline=(chosen['clean_fpr'],
-                     f"selected operating point (FPR={chosen['clean_fpr']:.4f})"),
+                     f"punto de operación elegido (FPR={chosen['clean_fpr']:.4f})"),
               diagonal=True)
 
     write_metrics_csv(sweep, report_dir, 'calibration.csv')

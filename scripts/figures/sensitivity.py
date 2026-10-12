@@ -12,7 +12,7 @@ from common.config import DATASETS_DIR, SEED
 from ml.sources.common import holdout, pool
 from ml.model_list import MODELS
 from ml.training import federated_loop
-from ..common.plots import bar_plot, line_plot
+from ..common.plots import bar_plot, line_plot, metric_name
 from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 
 
@@ -37,8 +37,8 @@ def sweep_participants(key, subjects, metric, args, report_dir):
         print(f"participants={k}: {metric}={v:.6f}")
 
     line_plot(report_dir / 'participants.png', counts, {metric: values},
-              'participating clients', f'final {metric}',
-              f'{key} — clients per round')
+              'clientes participantes', f'{metric_name(metric)} final',
+              f'{key} — clientes por ronda')
     write_metrics_csv(rows, report_dir, 'participants.csv')
     write_yaml(report_dir / 'participants.yaml', {
         'model': key,
@@ -62,8 +62,8 @@ def sweep_local_epochs(key, subjects, metric, args, report_dir):
         print(f"local_epochs={e}: {metric}={v:.6f}")
 
     line_plot(report_dir / 'local_epochs.png', epochs, {metric: values},
-              'local epochs per round', f'final {metric}',
-              f'{key} — local epochs')
+              'épocas locales por ronda', f'{metric_name(metric)} final',
+              f'{key} — épocas locales')
     write_metrics_csv(rows, report_dir, 'local_epochs.csv')
     write_yaml(report_dir / 'local_epochs.yaml', {
         'model': key,
@@ -87,8 +87,8 @@ def sweep_loso(key, subjects, metric, args, report_dir):
 
     mean, std = float(np.mean(values)), float(np.std(values))
     bar_plot(report_dir / 'loso.png', list(range(folds)), values,
-             'held-out subject (fold)', f'final {metric}',
-             f'{key} — leave-one-subject-out', mean_line=mean)
+             'sujeto excluido (pliegue)', f'{metric_name(metric)} final',
+             f'{key} — dejar un sujeto fuera', mean_line=mean)
     write_metrics_csv(rows, report_dir, 'loso.csv')
     write_yaml(report_dir / 'loso.yaml', {
         'model': key,

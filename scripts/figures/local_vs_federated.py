@@ -9,7 +9,7 @@ from ml.dataset_list import DATASETS
 from ml.model_list import MODELS
 from ml.sources.common import pool
 from ml.training import normal_loop
-from ..common.plots import bar_plot
+from ..common.plots import bar_plot, client_name, metric_name
 from ..common.reports import get_report_dir, read_run, write_metrics_csv, write_yaml
 
 
@@ -45,16 +45,16 @@ def main() -> None:
         print(f"{sid}: {metric}={value:.4f}")
 
     references = {}
-    for loop, label in (('federated', 'federated'), ('normal', 'centralized')):
+    for loop, label in (('federated', 'federado'), ('normal', 'centralizado')):
         try:
             references[label] = read_run(args.model, loop, args.tag)['final'][metric]
         except SystemExit as e:
             print(f"no {label} reference: {e}")
 
     report_dir = get_report_dir(args.model, 'local_vs_federated' + (f'_{args.tag}' if args.tag else ''))
-    bar_plot(report_dir / 'local_vs_federated.png', [r['client'] for r in rows],
-             [r[metric] for r in rows], 'client trained alone', metric,
-             f'{args.model} — local-only vs. federated',
+    bar_plot(report_dir / 'local_vs_federated.png', [client_name(r['client']) for r in rows],
+             [r[metric] for r in rows], 'cliente entrenado por separado', metric_name(metric),
+             f'{args.model} — solo local vs. federado',
              hlines=[(v, label) for label, v in references.items()])
     write_metrics_csv(rows, report_dir, 'local_vs_federated.csv')
     write_yaml(report_dir / 'local_vs_federated.yaml', {

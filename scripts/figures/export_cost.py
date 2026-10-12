@@ -63,9 +63,9 @@ def main() -> None:
     write_metrics_csv(rows, report_dir, 'export_cost.csv')
     names = [r['model'] for r in rows]
     bar_plot(report_dir / 'export_seconds.png', names, [r['seconds'] for r in rows],
-             'model', 'export wall time (s)', 'Artifact export time')
+             'modelo', 'tiempo de exportación (s)', 'Tiempo de exportación de artefactos')
     bar_plot(report_dir / 'export_peak_rss.png', names, [r['peak_rss_mib'] for r in rows],
-             'model', 'peak RSS (MiB)', 'Artifact export peak memory')
+             'modelo', 'RSS máximo (MiB)', 'Memoria máxima al exportar artefactos')
     write_yaml(report_dir / 'export_cost.yaml', {'timeout': args.timeout, 'cpus': os.cpu_count(),
                                                  'rows': rows})
 
