@@ -1,10 +1,9 @@
 from pathlib import Path
 
-import numpy as np
 import tensorflow as tf
 
 from ..layers import Dense, relu, softmax_cross_entropy
-from .common import BackpropModel, Trainer
+from .common import BackpropModel, ClassifierTrainer
 
 N_PIXELS = 784
 N_CLASSES = 10
@@ -59,28 +58,13 @@ class MnistMLPHeavy(MnistMLP):
                          hidden2=hidden2, **kwargs)
 
 
-class MnistMLPTrainer(Trainer):
+class MnistMLPTrainer(ClassifierTrainer):
 
-    primary_metric = 'accuracy'
     dataset_tensors = ['images', 'labels']
-    n_eval_inputs = 1
     training_key = 'mnist-iid'
     calibration_key = 'mnist-test'
+    eval_key = 'mnist-test'
 
-    def __init__(self, model: MnistMLP, data_root: Path):
-        super().__init__(model, data_root)
+    def __init__(self, model: MnistMLP, data_root: Path, training_key: str | None = None):
+        super().__init__(model, data_root, training_key)
         self.model: MnistMLP = model # type: ignore
-
-    def subject_arrays(self, sid):
-        labels = self.data.labels(sid)
-        assert labels is not None
-        return (self.data.datapoints(sid), labels)
-
-    def eval_metrics(self, datapoints, outputs):
-        correct, total = 0.0, 0.0
-        for (_, y), out in zip(datapoints, outputs):
-            pred = np.argmax(np.asarray(out['logits']), axis=-1)
-            truth = np.argmax(np.asarray(y), axis=-1)
-            correct += float(np.sum(pred == truth))
-            total += float(len(truth))
-        return {'accuracy': correct / total if total else 0.0}

@@ -33,6 +33,11 @@ class Adam(tf.Module):
         self.v = [tf.Variable(tf.zeros_like(v), trainable=False) for v in variables]
         self.step = tf.Variable(tf.constant(0.0), trainable=False)
 
+    def reset(self):
+        for slot in (*self.m, *self.v):
+            slot.assign(tf.zeros_like(slot))
+        self.step.assign(0.0)
+
     def apply(self, variables: Sequence[tf.Variable], grads: list):
         self.step.assign_add(1.0)
         t = self.step

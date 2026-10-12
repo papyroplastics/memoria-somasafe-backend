@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ml.sources.common import DataSource
-from ml.sources.covertype import CovertypeSource, prepare_covertype
+from ml.sources.covertype import TEST, CovertypeSource, prepare_covertype
 from ml.sources.dalia import (
     FEATURES, LOW_ACTIVITY, SIGNAL, VARIANTS, DaliaFeatureSource, DaliaSignalSource,
     prepare_ppg_dalia,
@@ -53,12 +53,13 @@ for _base in BASES.values():
                     cls(root, key=key, variant=variant, activities=activities),
             )
 
-DATASETS["mnist-iid"] = DatasetSpec(
-    key="mnist-iid", name="MNIST (IID shards)",
-    build=lambda root: MnistShardSource(root, key="mnist-iid", partition=IID))
-DATASETS["mnist-noniid"] = DatasetSpec(
-    key="mnist-noniid", name="MNIST (non-IID Dirichlet shards)",
-    build=lambda root: MnistShardSource(root, key="mnist-noniid", partition=NONIID))
+for _partition, _label in ((IID, "IID"), (NONIID, "non-IID Dirichlet")):
+    for _shards in (10, 100):
+        _key = f"mnist-{_partition}" + ("" if _shards == 10 else f"-{_shards}")
+        DATASETS[_key] = DatasetSpec(
+            key=_key, name=f"MNIST ({_shards} {_label} shards)",
+            build=lambda root, key=_key, partition=_partition, shards=_shards:
+                MnistShardSource(root, key=key, partition=partition, n_shards=shards))
 DATASETS["mnist-test"] = DatasetSpec(
     key="mnist-test", name="MNIST (test split)",
     build=lambda root: MnistTestSource(root, key="mnist-test"))
@@ -66,3 +67,6 @@ DATASETS["mnist-test"] = DatasetSpec(
 DATASETS["covertype-wilderness"] = DatasetSpec(
     key="covertype-wilderness", name="Covertype (wilderness-area shards)",
     build=lambda root: CovertypeSource(root, key="covertype-wilderness"))
+DATASETS["covertype-test"] = DatasetSpec(
+    key="covertype-test", name="Covertype (stratified test split)",
+    build=lambda root: CovertypeSource(root, key="covertype-test", split=TEST))

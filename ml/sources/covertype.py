@@ -23,6 +23,10 @@ QUANT_FILE = 'quant.npy'
 BINARY_FILE = 'binary_packed.npy'
 LABELS_FILE = 'labels.npy'
 
+TEST_FRACTION = 0.2
+TRAIN = 'train'
+TEST = 'test'
+
 
 class DatasetUnavailibleError(FileNotFoundError):
     def __init__(self, data_dir: str | Path):
@@ -60,9 +64,20 @@ def prepare_covertype(datasets_dir: Path) -> None:
     print(f"Covertype ready at {covertype_dir}: {len(labels)} rows")
 
 
+def stratified_test_mask(areas: np.ndarray, labels: np.ndarray, fraction: float,
+                         rng: np.random.Generator) -> np.ndarray:
+    mask = np.zeros(len(labels), dtype=bool)
+    for area in np.unique(areas):
+        for cls in np.unique(labels):
+            idx = np.where((areas == area) & (labels == cls))[0]
+            mask[rng.permutation(idx)[:round(len(idx) * fraction)]] = True
+    return mask
+
+
 class CovertypeSource(DataSource):
-    def __init__(self, data_root: Path, key: str):
+    def __init__(self, data_root: Path, key: str, split: str = TRAIN):
         self.key = key
+        self.split = split
         self.data_root = data_root
         self._features: np.ndarray | None = None
         self._labels: np.ndarray | None = None
@@ -84,16 +99,21 @@ class CovertypeSource(DataSource):
         self._features = np.concatenate([quant, binary], axis=1)
         self._labels = np.load(labels_path)
 
-        wilderness = binary[:, :N_WILDERNESS]
-        areas = np.argmax(wilderness, axis=1)
-        self._shards = [np.where(areas == i)[0] for i in range(N_WILDERNESS)]
+        areas = np.argmax(binary[:, :N_WILDERNESS], axis=1)
+        test = stratified_test_mask(areas, self._labels, TEST_FRACTION, np.random.default_rng(SEED))
+        if self.split == TEST:
+            self._shards = [np.where(test)[0]]
+        else:
+            self._shards = [np.where(~test & (areas == i))[0] for i in range(N_WILDERNESS)]
 
     def subject_ids(self) -> list[str]:
+        if self.split == TEST:
+            return [TEST]
         return [f'wilderness{i + 1}' for i in range(N_WILDERNESS)]
 
     def _shard(self, sid: str) -> np.ndarray:
         self._ensure_loaded()
-        return self._shards[int(sid[len('wilderness'):]) - 1]
+        return self._shards[0 if sid == TEST else int(sid[len('wilderness'):]) - 1]
 
     def datapoints(self, sid: str) -> np.ndarray:
         self._ensure_loaded()

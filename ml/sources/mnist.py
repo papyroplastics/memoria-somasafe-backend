@@ -59,17 +59,19 @@ def dirichlet_partition(labels: np.ndarray, n_shards: int, alpha: float,
         splits = (np.cumsum(proportions) * len(idx)).astype(int)[:-1]
         for shard, part in zip(shards, np.split(idx, splits)):
             shard.extend(part.tolist())
-    return [np.array(shard, dtype=np.int64) for shard in shards]
+    return [rng.permutation(np.array(shard, dtype=np.int64)) for shard in shards]
 
 
 class MnistShardSource(DataSource):
-    def __init__(self, data_root: Path, key: str, partition: str, alpha: float = DIRICHLET_ALPHA):
+    def __init__(self, data_root: Path, key: str, partition: str, n_shards: int = N_SHARDS,
+                 alpha: float = DIRICHLET_ALPHA):
         if partition not in PARTITIONS:
             raise ValueError(f"unknown partition {partition!r}, expected one of {PARTITIONS}")
 
         self.key = key
         self.data_root = data_root
         self.partition = partition
+        self.n_shards = n_shards
         self.alpha = alpha
         self._images: np.ndarray | None = None
         self._labels: np.ndarray | None = None
@@ -87,12 +89,12 @@ class MnistShardSource(DataSource):
         self._images = np.load(images_path)
         self._labels = np.load(labels_path)
 
-        rng = np.random.default_rng([SEED, PARTITIONS.index(self.partition)])
-        self._shards = (iid_partition(self._labels, N_SHARDS, rng) if self.partition == IID
-                        else dirichlet_partition(self._labels, N_SHARDS, self.alpha, rng))
+        rng = np.random.default_rng([SEED, PARTITIONS.index(self.partition), self.n_shards])
+        self._shards = (iid_partition(self._labels, self.n_shards, rng) if self.partition == IID
+                        else dirichlet_partition(self._labels, self.n_shards, self.alpha, rng))
 
     def subject_ids(self) -> list[str]:
-        return [f'shard{i}' for i in range(N_SHARDS)]
+        return [f'shard{i}' for i in range(self.n_shards)]
 
     def _shard(self, sid: str) -> np.ndarray:
         self._ensure_loaded()

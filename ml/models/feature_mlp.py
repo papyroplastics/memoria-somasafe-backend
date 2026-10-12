@@ -67,10 +67,11 @@ class FeatureMLPTrainer(Trainer):
         super().__init__(model, data_root)
         self.model: FeatureMLP = model # type: ignore
 
-    def subject_arrays(self, sid):
-        labels = self.data.labels(sid)
+    def subject_arrays(self, sid, source=None):
+        source = source or self.data
+        labels = source.labels(sid)
         assert labels is not None
-        return (self.data.datapoints(sid), labels.reshape(-1, 1))
+        return (source.datapoints(sid), labels.reshape(-1, 1))
 
     def report(self, result_dir, eval_dataset):
         import matplotlib.pyplot as plt

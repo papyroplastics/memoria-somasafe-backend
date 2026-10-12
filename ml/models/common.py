@@ -31,9 +31,7 @@ def arch_fingerprint(model: 'TrainableModel') -> str:
 
 
 class TrainableModel(tf.Module):
-    """Minimal LiteRT-trainable FL contract: the four signatures below and a flat float32
-    weight buffer over ``trainable_variables``. ``train`` need only mutate variables and
-    return a dict carrying ``loss``."""
+    """LiteRT-trainable FL contract: eval/train/save/restore over a flat float32 buffer."""
 
     eval: tf.types.experimental.PolymorphicFunction = unbound    # type: ignore
     train: tf.types.experimental.PolymorphicFunction = unbound   # type: ignore
@@ -57,6 +55,9 @@ class TrainableModel(tf.Module):
             merged = dst.numpy()
             merged[region] = src.numpy()[region]
             dst.assign(merged)
+
+    def reset_optimizer(self) -> None:
+        pass
 
     def _init_save_restore(self):
         self.weight_sizes = [
@@ -87,12 +88,13 @@ class TrainableModel(tf.Module):
 
 
 class BackpropModel(TrainableModel):
-    """Gradient-descent models: owns the Adam and the tape/apply step, so a subclass only
-    writes the forward pass and the loss."""
 
     def _init_optimizer(self, learning_rate: float, beta1: float, beta2: float,
                         epsilon: float):
         self.optimizer = Adam(self.trainable_variables, learning_rate, beta1, beta2, epsilon)
+
+    def reset_optimizer(self) -> None:
+        self.optimizer.reset()
 
     def _apply_step(self, loss_fn: Callable[[], tf.Tensor]):
         with tf.GradientTape() as tape:
@@ -103,7 +105,6 @@ class BackpropModel(TrainableModel):
 
 
 class TrainableAutoencoder(BackpropModel):
-    """Reconstructs its own input and scores a datapoint by the reconstruction error."""
 
     default_batch_size = 64
 
@@ -113,7 +114,6 @@ class TrainableAutoencoder(BackpropModel):
         self.input_shape = (self.batch_size, *input_shape)
 
     def _bind(self, learning_rate: float, beta1: float, beta2: float, epsilon: float):
-        """Bind train/eval/save/restore; call once all layers exist."""
         self._init_optimizer(learning_rate, beta1, beta2, epsilon)
         signature = [tf.TensorSpec(shape=self.input_shape, dtype=tf.float32)]
 
@@ -142,8 +142,6 @@ class TrainableAutoencoder(BackpropModel):
 
 
 class Trainer(ABC):
-    """The model-specific half of a training run: how to shape this model's datapoints,
-    how to score them, and how to feed the int8 converter."""
 
     model: TrainableModel
     primary_metric: str
@@ -151,17 +149,21 @@ class Trainer(ABC):
     n_eval_inputs: int
     training_key: str
     calibration_key: str | None = None
+    eval_key: str | None = None
     shuffle_buffer: int = 1000
     cache_batches: bool = True
     default_holdout: str = 'last:2'
 
-    def __init__(self, model: TrainableModel, data_root: Path):
+    def __init__(self, model: TrainableModel, data_root: Path, training_key: str | None = None):
         self.model = model
+        self.data_root = data_root
+        if training_key is not None:
+            self.training_key = training_key
         self.data: DataSource = DATASETS[self.training_key].build(data_root)
 
     @abstractmethod
-    def subject_arrays(self, sid: str) -> tuple[np.ndarray, ...]:
-        """One subject's datapoints, one array per entry of ``dataset_tensors``."""
+    def subject_arrays(self, sid: str, source: DataSource | None = None) -> tuple[np.ndarray, ...]:
+        """One subject's datapoints from ``source`` (default the training source)."""
 
     def calibration_arrays(self) -> tuple[np.ndarray, ...]:
         key = self.calibration_key or self.training_key
@@ -177,16 +179,21 @@ class Trainer(ABC):
         """Metrics for this model type from the aligned ``datapoints`` and eval ``outputs``."""
 
     def report(self, result_dir: Path, eval_dataset: tf.data.Dataset) -> None:
-        """Optional model-specific artifact."""
         pass
 
     def subject_ids(self) -> list[str]:
         return self.data.subject_ids()
 
-    def subject_datasets(self) -> list[tf.data.Dataset]:
-        return [batched(to_dataset(*self.subject_arrays(sid)), self.model.batch_size,
+    def subject_datasets(self, source: DataSource | None = None) -> list[tf.data.Dataset]:
+        source = source or self.data
+        return [batched(to_dataset(*self.subject_arrays(sid, source)), self.model.batch_size,
                         self.shuffle_buffer, self.cache_batches)
-                for sid in self.subject_ids()]
+                for sid in source.subject_ids()]
+
+    def eval_datasets(self) -> list[tf.data.Dataset]:
+        if self.eval_key is None:
+            return []
+        return self.subject_datasets(DATASETS[self.eval_key].build(self.data_root))
 
     def representative_dataset(self) -> tf.data.Dataset:
         names = self.dataset_tensors[:self.n_eval_inputs]
@@ -199,9 +206,32 @@ class ReconstructionTrainer(Trainer):
     primary_metric = 'recon_error'
     n_eval_inputs = 1
 
-    def subject_arrays(self, sid):
-        return (self.data.datapoints(sid),)
+    def subject_arrays(self, sid, source=None):
+        return ((source or self.data).datapoints(sid),)
 
     def eval_metrics(self, datapoints, outputs):
         errors = np.concatenate([np.asarray(o['error']).reshape(-1) for o in outputs])
         return {'recon_error': float(np.mean(errors))}
+
+
+class ClassifierTrainer(Trainer):
+
+    primary_metric = 'accuracy'
+    dataset_tensors = ['features', 'labels']
+    n_eval_inputs = 1
+    default_holdout = 'none'
+
+    def subject_arrays(self, sid, source=None):
+        source = source or self.data
+        labels = source.labels(sid)
+        assert labels is not None
+        return (source.datapoints(sid), labels)
+
+    def eval_metrics(self, datapoints, outputs):
+        correct, total = 0.0, 0.0
+        for (_, y), out in zip(datapoints, outputs):
+            pred = np.argmax(np.asarray(out['logits']), axis=-1)
+            truth = np.argmax(np.asarray(y), axis=-1)
+            correct += float(np.sum(pred == truth))
+            total += float(len(truth))
+        return {'accuracy': correct / total if total else 0.0}

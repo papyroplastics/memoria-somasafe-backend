@@ -14,7 +14,7 @@ from common.config import DATASETS_DIR, SEED
 from ml.sources.common import holdout, pool
 from ml.model_list import MODELS
 from ml.models.common import Trainer
-from ml.training import History, average, evaluate, train_epoch, trimmed_mean
+from ml.training import History, average, evaluate, local_update, trimmed_mean
 from ..common.plots import line_plot
 from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 
@@ -36,23 +36,19 @@ def byzantine_loop(trainer: Trainer, clients: list[tf.data.Dataset],
                    eval_dataset: tf.data.Dataset, local_epochs: int, rounds: int,
                    aggregate: Aggregator, n_malicious: int, magnitude: float,
                    rng: np.random.Generator) -> History:
-    """Runs one federated loop with malicious deltas injected each round before aggregation."""
     model = trainer.model
-    global_weights = model.save()['weights']
+    global_weights = np.asarray(model.save()['weights'])
 
     history: History = []
     for r in range(rounds):
         round_prefix = f"round={r + 1}/{rounds}"
-        base = np.asarray(global_weights)
+        base = global_weights
         client_deltas: list[np.ndarray] = []
         loss = 0.0
         for s, train_ds in enumerate(clients):
-            model.restore(tf.constant(global_weights))
-            for e in range(local_epochs):
-                prefix = (f"{round_prefix} subject={s + 1}/{len(clients)} "
-                          f"local={e + 1}/{local_epochs}")
-                loss = train_epoch(trainer, train_ds, prefix)
-            client_deltas.append(np.asarray(model.save()['weights']) - base)
+            delta, loss = local_update(trainer, base, train_ds, local_epochs,
+                                       f"{round_prefix} subject={s + 1}/{len(clients)}")
+            client_deltas.append(delta)
 
         deltas = inject_malicious(np.stack(client_deltas).astype(np.float32),
                                   n_malicious, magnitude, rng)

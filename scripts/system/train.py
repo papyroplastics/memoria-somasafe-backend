@@ -12,7 +12,8 @@ import tensorflow as tf
 from ml.sources.common import pool
 from ml.models.common import Trainer
 from ml.saving import load_weights, save_artifacts, weights_path
-from ml.training import normal_loop, federated_loop, History
+from ml.training import AGGREGATIONS, aggregator, normal_loop, federated_loop, History
+from ml.dataset_list import DATASETS
 from ml.model_list import BASE_MODELS, MODELS
 from common.config import MODELS_DIR, DATASETS_DIR, SEED
 from ..common.plots import plot_history
@@ -50,9 +51,8 @@ def parse_eval_selection(value: str, sids: list[str]) -> list[str]:
     return [sids[i] for i in idx]
 
 
-def run_loop(trainer: Trainer, loop: str, eval_ids: list[str],
-             steps: int, local_epochs: int
-             ) -> tuple[History, tf.data.Dataset, list[str], list[str]]:
+def run_loop(trainer: Trainer, args: argparse.Namespace, eval_ids: list[str]
+             ) -> tuple[History, tf.data.Dataset | None, list[str], list[str]]:
     datasets = trainer.subject_datasets()
     sids = trainer.subject_ids()
     held = set(eval_ids)
@@ -60,16 +60,18 @@ def run_loop(trainer: Trainer, loop: str, eval_ids: list[str],
     held_out = [ds for ds, sid in zip(datasets, sids) if sid in held]
     if not train_subjects:
         raise SystemExit("the eval selection leaves no training subjects")
-    eval_dataset = pool(held_out) if held_out else None
+    eval_sets = held_out or trainer.eval_datasets()
+    eval_dataset = pool(eval_sets) if eval_sets else None
 
-    if loop == 'normal':
-        history = normal_loop(trainer, pool(train_subjects), eval_dataset, steps)
+    if args.loop == 'normal':
+        history = normal_loop(trainer, pool(train_subjects), eval_dataset, args.epochs)
 
-    elif loop == 'federated':
-        history = federated_loop(trainer, train_subjects, eval_dataset, local_epochs, steps)
+    elif args.loop == 'federated':
+        history = federated_loop(trainer, train_subjects, eval_dataset, args.local_epochs,
+                                 args.epochs, aggregator(args.aggregation, args.trim))
 
     else:
-        raise Exception(f"Invalid loop type: {loop}")
+        raise Exception(f"Invalid loop type: {args.loop}")
 
     train_ids = [sid for sid in sids if sid not in held]
     return history, eval_dataset, train_ids, [sid for sid in sids if sid in held]
@@ -84,7 +86,9 @@ def train(model: str, args: argparse.Namespace) -> None:
 
     report_dir = get_report_dir(model, loop_dir(args.loop, args.tag))
 
-    trainer = spec.trainer_cls(spec.model_cls(batch_size=args.batch_size), data_dir)
+    trainer_kwargs = {'training_key': args.dataset} if args.dataset else {}
+    trainer = spec.trainer_cls(spec.model_cls(batch_size=args.batch_size), data_dir,
+                               **trainer_kwargs)
 
     if args.load_weights:
         source = weights_path(result_dir, args.tag)
@@ -95,8 +99,7 @@ def train(model: str, args: argparse.Namespace) -> None:
 
     selection = args.eval_subjects if args.eval_subjects is not None else trainer.default_holdout
     eval_ids = parse_eval_selection(selection, trainer.subject_ids())
-    history, eval_dataset, train_ids, held_ids = run_loop(
-        trainer, args.loop, eval_ids, args.epochs, args.local_epochs)
+    history, eval_dataset, train_ids, held_ids = run_loop(trainer, args, eval_ids)
 
     batch_size = trainer.model.batch_size
 
@@ -120,9 +123,12 @@ def train(model: str, args: argparse.Namespace) -> None:
         'epochs': args.epochs,
         'step_unit': 'round' if args.loop == 'federated' else 'epoch',
         'local_epochs': args.local_epochs if args.loop == 'federated' else None,
+        'aggregation': args.aggregation if args.loop == 'federated' else None,
+        'trim': args.trim if args.loop == 'federated' and args.aggregation == 'trimmed' else None,
         'clients': len(train_ids) if args.loop == 'federated' else None,
         'train_subjects': train_ids,
         'eval_subjects': held_ids,
+        'eval_dataset': None if held_ids else trainer.eval_key,
         'batch_size': batch_size,
         'dataset': trainer.training_key,
         'dataset_dir': args.dataset_dir,
@@ -145,6 +151,12 @@ if __name__ == "__main__":
                              "the trainer's own default_holdout")
     parser.add_argument('--epochs', type=int, default=5, help='Epochs for the normal loop')
     parser.add_argument('--local-epochs', type=int, default=2, help='Local epochs per round (federated)')
+    parser.add_argument('--aggregation', choices=AGGREGATIONS, default='weighted',
+                        help='How the federated loop reduces client deltas')
+    parser.add_argument('--trim', type=float, default=0.2,
+                        help='Trimmed mean fraction per side (--aggregation trimmed)')
+    parser.add_argument('--dataset', choices=sorted(DATASETS), default=None,
+                        help="Override the trainer's training dataset, e.g. mnist-noniid")
     parser.add_argument('--batch-size', type=int, default=None,
                         help='Override the model default batch size')
     parser.add_argument('--tag', default=None,

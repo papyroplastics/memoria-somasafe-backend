@@ -4,7 +4,7 @@ import numpy as np
 import tensorflow as tf
 
 from ..sources.covertype import N_CLASSES, N_FEATURES
-from .common import TrainableModel, Trainer
+from .common import ClassifierTrainer, TrainableModel
 
 COUNT_EPS = 1e-3
 VAR_SMOOTHING = 1e-3
@@ -63,28 +63,11 @@ class CovertypeNB(TrainableModel):
         return {'loss': loss}
 
 
-class CovertypeNBTrainer(Trainer):
+class CovertypeNBTrainer(ClassifierTrainer):
 
-    primary_metric = 'accuracy'
-    dataset_tensors = ['features', 'labels']
-    n_eval_inputs = 1
     training_key = 'covertype-wilderness'
-    default_holdout = 'last:1'
+    eval_key = 'covertype-test'
 
-    def __init__(self, model: CovertypeNB, data_root: Path):
-        super().__init__(model, data_root)
+    def __init__(self, model: CovertypeNB, data_root: Path, training_key: str | None = None):
+        super().__init__(model, data_root, training_key)
         self.model: CovertypeNB = model # type: ignore
-
-    def subject_arrays(self, sid):
-        labels = self.data.labels(sid)
-        assert labels is not None
-        return (self.data.datapoints(sid), labels)
-
-    def eval_metrics(self, datapoints, outputs):
-        correct, total = 0.0, 0.0
-        for (_, y), out in zip(datapoints, outputs):
-            pred = np.argmax(np.asarray(out['logits']), axis=-1)
-            truth = np.argmax(np.asarray(y), axis=-1)
-            correct += float(np.sum(pred == truth))
-            total += float(len(truth))
-        return {'accuracy': correct / total if total else 0.0}

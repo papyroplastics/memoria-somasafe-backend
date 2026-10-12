@@ -25,11 +25,11 @@ def load_curve(model: str, loop: str, tag: str | None = None) -> tuple[dict, lis
     return run, [row[metric] for row in history]
 
 
-def plot_convergence(model: str, run: dict, values: list[float]) -> None:
+def plot_convergence(model: str, run: dict, values: list[float], tag: str | None) -> None:
     metric = run['metric']
     rounds = list(range(1, len(values) + 1))
 
-    report_dir = get_report_dir(model, 'federated')
+    report_dir = get_report_dir(model, loop_dir('federated', tag))
     line_plot(report_dir / 'convergence.png', rounds, {metric: values},
               'global round', metric, f'{model} — federated convergence')
     write_metrics_csv([{'round': r, metric: v} for r, v in zip(rounds, values)],
@@ -45,11 +45,11 @@ def plot_convergence(model: str, run: dict, values: list[float]) -> None:
 
 
 def plot_overlay(model: str, fed_run: dict, fed_values: list[float],
-                 cen_run: dict, cen_values: list[float]) -> None:
+                 cen_run: dict, cen_values: list[float], tag: str | None) -> None:
     metric = fed_run['metric']
     steps = list(range(1, max(len(cen_values), len(fed_values)) + 1))
 
-    report_dir = get_report_dir(model, 'centralized_vs_federated')
+    report_dir = get_report_dir(model, loop_dir('centralized_vs_federated', tag))
     line_plot(report_dir / 'centralized_vs_federated.png', steps,
               {'centralized': cen_values, 'federated': fed_values},
               'global round / epoch', metric, f'{model} — centralized vs. federated')
@@ -92,14 +92,14 @@ def main() -> None:
     args = parser.parse_args()
 
     fed_run, fed_values = load_curve(args.model, 'federated', args.tag)
-    plot_convergence(args.model, fed_run, fed_values)
+    plot_convergence(args.model, fed_run, fed_values, args.tag)
 
     if args.skip_overlay:
         return
 
     cen_run, cen_values = load_curve(args.model, 'normal', args.tag)
     check_comparable(fed_run, cen_run)
-    plot_overlay(args.model, fed_run, fed_values, cen_run, cen_values)
+    plot_overlay(args.model, fed_run, fed_values, cen_run, cen_values, args.tag)
 
 
 if __name__ == "__main__":
