@@ -13,6 +13,9 @@ from ..common.plots import bar_plot, client_name, metric_name
 from ..common.reports import get_report_dir, read_run, write_metrics_csv, write_yaml
 
 
+LABELS = {'federated': 'federado', 'centralized': 'centralizado'}
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -45,7 +48,7 @@ def main() -> None:
         print(f"{sid}: {metric}={value:.4f}")
 
     references = {}
-    for loop, label in (('federated', 'federado'), ('normal', 'centralizado')):
+    for loop, label in (('federated', 'federated'), ('normal', 'centralized')):
         try:
             references[label] = read_run(args.model, loop, args.tag)['final'][metric]
         except SystemExit as e:
@@ -55,7 +58,7 @@ def main() -> None:
     bar_plot(report_dir / 'local_vs_federated.png', [client_name(r['client']) for r in rows],
              [r[metric] for r in rows], 'cliente entrenado por separado', metric_name(metric),
              f'{args.model} — solo local vs. federado',
-             hlines=[(v, label) for label, v in references.items()])
+             hlines=[(v, LABELS[label]) for label, v in references.items()])
     write_metrics_csv(rows, report_dir, 'local_vs_federated.csv')
     write_yaml(report_dir / 'local_vs_federated.yaml', {
         'model': args.model,

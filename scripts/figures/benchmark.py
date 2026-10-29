@@ -114,24 +114,26 @@ def topology_scaling(out: Path) -> None:
     series = [("1×1 (4 vCPU)", "20261011-021128-1x1-light-secure", BLUE),
               ("2×1 (8 vCPU)", "20261011-024910-2x1-light-secure", ORANGE),
               ("4×1 (8 vCPU)", "20261011-031434-4x1-light-secure", AQUA)]
-    fig, (rate, latency) = plt.subplots(1, 2, figsize=(13, 4.8), layout="constrained")
+    fig, (rate, total, latency) = plt.subplots(1, 3, figsize=(18, 4.8), layout="constrained")
     for label, run, color in series:
         table = stage_table(run)
-        rate.plot(table.users, table.useful, "-o", color=color, label=label, markeredgecolor=SURFACE)
-        latency.plot(table.users, table.p95, "-o", color=color, label=label, markeredgecolor=SURFACE)
+        rate.plot(table.offered, table.useful, "-o", color=color, label=label, markeredgecolor=SURFACE)
+        total.plot(table.offered, table.rps, "-o", color=color, label=label, markeredgecolor=SURFACE)
+        latency.plot(table.offered, table.p95, "-o", color=color, label=label, markeredgecolor=SURFACE)
     rate.set_title("Throughput útil")
     rate.set_ylabel("solicitudes/s (sin 429)")
+    total.set_title("Throughput total")
+    total.set_ylabel("solicitudes/s (con 429 y errores)")
     latency.set_title("Latencia p95 del cliente")
     latency.set_yscale("log")
     latency.set_ylabel("ms (escala log.)")
     latency.yaxis.set_major_formatter(FuncFormatter(lambda value, _: es(value)))
-    for ax in (rate, latency):
-        ax.set_xlabel("usuarios simulados activos")
+    for ax in (rate, total, latency):
+        ax.set_xlabel("participaciones por segundo")
         es_axis(ax, "x")
     es_axis(rate)
+    es_axis(total)
     rate.legend(loc="upper left")
-    fig.suptitle("Campaña 1: el throughput escala con los núcleos de los gateways",
-                 x=0.01, ha="left", fontsize=14, fontweight="bold")
     save(fig, out, "escalado-topologias")
 
 
@@ -164,31 +166,28 @@ def export_memory(out: Path) -> None:
 
 
 def quantize_vs_secure(out: Path) -> None:
-    series = [("quantize (el worker cuantiza)", "20261011-023242-1x1-light-quantize", ORANGE),
-              ("secure (el worker solo suma)", "20261011-021128-1x1-light-secure", BLUE)]
-    fig, (worker, gateway) = plt.subplots(1, 2, figsize=(13, 4.8), layout="constrained", sharey=True)
-    for label, run, color in series:
+    series = [("quantize", "20261011-023242-1x1-light-quantize"),
+              ("secure", "20261011-021128-1x1-light-secure")]
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.8), layout="constrained", sharey=True)
+    for ax, (title, run) in zip(axes, series):
         meta = manifest(run)
+        rate = len(meta["models"]) / (meta["load"].get("period") or meta["load"]["interval"])
         cpu = prometheus(run, "host_cpu")
         rows = []
         for stage in meta["stages"][1:-1]:
             start = pd.Timestamp(stage["start"]).timestamp() + 20
             end = pd.Timestamp(stage["end"]).timestamp()
-            rows.append((stage["active"], host_cpu(cpu, "celery", start, end), host_cpu(cpu, "fastapi", start, end)))
+            rows.append((stage["active"] * rate, host_cpu(cpu, "celery", start, end), host_cpu(cpu, "fastapi", start, end)))
         table = pd.DataFrame(rows, columns=["users", "worker", "gateway"]).groupby("users").max().reset_index()
-        worker.plot(table.users, table.worker, "-o", color=color, label=label, markeredgecolor=SURFACE)
-        gateway.plot(table.users, table.gateway, "-o", color=color, label=label, markeredgecolor=SURFACE)
-    worker.set_title("CPU del worker")
-    gateway.set_title("CPU del gateway")
-    worker.set_ylabel("uso de CPU (%)")
-    for ax in (worker, gateway):
-        ax.set_xscale("log")
-        ax.set_xlabel("usuarios simulados activos (escala log.)")
-        ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _: es(value)))
+        ax.plot(table.users, table.worker, "-o", color=ORANGE, label="CPU del worker", markeredgecolor=SURFACE)
+        ax.plot(table.users, table.gateway, "-o", color=BLUE, label="CPU del gateway", markeredgecolor=SURFACE)
+        ax.set_title(title)
+        ax.set_xticks(table.users)
+        ax.set_xlabel("participaciones por segundo")
+        ax.xaxis.set_major_formatter(FuncFormatter(lambda value, _: es(value, 0 if value >= 10 else 1)))
         ax.set_ylim(0, 105)
-    worker.legend(loc="upper left")
-    fig.suptitle("Topología 1×1: quantize satura el worker con 60 usuarios; secure llega a 400 con el worker casi libre",
-                 x=0.01, ha="left", fontsize=14, fontweight="bold")
+    axes[0].set_ylabel("uso de CPU (%)")
+    axes[0].legend(loc="upper left")
     save(fig, out, "quantize-vs-secure")
 
 
@@ -223,7 +222,7 @@ def session_outcomes(out: Path) -> None:
 
 def limit_regression(out: Path) -> None:
     series = [("consulta sin LIMIT", "buggy-20261011-a", ORANGE), ("con LIMIT 1", "20261011-a-4x1-light-secure-count", BLUE)]
-    fig, (cpu_ax, latency_ax) = plt.subplots(2, 1, figsize=(11, 6.4), sharex=True, layout="constrained")
+    fig, (cpu_ax, sql_ax, latency_ax) = plt.subplots(3, 1, figsize=(11, 7.6), sharex=True, layout="constrained")
     for label, run, color in series:
         start = pd.Timestamp(manifest(run)["start"]).timestamp()
         end = pd.Timestamp(manifest(run)["load_end"]).timestamp()
@@ -231,6 +230,10 @@ def limit_regression(out: Path) -> None:
         cpu = cpu[cpu["instance"].str.startswith("fastapi") & (cpu.t <= end)].groupby("t")["value"].mean()
         cpu = cpu.rolling(30, min_periods=1).mean()
         cpu_ax.plot((cpu.index - start) / 60, cpu * 100, color=color, label=label)
+        sql = pd.read_csv(RUNS / run / "gcp_sql_cpu.csv")
+        sql = sql.assign(t=seconds(sql))
+        sql = sql[(sql.t >= start) & (sql.t <= end)]
+        sql_ax.plot((sql.t - start) / 60, sql["value"] * 100, color=color, label=label)
         log = requests(run)
         log = log[log["timestamp"] <= end]
         bins = ((log["timestamp"] - start) // 30 * 30 / 60)
@@ -239,14 +242,15 @@ def limit_regression(out: Path) -> None:
     cpu_ax.set_title("CPU media de los gateways")
     cpu_ax.set_ylabel("uso de CPU (%)")
     cpu_ax.set_ylim(0, 100)
+    sql_ax.set_title("CPU de Cloud SQL")
+    sql_ax.set_ylabel("uso de CPU (%)")
+    sql_ax.set_ylim(0, 100)
     latency_ax.set_title("Latencia p95 del cliente")
     latency_ax.set_ylabel("segundos")
     latency_ax.set_xlabel("minutos desde el inicio (misma carga constante: 4 000 usuarios)")
     latency_ax.set_xlim(left=4)
     latency_ax.set_ylim(0, 13)
     cpu_ax.legend(loc="upper left")
-    fig.suptitle("Una consulta que traía todos los snapshots: el costo crecía con cada ronda",
-                 x=0.01, ha="left", fontsize=14, fontweight="bold")
     save(fig, out, "costo-por-ronda")
 
 
@@ -409,8 +413,6 @@ def pool_deadlock(out: Path) -> None:
     conns.set_title("Conexiones a Postgres «idle in transaction» (sesiones retenidas)")
     conns.set_ylabel("conexiones")
     conns.set_xlabel("minutos desde el inicio (ráfaga de 4 000 inicios de sesión a 50/s)")
-    fig.suptitle("Interbloqueo entre el pool de conexiones y el threadpool del gateway",
-                 x=0.01, ha="left", fontsize=14, fontweight="bold")
     save(fig, out, "anexo-interbloqueo")
 
 

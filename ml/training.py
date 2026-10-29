@@ -118,10 +118,6 @@ def federated_loop(trainer: Trainer, subject_train_datasets: list[tf.data.Datase
     return history
 
 
-ATTACKS = ('sign-flip', 'noise', 'push')
-PLACEMENTS = ('spread', 'clustered', 'random')
-
-
 @dataclass(frozen=True)
 class SecureConfig:
     session_size: int = 10
@@ -132,36 +128,9 @@ class SecureConfig:
     secure: bool = True
 
 
-@dataclass(frozen=True)
-class Attack:
-    kind: str
-    fraction: float
-    placement: str = 'random'
-    scale: float = 10.0
-
-
-def malicious_delta(kind: str, honest: np.ndarray, clip: float, scale: float,
-                    rng: np.random.Generator) -> np.ndarray:
-    direction = honest.mean(axis=0)
-    if kind == 'sign-flip':
-        return -scale * direction
-    if kind == 'noise':
-        rms = float(np.sqrt(np.mean(np.square(honest)))) if honest.size else clip
-        return rng.normal(0.0, scale * rms, size=direction.shape).astype(np.float32)
-    if kind == 'push':
-        return -clip * np.sign(direction)
-    raise ValueError(f"unknown attack {kind!r}, expected one of {ATTACKS}")
-
-
-def arrival_order(honest: list[int], attackers: list[int], placement: str,
-                  session_size: int, rng: np.random.Generator) -> list[int]:
+def arrival_order(honest: list[int], attackers: list[int], session_size: int,
+                  rng: np.random.Generator) -> list[int]:
     honest = [int(i) for i in rng.permutation(honest)]
-    if placement == 'clustered':
-        return list(attackers) + honest
-    if placement == 'random':
-        return [int(i) for i in rng.permutation(honest + list(attackers))]
-    if placement != 'spread':
-        raise ValueError(f"unknown placement {placement!r}, expected one of {PLACEMENTS}")
     n_sessions = max(1, (len(honest) + len(attackers)) // session_size)
     slots: list[list[int]] = [[] for _ in range(n_sessions)]
     for j, a in enumerate(attackers):
@@ -181,13 +150,13 @@ def sessions_of(order: list[int], size: int, min_members: int) -> list[list[int]
 
 def secure_loop(trainer: Trainer, clients: list[tf.data.Dataset],
                 eval_dataset: tf.data.Dataset, local_epochs: int, rounds: int,
-                config: SecureConfig, attack: Attack | None = None,
+                config: SecureConfig, malicious_sessions: float = 0.0,
                 seed: int = 0) -> History:
     rng = np.random.default_rng(seed)
     model = trainer.model
     global_weights = np.asarray(model.save()['weights'])
 
-    n_attackers = round(attack.fraction * len(clients)) if attack else 0
+    n_attackers = round(malicious_sessions * len(clients) / config.session_size)
     malicious = set(int(i) for i in rng.permutation(len(clients))[:n_attackers])
 
     history: History = []
@@ -208,18 +177,19 @@ def secure_loop(trainer: Trainer, clients: list[tf.data.Dataset],
 
         honest = np.stack([deltas[i] for i in honest_ids]) if honest_ids else np.zeros((0, len(global_weights)), np.float32)
         clipped_fraction = float(np.mean(np.abs(honest) > config.clip)) if honest_ids else 0.0
-        for i in attacker_ids:
-            deltas[i] = malicious_delta(attack.kind, honest, config.clip, attack.scale, rng)
         for i in deltas:
             deltas[i] = np.clip(deltas[i], -config.clip, config.clip).astype(np.float32)
 
+        def garbage() -> np.ndarray:
+            return rng.uniform(-config.clip, config.clip, len(global_weights)).astype(np.float32)
+
         if config.secure:
-            placement = attack.placement if attack else 'random'
-            order = arrival_order(honest_ids, attacker_ids, placement, config.session_size, rng)
+            order = arrival_order(honest_ids, attacker_ids, config.session_size, rng)
             groups = sessions_of(order, config.session_size, config.min_members)
-            rows = [np.mean([deltas[i] for i in group], axis=0) for group in groups]
+            rows = [garbage() if malicious.intersection(group)
+                    else np.mean([deltas[i] for i in group], axis=0) for group in groups]
         else:
-            rows = [deltas[i] for i in participants]
+            rows = [deltas[i] if i in deltas else garbage() for i in participants]
 
         if rows:
             global_weights = (global_weights + trimmed_mean(rows, config.trim)

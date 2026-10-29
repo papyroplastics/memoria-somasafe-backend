@@ -42,7 +42,7 @@ class CovertypeNB(TrainableModel):
         total_count = tf.maximum(tf.reduce_sum(self.class_count), COUNT_EPS)
         global_mean = tf.reduce_sum(self.feature_sum, axis=0) / total_count
         global_var = tf.reduce_sum(self.feature_sumsq, axis=0) / total_count - tf.square(global_mean)
-        var = tf.maximum(raw_var, tf.maximum(VAR_SMOOTHING * tf.reduce_max(global_var), VAR_EPS))
+        var = tf.maximum(raw_var, 0.0) + tf.maximum(VAR_SMOOTHING * tf.reduce_max(global_var), VAR_EPS)
 
         log_prior = tf.math.log(count / tf.reduce_sum(count))
 

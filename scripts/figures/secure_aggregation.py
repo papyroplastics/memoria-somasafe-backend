@@ -13,7 +13,7 @@ import tensorflow as tf
 from common.config import DATASETS_DIR, SEED
 from ml.model_list import MODELS
 from ml.sources.common import pool
-from ml.training import ATTACKS, Attack, SecureConfig, secure_loop
+from ml.training import SecureConfig, secure_loop
 from ..common.plots import line_plot, metric_name
 from ..common.reports import get_report_dir, write_metrics_csv, write_yaml
 
@@ -30,13 +30,11 @@ SWEEPS = {
 EXPERIMENTS = ['convergence', *SWEEPS, 'byzantine']
 
 LABELS = {'plain mean': 'media simple', 'dense trimmed mean': 'media recortada densa',
-          'secure sessions': 'sesiones seguras', 'secure (random)': 'segura (aleatorio)',
-          'secure (spread)': 'segura (dispersos)', 'secure (clustered)': 'segura (agrupados)'}
+          'secure sessions': 'sesiones seguras'}
 DATASETS = {'mnist-iid-100': 'MNIST IID, 100 clientes',
             'mnist-noniid-100': 'MNIST no-IID, 100 clientes'}
 FIELDS = {'session_size': 'tamaño de sesión', 'trim': 'razón de recorte',
           'clip': 'cota de recorte B', 'clients_per_round': 'clientes por ronda'}
-ATTACK_NAMES = {'sign-flip': 'inversión de signo', 'noise': 'ruido', 'push': 'empuje a ±B'}
 
 
 def labeled(series: dict) -> dict:
@@ -65,14 +63,14 @@ class Runner:
         return spec.trainer_cls(spec.model_cls(), DATASETS_DIR, training_key=dataset)
 
     def run(self, experiment: str, dataset: str, label: str, config: SecureConfig,
-            attack: Attack | None = None, **fields) -> list[float]:
-        key = (dataset, config, attack)
+            malicious_sessions: float = 0.0, **fields) -> list[float]:
+        key = (dataset, config, malicious_sessions)
         if key not in self._memo:
             clients, eval_dataset = self.data(dataset)
             trainer = self.trainer(dataset)
-            print(f"\n=== {experiment} {dataset} {label} {config} {attack}", flush=True)
+            print(f"\n=== {experiment} {dataset} {label} {config} {malicious_sessions}", flush=True)
             history = secure_loop(trainer, clients, eval_dataset, self.args.local_epochs,
-                                  self.args.rounds, config, attack, SEED)
+                                  self.args.rounds, config, malicious_sessions, SEED)
             self._memo[key] = [h[2][trainer.primary_metric] for h in history]
         values = self._memo[key]
         for r, v in enumerate(values, start=1):
@@ -124,28 +122,17 @@ def run_byzantine(runner: Runner, args, report_dir):
     fractions = [0.0, *args.fractions]
     summary = {}
     for dataset in args.datasets:
-        for kind in args.attacks:
-            aggregators = {
-                'plain mean': PLAIN,
-                'dense trimmed mean': runner.dense,
-                **{f'secure ({p})': runner.secure for p in args.placements},
-            }
-            series = {}
-            for label, config in aggregators.items():
-                placement = label[len('secure ('):-1] if label.startswith('secure') else 'random'
-                series[label] = [
-                    runner.run('byzantine', dataset, label, config,
-                               Attack(kind, f, placement, args.attack_scale) if f else None,
-                               kind=kind, fraction=f)[-1]
-                    for f in fractions]
-            summary.setdefault(dataset, {})[kind] = series
-            line_plot(report_dir / f'byzantine_{kind}_{dataset}.png', fractions, labeled(series),
-                      'fracción de clientes maliciosos',
-                      f'{metric_name("accuracy")} tras {args.rounds} rondas',
-                      f'{runner.model}, {DATASETS.get(dataset, dataset)} — ataque de '
-                      f'{ATTACK_NAMES.get(kind, kind)}, B = {runner.secure.clip:g}')
-    return {'fractions': fractions, 'attack_scale': args.attack_scale,
-            'final_accuracy': summary}
+        aggregators = {'dense trimmed mean': runner.dense, 'secure sessions': runner.secure}
+        series = {label: [runner.run('byzantine', dataset, label, config, f, fraction=f)[-1]
+                          for f in fractions]
+                  for label, config in aggregators.items()}
+        summary[dataset] = series
+        line_plot(report_dir / f'byzantine_{dataset}.png', fractions, labeled(series),
+                  'fracción de sesiones con un cliente malicioso',
+                  f'{metric_name("accuracy")} tras {args.rounds} rondas',
+                  f'{runner.model}, {DATASETS.get(dataset, dataset)} — ataque uniforme en ±B, '
+                  f'B = {runner.secure.clip:g}')
+    return {'fractions': fractions, 'final_accuracy': summary}
 
 
 RUNNERS = {'convergence': run_convergence, **{name: run_sweep(name) for name in SWEEPS},
@@ -161,14 +148,8 @@ def main() -> None:
                         help='Training dataset keys; each shard is one client')
     parser.add_argument('--rounds', type=int, default=20, help='Global rounds')
     parser.add_argument('--local-epochs', type=int, default=1, help='Local epochs per round')
-    parser.add_argument('--attacks', nargs='+', choices=ATTACKS, default=list(ATTACKS),
-                        help='Attack kinds for the byzantine experiment')
-    parser.add_argument('--placements', nargs='+', default=['random', 'spread', 'clustered'],
-                        help='Attacker placements in sessions for the byzantine experiment')
-    parser.add_argument('--fractions', nargs='+', type=float, default=[0.05, 0.1, 0.2, 0.3],
-                        help='Malicious client fractions for the byzantine experiment')
-    parser.add_argument('--attack-scale', type=float, default=10.0,
-                        help='Sign-flip multiplier and noise std in honest RMS units')
+    parser.add_argument('--fractions', nargs='+', type=float, default=[0.1, 0.2, 0.3, 0.4, 0.5],
+                        help='Fractions of sessions holding one malicious client')
     parser.add_argument('--clip', type=float, default=None,
                         help='Override the clip bound of the dense and secure configs')
     parser.add_argument('--threads', type=int, default=0,

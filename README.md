@@ -91,19 +91,3 @@ Bootstrap a fresh database with `uv run -m scripts.system.seed_db` (`make db-see
 [`shared/docs/server-internals.md`](../shared/docs/server-internals.md) for `--reseed` and
 the test-user setup used by the headless federated scripts.
 
-## Environment
-
-Python `==3.13.*`, TensorFlow `2.21.*`, managed with `uv`. GPU is optional (`uv sync
---extra cuda`). Copy `example.env` to `.env` before running — there are no hardcoded
-defaults for DB/Redis credentials. For development only Postgres and Redis run in
-containers (`compose.yaml`, podman); the gateway and worker run on the host with `uv`
-(`make api-run`, `make worker-run`). The fully containerized stack is in
-[`prod/`](prod/README.md), configured by its own env files instead of `.env`, and the load tests against it in
-[`benchmark/`](benchmark/README.md).
-
-## Not yet implemented
-
-Sparse and differential-privacy submission formats are anticipated by the
-`submission_type` design (see
-[`shared/docs/submission-type.md`](../shared/docs/submission-type.md)) but not
-implemented.
